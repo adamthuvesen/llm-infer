@@ -26,19 +26,21 @@ Pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
 
 ```
 llm_infer/
-  model/        # Qwen loading, weights, tokenizer, config + the greedy decode loop  [Phase A]
-  kernels/      # AttentionBackend protocol + torch_naive reference                  [Phase A]
-  kv_cache/     # block allocator, block tables, page metadata                       [Phase B]
-  scheduler/    # prefill/decode admission, continuous batching                      [Phase B]
-  serving/      # request queue, sampler, streaming loop                             [Phase E]
-  benchmarks/   # naive HF vs llm-infer vs vLLM                                       [Phase D]
-tests/correctness/   # the HF-exact greedy oracle + committed golden fixtures
+  model/        # Qwen loading, weights, config + greedy decode + cached prefill/decode  [A,B]
+  kernels/      # AttentionBackend protocol, torch_naive reference, flash_attn_paged     [A,C]
+  kv_cache/     # block allocator, block tables, paged page store                        [B]
+  scheduler/    # prefill/decode admission, continuous batching                          [B]
+  serving/      # request queue, greedy sampler, continuous-batching decode loop         [B]
+  benchmarks/   # naive HF vs llm-infer vs vLLM                                          [Phase D]
+tests/correctness/   # the HF-exact greedy oracle + committed golden fixtures + the flash tie bar
 docs/                # scoping.md (source of truth for scope) + fixture-format spec
-scripts/             # golden generation script
+scripts/             # golden generation + the Modal A100 flash oracle harness
 ```
 
-Only `model/`, `kernels/`, and the oracle are implemented in Phase A. The other
-subpackages are empty stubs whose docstrings name the phase that fills them.
+Implemented: `model/`, `kernels/` (both backends), `kv_cache/`, `scheduler/`,
+`serving/` (the Phase B vertical-slice runner — streaming and an OpenAI-compatible
+surface remain Phase E), and the oracle. `benchmarks/` is still an empty stub whose
+docstring names the phase that fills it.
 
 ## The honesty bar (Phase A)
 
@@ -65,10 +67,13 @@ uv run ruff check            # lint (must be clean)
 uv run pytest tests/correctness -q   # the oracle (runs against committed goldens)
 ```
 
-Phase A is **CPU-runnable by design**: the oracle runs against small committed
-golden token-id fixtures and needs no GPU. Regenerating goldens loads the 3B model
-in fp32 on CPU — fine for a few short greedy generations. **Do not use a GPU or
-Modal in Phase A.**
+The CPU oracle is the local gate and is **CPU-runnable by design**: the
+`torch_naive` reference path runs against small committed golden token-id fixtures
+and needs no GPU. Regenerating goldens loads the 3B model in fp32 on CPU — fine for a
+few short greedy generations. The flash-attn backend is the **one** GPU-only path:
+flash-attn needs a CUDA build, so its oracle (`tests/correctness/test_flash_attn_paged.py`,
+auto-skipped off CUDA) runs on the target GPU via `scripts/modal_oracle.py`. Keep
+Modal runs short — the flash oracle is a few seconds on an A100.
 
 ## Conventions
 
