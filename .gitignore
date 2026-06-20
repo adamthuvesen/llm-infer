@@ -18,5 +18,8 @@ dist/
 *.bin
 .cache/
 
+# raw benchmark run artifacts (the curated result is folded into docs/benchmark.md)
+bench-results/
+
 # OS
 .DS_Store
