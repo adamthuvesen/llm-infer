@@ -6,19 +6,32 @@ the layer stack, and the decode loop — against HF greedy, not HF against itsel
 attention core is delegated to the pluggable backend so a later paged/flash kernel
 is a swap validated by the same oracle.
 
-Single request only (no batch dimension), full recompute over the whole sequence on
-every call. A KV-cache lives in Phase B; Phase A keeps the forward dead simple and
-leans on the oracle to prove it exact.
+Two decode paths share one layer stack:
+
+* :meth:`logits` — full recompute over the whole sequence, no cache. The Phase A
+  reference and the oracle's path; left bit-for-bit intact.
+* :meth:`prefill` / :meth:`decode_one` — the Phase B paged/cached path. Prefill writes
+  every prompt position's K/V into the paged store; each decode step computes only the
+  new token, appends its K/V, and attends against the gathered history through the
+  *same* ``torch_naive`` backend (gathered K/V, materialized softmax — no fast kernel).
+  RoPE positions advance **per request** (each request's own length), never a batch row.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
+from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+
+# The closure each decoder layer calls for its attention block: (x, prefix, layer) -> out.
+_AttentionFn = Callable[[torch.Tensor, str, int], torch.Tensor]
 
 
 class QwenModel:
@@ -73,7 +86,10 @@ class QwenModel:
 
     @torch.no_grad()
     def logits(self, token_ids: list[int]) -> torch.Tensor:
-        """Next-token logits for every position. Shape ``(seq_len, vocab_size)``."""
+        """Next-token logits for every position. Shape ``(seq_len, vocab_size)``.
+
+        Full recompute over the whole sequence — no cache. The Phase A reference path.
+        """
         if not token_ids:
             raise ValueError("token_ids must be non-empty")
         ids = torch.tensor(token_ids, dtype=torch.long)
@@ -81,23 +97,83 @@ class QwenModel:
 
         cos, sin = self._rope_tables(len(token_ids))
         for layer in range(self.num_layers):
-            hidden = self._decoder_layer(hidden, layer, cos, sin)
+            hidden = self._apply_decoder_layer(
+                hidden, layer, lambda x, p, _lyr: self._attention(x, p, cos, sin)
+            )
 
         hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
-        lm_head = (
-            self.w["model.embed_tokens.weight"]
-            if self.tie_word_embeddings
-            else self.w["lm_head.weight"]
-        )
-        return hidden @ lm_head.to(self.dtype).T
+        return hidden @ self._lm_head().T
 
-    def _decoder_layer(
-        self, hidden: torch.Tensor, layer: int, cos: torch.Tensor, sin: torch.Tensor
+    @torch.no_grad()
+    def prefill(
+        self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
     ) -> torch.Tensor:
+        """Cached prefill: run the prompt, store all K/V, return last-position logits.
+
+        Hidden states match :meth:`logits` bit-for-bit (the cache write is a side effect
+        that does not touch the values the backend sees); only the last row's logits are
+        formed, since greedy needs only the first generated token. Sets ``table.length``.
+        """
+        if not prompt_ids:
+            raise ValueError("prompt_ids must be non-empty")
+        seq_len = len(prompt_ids)
+        table.reserve(seq_len)
+        ids = torch.tensor(prompt_ids, dtype=torch.long)
+        hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
+
+        cos, sin = self._rope_tables(seq_len)
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._prefill_attention(x, p, cos, sin, lyr, cache, table),
+            )
+        table.length = seq_len
+
+        last = _rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
+        return (last @ self._lm_head().T)[-1]
+
+    @torch.no_grad()
+    def decode_one(self, cache: PagedKVCache, table: BlockTable, token_id: int) -> torch.Tensor:
+        """Cached decode of one token. Returns its next-token logits ``(vocab_size,)``.
+
+        The new token's RoPE position is ``table.length`` — the request's own running
+        length, never a batch-row index. Its K/V is appended to the paged store, then
+        the full history (including this token) is gathered and attended through the
+        backend. Advances ``table.length`` by one.
+        """
+        pos = table.length
+        table.reserve(1)
+        new_length = pos + 1
+        ids = torch.tensor([token_id], dtype=torch.long)
+        hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
+
+        cos, sin = self._rope_for_positions(torch.tensor([pos], dtype=torch.float32))
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._decode_attention(
+                    x, p, cos, sin, lyr, cache, table, pos, new_length
+                ),
+            )
+        table.length = new_length
+
+        hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+        return (hidden @ self._lm_head().T)[-1]
+
+    def _apply_decoder_layer(
+        self, hidden: torch.Tensor, layer: int, attention: _AttentionFn
+    ) -> torch.Tensor:
+        """One decoder block: pre-norm attention then pre-norm MLP, both with residuals.
+
+        The attention sub-block is supplied as a closure so the full-recompute and
+        cached paths share this wrapper while differing only in how attention is run.
+        """
         p = f"model.layers.{layer}."
         residual = hidden
         x = _rms_norm(hidden, self.w[p + "input_layernorm.weight"], self.rms_eps)
-        hidden = residual + self._attention(x, p, cos, sin)
+        hidden = residual + attention(x, p, layer)
 
         residual = hidden
         x = _rms_norm(hidden, self.w[p + "post_attention_layernorm.weight"], self.rms_eps)
@@ -106,29 +182,93 @@ class QwenModel:
     def _attention(
         self, x: torch.Tensor, p: str, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
-        seq_len = x.shape[0]
+        """Full-recompute attention over the whole sequence (Phase A path)."""
+        q, k, v = self._project_heads(x, p)
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+        k, v = self._expand_kv(k, v)
+        attn = self.backend.forward(q, k, v)
+        return self._output_proj(attn, p)
 
+    def _prefill_attention(
+        self,
+        x: torch.Tensor,
+        p: str,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        table: BlockTable,
+    ) -> torch.Tensor:
+        """Prefill attention: same math as :meth:`_attention`, plus a write of K/V to cache.
+
+        The just-computed K/V (positions ``0 .. L-1``) is exactly what attention needs
+        here, so it is used directly; writing it to the paged store seeds the decode
+        steps that follow.
+        """
+        q, k, v = self._project_heads(x, p)
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+        # Store pre-GQA K/V as (seq, num_kv_heads, head_dim) at positions 0..seq-1.
+        cache.write(table, layer, 0, k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous())
+        k, v = self._expand_kv(k, v)
+        attn = self.backend.forward(q, k, v)
+        return self._output_proj(attn, p)
+
+    def _decode_attention(
+        self,
+        x: torch.Tensor,
+        p: str,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        table: BlockTable,
+        pos: int,
+        length: int,
+    ) -> torch.Tensor:
+        """Decode attention: append the new token's K/V, gather history, attend.
+
+        ``x`` is one row (the new token). Its K/V is written at position ``pos``; the
+        gathered history covers positions ``0 .. length-1`` (``length == pos + 1``,
+        including this token), so the single query attends over the whole prefix.
+        """
+        q, k, v = self._project_heads(x, p)
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+        cache.write(
+            table, layer, pos, k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous()
+        )
+        k_hist, v_hist = cache.read(table, layer, length)  # (length, num_kv_heads, head_dim)
+        k_hist, v_hist = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
+        attn = self.backend.forward(q, k_hist, v_hist)
+        return self._output_proj(attn, p)
+
+    def _project_heads(
+        self, x: torch.Tensor, p: str
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Q/K/V projections reshaped to ``(heads, seq, head_dim)`` (KV keeps kv-head count)."""
+        seq_len = x.shape[0]
         q = self._linear(x, p + "self_attn.q_proj")
         k = self._linear(x, p + "self_attn.k_proj")
         v = self._linear(x, p + "self_attn.v_proj")
-
-        # (seq, heads, head_dim) -> (heads, seq, head_dim)
         q = q.view(seq_len, self.num_heads, self.head_dim).transpose(0, 1)
         k = k.view(seq_len, self.num_kv_heads, self.head_dim).transpose(0, 1)
         v = v.view(seq_len, self.num_kv_heads, self.head_dim).transpose(0, 1)
+        return q, k, v
 
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
-
-        # GQA: repeat each KV head to cover its group of query heads (done here so the
-        # backend only sees a uniform head count, per the AttentionBackend contract).
+    def _expand_kv(
+        self, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """GQA: repeat each KV head over its group of query heads (done before the backend)."""
         repeat = self.num_heads // self.num_kv_heads
-        k = k.repeat_interleave(repeat, dim=0)
-        v = v.repeat_interleave(repeat, dim=0)
+        return k.repeat_interleave(repeat, dim=0), v.repeat_interleave(repeat, dim=0)
 
-        attn = self.backend.forward(q, k, v)  # (heads, seq, head_dim)
-        attn = attn.transpose(0, 1).reshape(seq_len, self.num_heads * self.head_dim)
-        return self._linear(attn, p + "self_attn.o_proj")
+    def _output_proj(self, attn: torch.Tensor, p: str) -> torch.Tensor:
+        """Merge heads ``(heads, seq, head_dim)`` -> ``(seq, hidden)`` and apply o_proj."""
+        seq_len = attn.shape[1]
+        merged = attn.transpose(0, 1).reshape(seq_len, self.num_heads * self.head_dim)
+        return self._linear(merged, p + "self_attn.o_proj")
 
     def _mlp(self, x: torch.Tensor, p: str) -> torch.Tensor:
         gate = self._linear(x, p + "mlp.gate_proj")
@@ -148,13 +288,29 @@ class QwenModel:
             out = out + bias.to(d)
         return out
 
+    def _lm_head(self) -> torch.Tensor:
+        """The output-projection weight (tied to the embedding when configured)."""
+        weight = (
+            self.w["model.embed_tokens.weight"]
+            if self.tie_word_embeddings
+            else self.w["lm_head.weight"]
+        )
+        return weight.to(self.dtype)
+
     def _rope_tables(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Cos/sin tables for positions ``0 .. seq_len-1``. Shape ``(seq_len, head_dim)``."""
+        return self._rope_for_positions(torch.arange(seq_len, dtype=torch.float32))
+
+    def _rope_for_positions(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Cos/sin tables for arbitrary absolute positions. Shape ``(len(positions), head_dim)``.
+
+        Decode passes a single per-request position here so each request is rotated by
+        its own sequence length, not a batch-row index.
+        """
         half = self.head_dim // 2
         inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, half, dtype=torch.float32) / half))
-        pos = torch.arange(seq_len, dtype=torch.float32)
-        freqs = torch.outer(pos, inv_freq)  # (seq_len, half)
-        emb = torch.cat([freqs, freqs], dim=-1)  # (seq_len, head_dim)
+        freqs = torch.outer(positions, inv_freq)  # (len, half)
+        emb = torch.cat([freqs, freqs], dim=-1)  # (len, head_dim)
         return emb.cos(), emb.sin()
 
 
