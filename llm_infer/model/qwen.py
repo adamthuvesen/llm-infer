@@ -58,6 +58,9 @@ class QwenModel:
         self.rms_eps = config.rms_norm_eps
         self.rope_theta = _rope_theta(config)
         self.tie_word_embeddings = config.tie_word_embeddings
+        # Per-step helper tensors (token ids, RoPE positions) are built on the weight
+        # device so a GPU-resident model never silently mixes CPU and CUDA tensors.
+        self.device = self.w["model.embed_tokens.weight"].device
 
     @classmethod
     def load(
@@ -65,18 +68,23 @@ class QwenModel:
         *,
         dtype: torch.dtype = torch.float32,
         backend: AttentionBackend | None = None,
+        device: torch.device | str = "cpu",
         model_id: str = MODEL_ID,
         revision: str = MODEL_REVISION,
     ) -> QwenModel:
         """Load the pinned model's weights and config from the HF cache.
 
-        Defaults to fp32 (where greedy tie-breaks near-vanish) and the
-        ``torch_naive`` reference backend.
+        Defaults to fp32 on CPU (where greedy tie-breaks near-vanish) and the
+        ``torch_naive`` reference backend. Pass ``device="cuda"`` to place the weights on
+        the GPU for the flash-attn backend; the CPU default keeps the reference path
+        bit-identical to Phase A/B.
         """
         config = AutoConfig.from_pretrained(model_id, revision=revision)
         hf = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype)
         hf.eval()
-        weights = {name: tensor.detach() for name, tensor in hf.state_dict().items()}
+        weights = {
+            name: tensor.detach().to(device) for name, tensor in hf.state_dict().items()
+        }
         return cls(
             weights=weights,
             config=config,
@@ -92,7 +100,7 @@ class QwenModel:
         """
         if not token_ids:
             raise ValueError("token_ids must be non-empty")
-        ids = torch.tensor(token_ids, dtype=torch.long)
+        ids = torch.tensor(token_ids, dtype=torch.long, device=self.device)
         hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
 
         cos, sin = self._rope_tables(len(token_ids))
@@ -110,15 +118,17 @@ class QwenModel:
     ) -> torch.Tensor:
         """Cached prefill: run the prompt, store all K/V, return last-position logits.
 
-        Hidden states match :meth:`logits` bit-for-bit (the cache write is a side effect
-        that does not touch the values the backend sees); only the last row's logits are
-        formed, since greedy needs only the first generated token. Sets ``table.length``.
+        Hidden states match :meth:`logits` to within ~1e-5 (the cache write is a side
+        effect that does not touch the values the backend sees; the only non-bit-exact op
+        is a BLAS reduction-order difference, far below the argmax-flip threshold). Only
+        the last row's logits are formed, since greedy needs only the first generated
+        token. Sets ``table.length``.
         """
         if not prompt_ids:
             raise ValueError("prompt_ids must be non-empty")
         seq_len = len(prompt_ids)
         table.reserve(seq_len)
-        ids = torch.tensor(prompt_ids, dtype=torch.long)
+        ids = torch.tensor(prompt_ids, dtype=torch.long, device=self.device)
         hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
 
         cos, sin = self._rope_tables(seq_len)
@@ -145,10 +155,12 @@ class QwenModel:
         pos = table.length
         table.reserve(1)
         new_length = pos + 1
-        ids = torch.tensor([token_id], dtype=torch.long)
+        ids = torch.tensor([token_id], dtype=torch.long, device=self.device)
         hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
 
-        cos, sin = self._rope_for_positions(torch.tensor([pos], dtype=torch.float32))
+        cos, sin = self._rope_for_positions(
+            torch.tensor([pos], dtype=torch.float32, device=self.device)
+        )
         for layer in range(self.num_layers):
             hidden = self._apply_decoder_layer(
                 hidden,
@@ -299,7 +311,9 @@ class QwenModel:
 
     def _rope_tables(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Cos/sin tables for positions ``0 .. seq_len-1``. Shape ``(seq_len, head_dim)``."""
-        return self._rope_for_positions(torch.arange(seq_len, dtype=torch.float32))
+        return self._rope_for_positions(
+            torch.arange(seq_len, dtype=torch.float32, device=self.device)
+        )
 
     def _rope_for_positions(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Cos/sin tables for arbitrary absolute positions. Shape ``(len(positions), head_dim)``.
@@ -308,7 +322,10 @@ class QwenModel:
         its own sequence length, not a batch-row index.
         """
         half = self.head_dim // 2
-        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, half, dtype=torch.float32) / half))
+        inv_freq = 1.0 / (
+            self.rope_theta
+            ** (torch.arange(0, half, dtype=torch.float32, device=self.device) / half)
+        )
         freqs = torch.outer(positions, inv_freq)  # (len, half)
         emb = torch.cat([freqs, freqs], dim=-1)  # (len, head_dim)
         return emb.cos(), emb.sin()
