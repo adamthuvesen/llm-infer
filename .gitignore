@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv / venv (uv.lock IS committed for reproducibility)
+.venv/
+
+# pytest / tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# model / HF caches (never vendor weights into the repo)
+*.safetensors
+*.bin
+.cache/
+
+# OS
+.DS_Store
