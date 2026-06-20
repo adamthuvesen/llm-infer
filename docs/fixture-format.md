@@ -118,3 +118,52 @@ For each committed case, the llm-infer single-request greedy decode through the
 greedy on the pinned Instruct model, under the pinned dtype and decoding config, using
 the exact rlvr-sql `cot` prompt. That is the trusted reference every future backend
 (paged, flash, …) must reproduce.
+
+## The flash-attn backend and the tie-tolerance bar (Phase C)
+
+`flash_attn_paged` is the first backend that runs a **fused** kernel in **bf16**, so
+its fp32 reduction order differs from `torch_naive`'s materialized softmax. That is the
+same class of effect as the `generate`-vs-recompute split above: at a *genuine*
+numerical tie — two top tokens whose logits are equal to within tiny noise — the fused
+reduction order can flip the argmax. Unlike Phase A (full-recompute fp32, where ties
+near-vanish and the bar is bit-exact), the flash backend therefore needs a principled
+tie waiver. The bar stays falsifiable:
+
+- The flash backend's greedy continuation must match the committed golden
+  **token-for-token**, with **one** exception class: a genuine numerical tie.
+- When the flash token first differs from the golden at step `t`, the oracle recomputes
+  step `t`'s logits with the **`torch_naive` fp32 reference path** over the canonical
+  prefix (`prompt + golden[:t]` — the two sequences agree up to `t`, so this is exactly
+  the context the flash backend decoded from). The divergence is accepted **only if**
+  the reference's **top-2 logit gap ≤ tolerance** (`DEFAULT_TIE_TOLERANCE = 1e-3`); the
+  step, both candidate tokens, the gap, and both reference logits are traced below.
+- A divergence whose reference gap is **above** tolerance is a **FAIL** — under
+  unambiguous reference math one token wins and the fused kernel picked the loser, which
+  is a real kernel/layout bug, not a tie. There is no blanket "close enough" and no
+  unconditional tolerance.
+
+This mirrors the Phase A discipline exactly: the *non*-tie gap traced above was 0.397
+logits (~7000× the cross-path logit noise of 5.3e-5) and was correctly classified as
+**not** a tie. The 1e-3 tolerance sits well above that observed numerical noise yet
+hundreds of times below a real decision margin like 0.397, so it can launder genuine
+ties but never a real bug. The policy lives in `tests/correctness/tie_tolerance.py`; the
+GPU oracle is `tests/correctness/test_flash_attn_paged.py` (auto-skipped off CUDA, run
+on the target A100 via `scripts/modal_oracle.py`). The exact `torch_naive` CPU oracle is
+unchanged and remains the local gate.
+
+### Traced flash-attn divergences
+
+Validated on Modal A100-80GB (`scripts/modal_oracle.py --command oracle`), bf16 flash
+backend vs the committed fp32 goldens, `max_new_tokens = 40` across all three cases
+(`single_table_count`, `two_table_join`, `single_table_group_by`):
+
+**Zero divergences — no tie waiver was needed.** Over all 120 decode steps the
+`flash_attn_paged` bf16 fused kernel produced token ids **identical** to the golden
+full-recompute greedy continuation on every case (`3 passed in 17.83s`). The fused
+fp32-reduction-order difference never flipped an argmax on these cases, so the
+tie-tolerance bar above — recompute the contested step with the `torch_naive` fp32
+reference, accept only if the top-2 logit gap ≤ `1e-3` — was never exercised. It stays
+in place as the principled safety net for any future case where a genuine near-tie does
+flip: such a step would be accepted only on proof it is a numerical tie, and a non-tie
+divergence would still FAIL the oracle. This mirrors Phase A, where full-recompute fp32
+also matched HF token-for-token with zero divergences and no waiver was needed.
