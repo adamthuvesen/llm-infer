@@ -1,1 +1,9 @@
-"""Block allocator, block tables, and page metadata. Filled in Phase B (paged KV-cache)."""
+"""Paged KV-cache: block allocator, per-request block tables, and the K/V store (Phase B)."""
+
+from __future__ import annotations
+
+from llm_infer.kv_cache.block_allocator import BlockAllocator, OutOfBlocksError
+from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+
+__all__ = ["BlockAllocator", "BlockTable", "OutOfBlocksError", "PagedKVCache"]
