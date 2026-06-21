@@ -140,7 +140,17 @@ def assemble_markdown(rows: list[dict], config: dict) -> str:
     meta = (
         f"\n\nWorkload: {workload.get('num_requests', '?')} requests × "
         f"{workload.get('max_new_tokens', '?')} new tokens, greedy. "
-        f"GPU: {config.get('gpu', {}).get('name', '?')}. "
+        f"GPU: {_gpu_label(config.get('gpu', {}))}. "
         f"Source: {workload.get('source', '?')}"
     )
     return table + meta
+
+
+def _gpu_label(gpu: object) -> str:
+    """Render the GPU header from either a flat snapshot or a per-function dict of snapshots."""
+    if isinstance(gpu, dict) and "name" in gpu:
+        return str(gpu["name"])
+    if isinstance(gpu, dict):
+        parts = [f"{k}={v.get('name', '?')}" for k, v in gpu.items() if isinstance(v, dict)]
+        return " | ".join(parts) if parts else "?"
+    return str(gpu) if gpu else "?"
