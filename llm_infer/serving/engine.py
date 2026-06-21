@@ -6,9 +6,12 @@ request emits its first token via cached prefill, an already-running one via a c
 decode. Finished requests are freed at the end of the step (the decode-step boundary),
 which returns their blocks and budget so a queued request can be admitted next step.
 
-This is the v1 loop only: greedy sampling, no streaming, no chunked prefill, no mixed
-prefill/decode fusion. Each request runs through the same single-request cached path,
-so batching two requests gives token-for-token the same result as running each alone.
+Token selection is pluggable through a :class:`~llm_infer.serving.sampler.Sampler`; it
+defaults to greedy (temperature 0 — the proven oracle path) and the rlvr-sql rollout passes
+a seeded temperature/top-p sampler. Otherwise this is the v1 loop only: no streaming, no
+chunked prefill, no mixed prefill/decode fusion. Under greedy, each request runs through the
+same single-request cached path, so batching two requests gives token-for-token the same
+result as running each alone.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.qwen import QwenModel
 from llm_infer.scheduler.scheduler import Scheduler
 from llm_infer.serving.request import Request
-from llm_infer.serving.sampler import greedy
+from llm_infer.serving.sampler import Sampler
 
 
 @dataclass
@@ -32,7 +35,7 @@ class StepResult:
 
 
 class InferenceEngine:
-    """Runs greedy generation for a set of requests over a shared paged KV-cache."""
+    """Runs generation for a set of requests over a shared paged KV-cache (greedy by default)."""
 
     def __init__(
         self,
@@ -41,6 +44,7 @@ class InferenceEngine:
         block_size: int,
         num_blocks: int,
         device: str = "cpu",
+        sampler: Sampler | None = None,
     ) -> None:
         self.model = model
         self.cache = PagedKVCache(
@@ -53,6 +57,9 @@ class InferenceEngine:
             device=device,
         )
         self.scheduler = Scheduler(num_blocks, block_size)
+        # Default to greedy (temperature 0) — token-for-token the proven oracle path. The
+        # rollout passes Sampler(temperature=1.0, top_p=1.0, seed=...) for sampled decoding.
+        self.sampler = sampler or Sampler()
         self._requests: dict[str, Request] = {}
 
     def add_request(self, request: Request) -> None:
@@ -83,7 +90,7 @@ class InferenceEngine:
                 continue
             logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
             request.prefilled = True
-            self._record(request, greedy(logits), result)
+            self._record(request, self.sampler.sample(logits), result)
 
         if to_decode:
             logits = self.model.decode_many(
@@ -91,8 +98,9 @@ class InferenceEngine:
                 [r.block_table for r in to_decode],
                 [r.last_token for r in to_decode],
             )
-            for i, request in enumerate(to_decode):
-                self._record(request, greedy(logits[i]), result)
+            tokens = self.sampler.sample_many(logits)
+            for request, token in zip(to_decode, tokens, strict=True):
+                self._record(request, token, result)
 
         for request in [r for r in self.scheduler.running if r.finished]:
             request.block_table.free()
