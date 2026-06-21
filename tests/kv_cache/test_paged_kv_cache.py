@@ -43,10 +43,15 @@ def test_allocator_out_of_blocks_is_loud() -> None:
 def test_allocator_rejects_double_free_and_bad_ids() -> None:
     alloc = BlockAllocator(num_blocks=2)
     blocks = alloc.allocate(2)
-    with pytest.raises(ValueError, match="double free"):
+    # A duplicate id within one free() call (distinct from freeing an already-free id).
+    with pytest.raises(ValueError, match="duplicate block id"):
         alloc.free([blocks[0], blocks[0]])
     with pytest.raises(ValueError, match="out of range"):
         alloc.free([99])
+    # Freeing a block that is genuinely already in the pool is the double-free case.
+    alloc.free([blocks[0]])
+    with pytest.raises(ValueError, match="double free"):
+        alloc.free([blocks[0]])
 
 
 def test_block_table_grows_at_block_boundaries() -> None:
