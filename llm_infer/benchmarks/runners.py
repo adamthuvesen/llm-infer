@@ -13,10 +13,10 @@ returns the generated continuation ids plus per-iteration wall-clock. The system
   ``model.generate()``. Included so "llm-infer beats naive HF" cannot be read as beating a
   deliberately weak baseline.
 * ``llm_infer`` — this engine on the flash-attn backend (bf16, CUDA), all requests admitted
-  to one paged cache and driven by the continuous-batching loop. NB: the v1 loop advances
-  each running request with its *own* forward inside a step — it does not yet fuse the batch
-  into one matmul, so its throughput edge over naive HF comes from the fused kernel + paged
-  cache + a tight loop, not from batched matmuls. The table reports that honestly.
+  to one paged cache and driven by the continuous-batching loop. Every running request
+  advances in one **fused batched decode** (``decode_many``) per step — one matmul/kernel
+  call over the whole running batch, not one per request — so the throughput win over naive
+  per-request HF generate is the batched forward plus the fused paged kernel.
 * ``vllm`` — vLLM offline ``LLM.generate`` with prefix caching off and flags pinned. The
   ceiling, never the thing we beat.
 
@@ -120,8 +120,8 @@ def run_llm_infer(
             "dtype": str(model.dtype),
             "block_size": BLOCK_SIZE,
             "num_blocks": num_blocks,
-            # v1: per-request forward inside a step, not a fused batch matmul (see docstring).
-            "batched_forward": False,
+            # All running requests advance in one fused batched decode (decode_many) per step.
+            "batched_forward": True,
         },
     )
 
