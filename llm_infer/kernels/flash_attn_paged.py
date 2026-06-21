@@ -146,3 +146,37 @@ class FlashAttnPagedAttention:
         )
         # out is (B, num_heads, head_dim) — one query token per request.
         return out.to(out_dtype)
+
+    def forward_decode_batch_packed(
+        self,
+        queries: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Fused batched decode over already-packed token-major histories.
+
+        ``key``/``value`` are ``(total_kv_tokens, num_heads, head_dim)`` and
+        ``cu_seqlens_k`` describes each request's ragged history.
+        """
+        batch, _num_heads, head_dim = queries.shape
+        out_dtype = queries.dtype
+        q = queries.contiguous().to(_KERNEL_DTYPE)
+        k = key.contiguous().to(_KERNEL_DTYPE)
+        v = value.contiguous().to(_KERNEL_DTYPE)
+
+        cu_seqlens_q = torch.arange(batch + 1, dtype=torch.int32, device=q.device)
+        out = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=1,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=1.0 / math.sqrt(head_dim),
+            causal=True,
+        )
+        return out.to(out_dtype)

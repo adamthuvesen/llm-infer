@@ -77,3 +77,34 @@ class PagedKVCache:
         key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
         value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
         return key, value
+
+    def read_many(
+        self,
+        tables: list[BlockTable],
+        layer: int,
+        lengths: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Gather ragged histories for several requests with one indexed read per side.
+
+        Returns packed token-major K/V plus ``cu_seqlens`` for varlen attention:
+        K/V ``(sum(lengths), num_kv_heads, head_dim)``, ``cu_seqlens`` ``(B + 1,)``.
+        """
+        if len(tables) != len(lengths):
+            raise ValueError(f"tables/lengths mismatch: {len(tables)} vs {len(lengths)}")
+        if not tables:
+            raise ValueError("read_many needs at least one table")
+        if any(length < 1 for length in lengths):
+            raise ValueError(f"lengths must be positive; got {lengths}")
+
+        slots: list[int] = []
+        for table, length in zip(tables, lengths, strict=True):
+            slots.extend(table.physical_slots(0, length))
+        idx = torch.as_tensor(slots, dtype=torch.long, device=self.key.device)
+        key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
+        value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
+
+        cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.key.device)
+        cu_seqlens[1:] = torch.as_tensor(lengths, dtype=torch.int32, device=self.key.device).cumsum(
+            0
+        )
+        return key, value, cu_seqlens, max(lengths)

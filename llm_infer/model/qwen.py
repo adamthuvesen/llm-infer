@@ -362,16 +362,24 @@ class QwenModel:
             v_new = v[:, b, :].unsqueeze(0).contiguous()
             with self._profile("kv_write"):
                 cache.write(table, layer, positions[b], k_new, v_new)
-            with self._profile("kv_read_gather"):
-                k_hist, v_hist = cache.read(table, layer, new_lengths[b])
-            with self._profile("gqa_expand"):
-                k_exp, v_exp = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
-            keys.append(k_exp)  # (num_heads, L_b, head_dim)
-            values.append(v_exp)
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
+        with self._profile("kv_read_gather"):
+            k_hist, v_hist, cu_seqlens_k, max_seqlen_k = cache.read_many(tables, layer, new_lengths)
+        with self._profile("gqa_expand"):
+            k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
+
         with self._profile("attention"):
-            attn = self.backend.forward_decode_batch(queries, keys, values)
+            packed_forward = getattr(self.backend, "forward_decode_batch_packed", None)
+            if packed_forward is not None:
+                attn = packed_forward(queries, k_exp, v_exp, cu_seqlens_k, max_seqlen_k)
+            else:
+                for k_chunk, v_chunk in zip(
+                    k_exp.split(new_lengths), v_exp.split(new_lengths), strict=True
+                ):
+                    keys.append(k_chunk.transpose(0, 1).contiguous())
+                    values.append(v_chunk.transpose(0, 1).contiguous())
+                attn = self.backend.forward_decode_batch(queries, keys, values)
         with self._profile("projections_mlp"):
             return self._output_proj(attn.transpose(0, 1).contiguous(), p)  # (B, hidden)
 
@@ -394,6 +402,13 @@ class QwenModel:
         """GQA: repeat each KV head over its group of query heads (done before the backend)."""
         repeat = self.num_heads // self.num_kv_heads
         return k.repeat_interleave(repeat, dim=0), v.repeat_interleave(repeat, dim=0)
+
+    def _expand_kv_token_major(
+        self, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """GQA for packed token-major histories: ``(tokens, kv_heads, head_dim)``."""
+        repeat = self.num_heads // self.num_kv_heads
+        return k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
 
     def _output_proj(self, attn: torch.Tensor, p: str) -> torch.Tensor:
         """Merge heads ``(heads, seq, head_dim)`` -> ``(seq, hidden)`` and apply o_proj."""

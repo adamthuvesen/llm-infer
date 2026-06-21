@@ -167,6 +167,28 @@ def test_two_requests_do_not_collide() -> None:
     assert torch.equal(got_bv, vb)
 
 
+def test_read_many_packs_ragged_histories() -> None:
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=2, head_dim=3, dtype=torch.float32
+    )
+    a = cache.new_request()
+    b = cache.new_request()
+    a.reserve(3)
+    b.reserve(5)
+
+    ka, va = _ramp(3, 2, 3, 0.0), _ramp(3, 2, 3, 100.0)
+    kb, vb = _ramp(5, 2, 3, 1000.0), _ramp(5, 2, 3, 2000.0)
+    cache.write(a, layer=0, start_pos=0, key=ka, value=va)
+    cache.write(b, layer=0, start_pos=0, key=kb, value=vb)
+
+    key, value, cu_seqlens, max_len = cache.read_many([a, b], layer=0, lengths=[3, 5])
+
+    assert torch.equal(key, torch.cat([ka, kb], dim=0))
+    assert torch.equal(value, torch.cat([va, vb], dim=0))
+    assert torch.equal(cu_seqlens.cpu(), torch.tensor([0, 3, 8], dtype=torch.int32))
+    assert max_len == 5
+
+
 def test_layers_are_independent() -> None:
     cache = PagedKVCache(
         num_layers=2, num_blocks=4, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32
