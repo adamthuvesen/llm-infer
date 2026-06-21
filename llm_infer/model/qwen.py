@@ -70,14 +70,15 @@ class QwenModel:
         backend: AttentionBackend | None = None,
         device: torch.device | str = "cpu",
         model_id: str = MODEL_ID,
-        revision: str = MODEL_REVISION,
+        revision: str | None = MODEL_REVISION,
     ) -> QwenModel:
-        """Load the pinned model's weights and config from the HF cache.
+        """Load the model's weights and config from the HF cache (or a local path).
 
-        Defaults to fp32 on CPU (where greedy tie-breaks near-vanish) and the
+        Defaults to the pinned base on fp32 CPU (where greedy tie-breaks near-vanish) and the
         ``torch_naive`` reference backend. Pass ``device="cuda"`` to place the weights on
         the GPU for the flash-attn backend; the CPU default keeps the reference path
-        bit-identical to Phase A/B.
+        bit-identical to Phase A/B. ``revision`` is ``None`` for a local ``model_id`` path
+        (the Phase E merged grpo-s0 weights), which carries no git revision.
         """
         config = AutoConfig.from_pretrained(model_id, revision=revision)
         hf = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype)
