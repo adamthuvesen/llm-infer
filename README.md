@@ -9,7 +9,7 @@ HuggingFace greedy decoding before it reports a single tok/s, and the throughput
 measured on rlvr-sql's *actual* rollout workload, not a synthetic microbench. vLLM is
 the ceiling, never the thing we beat; the gap to it is named, not hidden.
 
-## Status — v1 complete, v2 speed tranche paused
+## Status — v1/v1.5 complete, v2 speed pass complete (measured ceiling)
 
 | Phase | What | State |
 |-------|------|-------|
@@ -18,12 +18,14 @@ the ceiling, never the thing we beat; the gap to it is named, not hidden.
 | **C** speed | `flash_attn_paged` behind the `AttentionBackend` adapter, gated by the oracle | ✅ |
 | **D** evidence | batch-correctness suite + three-way benchmark ([`docs/benchmark.md`](docs/benchmark.md)) | ✅ |
 | **E** differentiator | one frozen rlvr-sql rollout-timing comparison ([`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md)) | ✅ |
-| **v2** performance foundation | profiling, no-sync cleanup, packed KV reads/writes, read-plan reuse | paused at 365.8 tok/s |
-| **v3** decode execution architecture | 32-slot decode graph / static bucket slice from [`docs/decode-graph-plan.md`](docs/decode-graph-plan.md) | planned |
+| **v2** speed pass | profiling, no-sync cleanup, packed KV reads/writes, read-plan reuse | ✅ 365.8 tok/s, ceiling named |
 
-Out of v1 scope (the firewall): no custom Triton/CUDA kernel, no quantization, no
-prefix caching, no chunked prefill, no OpenAI-compatible server / streaming, no
-multi-GPU. See [`docs/scoping.md`](docs/scoping.md) for the full plan and non-goals.
+The engine itself is the goal — a small, legible paged inference engine. Speed and the
+rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**: prefix
+caching → chunked prefill → serving depth, with quantization as a later speed lever.
+The decode-graph / static-bucket idea was built and rejected (a measured dead-end — see
+[`docs/scoping.md`](docs/scoping.md)). See [`docs/scoping.md`](docs/scoping.md) for the
+full plan and non-goals.
 
 ## Layout
 
@@ -60,34 +62,54 @@ step) is what earns the win over naive sequential HF. The ~33× gap to vLLM is t
 v1's legibility (vLLM has CUDA graphs, a custom in-place paged kernel, a mature scheduler) —
 named in [`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md), not hidden.
 
-**v2 speed campaign — current best** (same frozen rlvr-sql rollout, A100-80GB PCIe,
-run 2026-06-21): `llm_infer` now reaches **365.8 tok/s** and **$0.18 / 1k rollouts**
-after profiling/no-sync cleanup, packed KV reads, vectorized KV writes, and read-plan reuse.
-That is about **5.55×** over the 65.9 tok/s v1.5 baseline, but still short of the
-**>=650 tok/s** campaign target. The next planned tranche is design-first decode execution:
-static decode buckets and CUDA graph capture, starting with the 32-slot frozen rollout shape.
+**v2 speed pass — complete, with a measured ceiling** (same frozen rlvr-sql rollout,
+A100-80GB PCIe, run 2026-06-21, pinned `bench-results/rollout-rollout-20260621T164905.json`):
+`llm_infer` reaches **365.8 tok/s** and **$0.18 / 1k rollouts** after profiling/no-sync
+cleanup, packed KV reads, vectorized KV writes, and read-plan reuse — about **5.55×** over the
+65.9 tok/s v1.5 baseline. This is a finished chapter, not a paused one: the cheap
+KV-materialization wins are harvested and the ceiling is named — the post-cleanup profile shows
+`kv_read_gather` is no longer the wall, and the v2 toolkit (no-sync + KV vectorization) cannot
+move the remaining decode-orchestration / projection-MLP / attention time further.
 
-Rejected v2 follow-ups are part of the roadmap, not footnotes: direct FlashAttention GQA,
-projection/MLP fusion, step-local prompt-prefix KV copying, and no-gather paged KV attention
-all either changed the sampled token path or regressed speed. Do not retry those shapes
-without a new profile-backed reason.
+Two v2 directions were tried and **rejected with evidence**, not left as TODOs:
+
+- **Decode-graph / static 32-slot bucket — a measured dead-end.** Built and rejected: it was
+  *slower* (a static bucket pays for variable-occupancy device compute the eager path skips —
+  256 vs 299 tok/s) **and** it shifted the sampled token count (3036 vs 3026, bf16
+  batch-composition drift). Any future decode-graph attempt must clear two gates: (a)
+  token-identical on GPU bf16, not just CPU fp32; (b) attack variable-occupancy *device*
+  compute, not host-launch overhead. The CUDA-graph axis is closed for this workload.
+- **Kernel/fusion shapes** — direct FlashAttention GQA, projection/MLP fusion, step-local
+  prompt-prefix KV copying, and no-gather paged KV attention all changed the sampled token path
+  or regressed speed. Do not retry without a new profile-backed reason.
 
 ## Roadmap
 
-1. **v1 — Correct minimal engine.** Complete: HF oracle, paged KV, continuous batching,
-   benchmark evidence, and frozen rlvr-sql rollout proof.
-2. **v2 — Performance foundation.** Paused at 365.8 tok/s: the obvious KV materialization
-   waste is mostly harvested, and every accepted speed claim has pinned rollout evidence.
-3. **v3 — Decode execution architecture.** Next: prove whether a graph-safe 32-slot decode
-   path can close the remaining gap toward 650 tok/s without changing the 3026-token frozen
-   sampled path.
-4. **v4 — Scheduler and serving depth.** Generalize beyond the frozen rollout with dynamic
-   buckets, prefix-cache ownership/refcounts, cancellation, token budgeting, streaming, and
-   an OpenAI-compatible surface.
-5. **v5 — Backend/kernel depth.** Revisit FlexAttention, Triton, or a true no-gather paged
-   backend only after decode orchestration is cleaner and the acceptance gates are stable.
-6. **v6 — Release-quality story.** Release when the engine either hits the speed target or
-   has a measured ceiling and a clear writeup explaining the remaining vLLM gap honestly.
+The engine is the goal, so the forward plan is sequenced by **technique-completeness and
+legibility**. Speed is a side-quest with its own track, last.
+
+**Done**
+
+1. **v1 / v1.5 — correct minimal engine + differentiator.** HF oracle, paged KV, continuous
+   batching, three-way benchmark, and the frozen rlvr-sql rollout proof + writeup.
+2. **v2 — speed pass (complete, ceiling named).** 365.8 tok/s / 5.55× over baseline; cheap
+   KV-materialization wins harvested, ceiling measured. The decode-graph / static-bucket idea
+   was built and **rejected** (a measured dead-end — slower, and it shifted the sampled token
+   count); the CUDA-graph axis is closed for this workload.
+
+**Primary forward track — engine technique-completeness + legibility**
+
+3. **Prefix caching.** Refcounted KV-block *sharing* across requests with a common prefix — the
+   canonical technique the engine most lacks. Not the KV-copy approach tried and reverted in v2.
+4. **Chunked prefill / mixed prefill-decode.** Interleave prefill chunks with the decode batch.
+5. **Serving depth.** Streaming, an OpenAI-compatible endpoint, metrics, and a load generator.
+6. **Expand *Keeping the GPU Busy*.** Narrate the architecture and the honest dead-ends.
+
+**Secondary track — speed, later, for fun**
+
+7. **Quantization** (gpt-fast style: projection/MLP matmuls + KV bandwidth) is the real
+   remaining lever. **650 tok/s is a checkpoint quantization may clear, not a goal to grind
+   toward.** Backend/kernel depth (FlexAttention, Triton, no-gather paged) stays parked here.
 
 ## Quickstart
 

@@ -1,22 +1,18 @@
-> Seeded from the HQ scoping doc (`llm-infer-plan.md`) at Phase A start. The engine is
-> named **`llm-infer`** in this repo; the source doc uses the working name `nano-infer`/
-> `paged` interchangeably for the same engine. Scope is authoritative; the name is not.
+# llm-infer — scoping doc
 
-# nano-infer — scoping doc
-
-A minimal, honest LLM inference engine for **Qwen2.5-Coder-3B-Instruct**, measured as an **rlvr-sql rollout backend**. Engine first; beautiful explanation second; expansion only if it serves the claim.
+A minimal, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**, measured as an **rlvr-sql rollout backend**. The engine itself is the goal — learning and showing how a small paged inference engine is built. Beautiful explanation second; speed and the rlvr-sql hook are the *fun side-quest*, not the point.
 
 ## The claim (capability statement, not a number)
 
 > A small paged-inference engine for Qwen2.5-Coder-3B — exact greedy decoding vs HF, paged KV-cache + continuous batching running end-to-end, benchmarked against naive HF and vLLM on one GPU, with an early rlvr-sql rollout timing hook.
 
-Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the RL-rollout measurement — that is what makes it *yours* rather than a nano-vLLM clone.
+Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the RL-rollout measurement — that is what makes it *yours* rather than a generic vLLM clone.
 
 ## Hard stop (evidence-based, ship v1 when ALL hold)
 
 1. Qwen2.5-Coder-3B **greedy decoding is exact** (same token ids as HF) on the unit correctness suite (fp32 fallback if bf16 tie-breaks get noisy — see Correctness).
 2. Paged KV-cache + continuous batching run **end-to-end**.
-3. Benchmarks compare **naive HF vs nano-infer vs vLLM** on one documented GPU, config pinned.
+3. Benchmarks compare **naive HF vs llm-infer vs vLLM** on one documented GPU, config pinned.
 4. The optimized path **beats the naive baseline by a clear, honestly-reported margin** (directional — no target %, no vLLM-relative goal).
 5. **rlvr-sql rollout timing measured once** (ugly/unoptimized is fine).
 6. Short writeup.
@@ -32,7 +28,7 @@ Stops 1–4 are the **internal v1 engine milestone**; **public release waits for
 | **A — trusted oracle** | HF greedy baseline · `torch_naive` reference backend · **single-request exact-match suite** | get a truth oracle before anything fast or batched |
 | **B — systems milestone** | paged KV allocator · continuous scheduler → **two-request vertical slice** | prove the loop before the table |
 | **C — speed** | `flash_attn_paged` behind the adapter, gated by the oracle | plug the fast kernel only once the reference is trusted |
-| **D — evidence** | batch-correctness suite · three-way benchmark table | naive HF vs nano-infer vs vLLM, config pinned |
+| **D — evidence** | batch-correctness suite · three-way benchmark table | naive HF vs llm-infer vs vLLM, config pinned |
 | **E — differentiator (v1.5)** | one frozen rlvr-sql rollout timing comparison · writeup *Keeping the GPU Busy* | anchors the claim; survives an early stop |
 
 **Correctness gate is Phase A**, not after the fast kernel — every backend passes the same oracle from day one, so you never debug "scheduler or kernel?" without a trusted reference.
@@ -76,13 +72,13 @@ Explicitly **out** of v1 — naming them keeps the spec from quietly expanding:
 ## Architecture (modular from day one; borrowed parts behind narrow adapters)
 
 ```
-nano_infer/
+llm_infer/
   model/          # Qwen loading, weights, tokenizer, config
   kv_cache/       # block allocator, block tables, page metadata
   scheduler/      # prefill/decode admission, continuous batching
   kernels/        # AttentionBackend protocol + implementations
   serving/        # request queue, sampler, streaming loop
-  benchmarks/     # naive vs nano-infer vs vLLM
+  benchmarks/     # naive vs llm-infer vs vLLM
 ```
 
 ```
@@ -108,43 +104,89 @@ kernels/
 
 ## KV Cache Theater (deferred — trace-driven or skip)
 
-Build only if it replays **real engine events**, not a simulation. The engine emits a trace; the visualizer is a debugger + proof artifact, not decoration. Separate repo / app, fed by nano-infer traces. Event schema:
+Build only if it replays **real engine events**, not a simulation. The engine emits a trace; the visualizer is a debugger + proof artifact, not decoration. Separate repo / app, fed by llm-infer traces. Event schema:
 
 `request_admitted · prefill_started · block_allocated · decode_step · request_finished · block_freed · batch_size_changed · tokens_per_second_sampled`
 
-## Expansion path (post-v1, only if it serves the claim)
+## Expansion path (post-v1, engine-first)
 
-The original v1/v1.5 scope is complete. The post-v1 plan changed after the local speed
-campaign: the first big win was not a new backend, but removing KV materialization waste in
-the existing decode path.
+v1/v1.5 are complete and v2 (the speed pass) is a closed chapter. The engine is the goal, so
+the forward plan is sequenced by **technique-completeness and legibility**, not by chasing a
+throughput number. Speed is the fun side-quest; it gets its own track, last.
 
-- **v2: performance foundation — mostly done, paused.** Profiling/no-sync cleanup, packed KV
-  reads, vectorized KV writes, and read-plan reuse moved the frozen rlvr-sql rollout from the
-  v1.5 baseline of **65.9 tok/s** to a clean best of **365.8 tok/s** on A100-80GB PCIe
-  (`bench-results/rollout-rollout-20260621T164905.json`). That is about **5.55x** over
-  baseline, but short of the **>=650 tok/s** campaign target. The useful profile after that
-  point shows `kv_read_gather` is no longer the wall; remaining time is decode orchestration,
-  projections/MLP, attention, prefill, KV writes, and GQA expansion.
-- **v3: decode execution architecture — next.** Implement the smallest graph-safe tranche
-  from `docs/decode-graph-plan.md`: static decode buckets, preallocated decode-plan tensors,
-  graph-compatible eager replay, then CUDA graph capture for the frozen rollout's 32-slot
-  bucket if the replay path preserves the accepted 3026-token sample. This is the next real
-  attempt at closing the remaining ~1.78x gap to 650 tok/s.
-- **v4: scheduler and serving depth.** Generalize beyond the frozen rollout: dynamic buckets,
-  prefix-cache ownership/refcounts, chunked prefill, cancellation/fairness, token budgeting,
-  streaming, metrics, an OpenAI-compatible endpoint, and a load generator.
-- **v5: backend/kernel depth.** Revisit FlexAttention, Triton, or a true no-gather paged
-  backend only once decode orchestration is cleaner. The v2 loop rejected direct
-  FlashAttention GQA, projection/MLP fusion, step-local prompt-prefix KV copying, and
-  no-gather paged KV attention because they changed the sampled token path or regressed speed;
-  do not retry those shapes without new profile evidence and a stricter acceptance story.
-- **v6: release-quality story.** Release when the engine either reaches the speed target or
-  has a measured architectural ceiling, with a wall-clock decomposition writeup that explains
-  the remaining vLLM gap honestly.
+### Done
+
+- **v1 / v1.5 — correct minimal engine + differentiator.** HF-exact greedy oracle, paged
+  KV-cache + continuous batching end-to-end, the flash backend behind the `AttentionBackend`
+  adapter, the three-way benchmark, and the frozen rlvr-sql rollout hook + *Keeping the GPU
+  Busy* writeup.
+- **v2 — the speed pass (complete, with a measured ceiling).** Profiling/no-sync cleanup,
+  packed KV reads, vectorized KV writes, and read-plan reuse moved the frozen rlvr-sql rollout
+  from the v1.5 baseline of **65.9 tok/s** to **365.8 tok/s** on A100-80GB PCIe — about
+  **5.55x** over baseline (pinned: `bench-results/rollout-rollout-20260621T164905.json`). This
+  is **not "paused mid-campaign"** — the cheap KV-materialization wins are harvested and the
+  ceiling is named: the post-cleanup profile shows `kv_read_gather` is no longer the wall;
+  remaining time is decode orchestration, projections/MLP, attention, prefill, KV writes, and
+  GQA expansion, none of which the v2 toolkit (no-sync + KV vectorization) can move further.
+
+### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
+
+The decode-graph / static 32-slot bucket idea (once framed as "v3 next") was **built and
+rejected**, not deferred. A static bucket was measured against the eager path and lost on two
+independent counts:
+
+1. **Slower.** The static bucket pays for fixed worst-case occupancy every step; the real
+   workload has variable occupancy, so the bucket does device compute the eager path skips.
+   Measured 256 tok/s (SXM4) vs 299 tok/s (eager, PCIe) — capture cannot recover this because
+   the cost is device compute, not host-launch overhead.
+2. **It shifted the sampled token count** — 3036 vs the accepted 3026 — from bf16
+   batch-composition drift, breaking the correctness gate.
+
+Two forward gates any future decode-graph attempt **must** clear before it earns time: (a)
+token-identical on GPU bf16, not just CPU fp32; (b) it must attack variable-occupancy *device*
+compute, not host-launch overhead (the thing CUDA graphs remove, which this workload is not
+bound by). Absent both, the CUDA-graph axis stays closed.
+
+### Primary forward track — engine technique-completeness + legibility
+
+The point of the project. Each item is a canonical inference-engine technique the engine does
+not yet have, in rough dependency order:
+
+- **Prefix caching** — refcounted KV-block *sharing* across requests with a common prefix. This
+  is the canonical technique the engine most conspicuously lacks. Explicitly **not** the
+  step-local prompt-prefix KV *copy* already tried and reverted in v2 — this is shared,
+  refcounted block ownership, the real thing.
+- **Chunked prefill / mixed prefill-decode** — admit and interleave prefill chunks with the
+  decode batch instead of the v1 "prefill fully, then decode" split.
+- **Serving depth** — streaming, an OpenAI-compatible endpoint, metrics, and a load generator,
+  so the engine is drivable as a real server rather than only through the frozen harness.
+- **Expand *Keeping the GPU Busy*** — grow the writeup into a narration of the architecture and
+  the honest dead-ends (the v2 ceiling and the decode-graph rejection above), so the doc
+  teaches the engine, not just the one rollout number.
+
+### Secondary track — speed, later, for fun
+
+Picked up only when the primary track wants a breather. **Quantization is the real remaining
+lever** (gpt-fast style: the projection/MLP matmuls plus KV bandwidth), and it is the one
+technique plausibly able to clear the next checkpoint. **650 tok/s is a checkpoint quantization
+*may* clear, not a goal to grind toward** — the engine's value is its completeness and clarity,
+not that number.
+
+Backend/kernel depth (FlexAttention, Triton, a true no-gather paged backend) stays parked here
+too: the v2 loop already rejected direct FlashAttention GQA, projection/MLP fusion, step-local
+prompt-prefix KV copying, and no-gather paged KV attention for changing the sampled token path
+or regressing speed — do not retry those shapes without new profile evidence and a stricter
+acceptance story.
+
+### Release
+
+Release when the primary track has filled out the engine's technique set and the writeup
+narrates the architecture and the measured ceilings honestly — the speed number is whatever it
+is by then.
 
 ## Repos (hub-and-spoke, not a monorepo)
 
-- Engine name candidates: **`paged`** (preferred — names the core idea, distinctive, memorable) > `llm-infer` (descriptive but generic/collision-heavy) ≈ `nano-infer` (derivative echo of nano-vLLM). Pick `paged` if the GitHub name is free. v1.5 is a **standalone engine + thin rlvr-sql adapter script** (not a package import), preserving hub-and-spoke.
+- Engine name: **`llm-infer`** (settled — descriptive and unambiguous; the earlier working names `paged` and `nano-infer` are retired). v1.5 is a **standalone engine + thin rlvr-sql adapter script** (not a package import), preserving hub-and-spoke.
 - `kv-cache-theater` — only if trace-driven; separate.
 - `keeping-the-gpu-busy` — writeup/hub, later.
 
