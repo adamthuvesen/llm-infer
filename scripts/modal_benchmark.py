@@ -63,11 +63,13 @@ flash_image = (
 )
 
 # vLLM image: vLLM pulls its own torch + CUDA runtime, so it must not share the flash env.
+# VLLM_WORKER_MULTIPROC_METHOD=spawn makes vLLM's V1 engine core *spawn* (not fork) its
+# subprocess — a forked child cannot re-initialize CUDA, which aborts the engine otherwise.
 # The exact resolved vLLM version is recorded into the result at runtime (reproducible).
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("vllm")
-    .env({"HF_HOME": HF_CACHE})
+    .env({"HF_HOME": HF_CACHE, "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
     .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
     .workdir(REMOTE_ROOT)
     .run_commands("pip install --no-deps -e .")
@@ -78,14 +80,16 @@ hf_cache = modal.Volume.from_name("llm-infer-hf-cache", create_if_missing=True)
 
 @app.function(image=vllm_image, gpu="A100-80GB", volumes={HF_CACHE: hf_cache}, timeout=60 * 60)
 def bench_vllm(num_requests: int, max_new_tokens: int, warmup: int, iters: int) -> dict:
-    """Run the vLLM ceiling on the A100; return its tokens, timing, flags, and environment."""
-    import torch
+    """Run the vLLM ceiling on the A100; return its tokens, timing, flags, and environment.
 
+    Deliberately does NOT touch ``torch.cuda`` in this parent process — initializing CUDA
+    here and then letting vLLM fork its engine core is what triggers the re-init abort. vLLM
+    owns CUDA in its own (spawned) worker; a missing GPU surfaces loudly from ``LLM(...)``.
+    """
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.runners import run_vllm
     from llm_infer.benchmarks.workload import build_workload
 
-    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     hf_cache.commit()
     workload = build_workload(num_requests, max_new_tokens)
     result = run_vllm(workload, warmup=warmup, iters=iters)
