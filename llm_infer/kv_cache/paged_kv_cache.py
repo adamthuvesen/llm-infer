@@ -12,10 +12,22 @@ pool never collide.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from llm_infer.kv_cache.block_allocator import BlockAllocator
 from llm_infer.kv_cache.block_table import BlockTable
+
+
+@dataclass(frozen=True)
+class KVReadPlan:
+    """Layer-independent packed-read metadata for one batched decode step."""
+
+    idx: torch.Tensor
+    cu_seqlens: torch.Tensor
+    lengths: list[int]
+    max_len: int
 
 
 class PagedKVCache:
@@ -114,6 +126,11 @@ class PagedKVCache:
         Returns packed token-major K/V plus ``cu_seqlens`` for varlen attention:
         K/V ``(sum(lengths), num_kv_heads, head_dim)``, ``cu_seqlens`` ``(B + 1,)``.
         """
+        plan = self.plan_read_many(tables, lengths)
+        return (*self.read_many_plan(layer, plan), plan.cu_seqlens, plan.max_len)
+
+    def plan_read_many(self, tables: list[BlockTable], lengths: list[int]) -> KVReadPlan:
+        """Build reusable packed-read indices for a batched decode step."""
         if len(tables) != len(lengths):
             raise ValueError(f"tables/lengths mismatch: {len(tables)} vs {len(lengths)}")
         if not tables:
@@ -125,11 +142,22 @@ class PagedKVCache:
         for table, length in zip(tables, lengths, strict=True):
             slots.extend(table.physical_slots(0, length))
         idx = torch.as_tensor(slots, dtype=torch.long, device=self.key.device)
-        key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
-        value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
 
         cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.key.device)
         cu_seqlens[1:] = torch.as_tensor(lengths, dtype=torch.int32, device=self.key.device).cumsum(
             0
         )
-        return key, value, cu_seqlens, max(lengths)
+        return KVReadPlan(
+            idx=idx,
+            cu_seqlens=cu_seqlens,
+            lengths=list(lengths),
+            max_len=max(lengths),
+        )
+
+    def read_many_plan(
+        self, layer: int, plan: KVReadPlan
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather packed K/V for ``layer`` using a prebuilt :class:`KVReadPlan`."""
+        key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[plan.idx]
+        value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[plan.idx]
+        return key, value

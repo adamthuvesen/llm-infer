@@ -27,7 +27,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
-from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.profiling import TimingProfiler
 
@@ -214,12 +214,13 @@ class QwenModel:
         cos, sin = self._rope_for_positions(
             torch.tensor(positions, dtype=torch.float32, device=self.device)
         )
+        read_plan = cache.plan_read_many(tables, new_lengths)
         for layer in range(self.num_layers):
             hidden = self._apply_decoder_layer(
                 hidden,
                 layer,
                 lambda x, p, lyr: self._decode_attention_batched(
-                    x, p, cos, sin, lyr, cache, tables, positions, new_lengths
+                    x, p, cos, sin, lyr, cache, tables, positions, read_plan
                 ),
             )
         for table, new_length in zip(tables, new_lengths, strict=True):
@@ -339,7 +340,7 @@ class QwenModel:
         cache: PagedKVCache,
         tables: list[BlockTable],
         positions: list[int],
-        new_lengths: list[int],
+        read_plan: KVReadPlan,
     ) -> torch.Tensor:
         """Batched decode attention: same per-request math as :meth:`_decode_attention`, fused.
 
@@ -366,19 +367,21 @@ class QwenModel:
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
         with self._profile("kv_read_gather"):
-            k_hist, v_hist, cu_seqlens_k, max_seqlen_k = cache.read_many(tables, layer, new_lengths)
+            k_hist, v_hist = cache.read_many_plan(layer, read_plan)
         with self._profile("gqa_expand"):
             k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
 
         with self._profile("attention"):
             packed_forward = getattr(self.backend, "forward_decode_batch_packed", None)
             if packed_forward is not None:
-                attn = packed_forward(queries, k_exp, v_exp, cu_seqlens_k, max_seqlen_k)
+                attn = packed_forward(
+                    queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
+                )
             else:
                 keys: list[torch.Tensor] = []
                 values: list[torch.Tensor] = []
                 for k_chunk, v_chunk in zip(
-                    k_exp.split(new_lengths), v_exp.split(new_lengths), strict=True
+                    k_exp.split(read_plan.lengths), v_exp.split(read_plan.lengths), strict=True
                 ):
                     keys.append(k_chunk.transpose(0, 1).contiguous())
                     values.append(v_chunk.transpose(0, 1).contiguous())
