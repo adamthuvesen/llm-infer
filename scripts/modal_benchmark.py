@@ -105,13 +105,19 @@ def bench_vllm(num_requests: int, max_new_tokens: int, warmup: int, iters: int) 
     workload = build_workload(num_requests, max_new_tokens)
     result = run_vllm(workload, warmup=warmup, iters=iters)
     hf_cache.commit()
-    return {
-        "outputs": result.outputs,
-        "per_iter_seconds": result.per_iter_seconds,
-        "config": result.config,
-        "gpu": gpu_snapshot(),
-        "versions": library_versions(),
-    }
+    # Return a JSON string, not a dict: the local `modal run` entrypoint runs in modal's own
+    # (torch-less) env, so any torch/numpy scalar in a pickled result fails to deserialize
+    # there. Coercing to JSON-native types here (the GPU env, which has torch) makes the
+    # boundary bulletproof regardless of what dtype vLLM hands back.
+    return json.dumps(
+        {
+            "outputs": {k: [int(x) for x in v] for k, v in result.outputs.items()},
+            "per_iter_seconds": [float(s) for s in result.per_iter_seconds],
+            "config": result.config,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
 
 
 @app.function(image=flash_image, gpu="A100-80GB", volumes={HF_CACHE: hf_cache}, timeout=60 * 60)
@@ -228,27 +234,27 @@ def bench_engine_and_hf(
         "vllm": adjudicate(vllm_outputs),
     }
     hf_cache.commit()
-    return {
-        "hf_sequential": {
-            "outputs": hf_seq.outputs,
-            "per_iter_seconds": hf_seq.per_iter_seconds,
-            "config": hf_seq.config,
-        },
-        "hf_batched": {
-            "outputs": hf_bat.outputs,
-            "per_iter_seconds": hf_bat.per_iter_seconds,
-            "config": hf_bat.config,
-        },
-        "llm_infer": {
-            "outputs": infer.outputs,
-            "per_iter_seconds": infer.per_iter_seconds,
-            "config": infer.config,
-        },
-        "equivalence": equivalence,
-        "num_blocks": num_blocks,
-        "gpu": gpu_snapshot(),
-        "versions": library_versions(),
-    }
+
+    def _section(run) -> dict:
+        return {
+            "outputs": {k: [int(x) for x in v] for k, v in run.outputs.items()},
+            "per_iter_seconds": [float(s) for s in run.per_iter_seconds],
+            "config": run.config,
+        }
+
+    # JSON string, not a dict — see bench_vllm: the local entrypoint env has no torch, so the
+    # crossing payload must be JSON-native (coerced here, in the GPU env that has torch).
+    return json.dumps(
+        {
+            "hf_sequential": _section(hf_seq),
+            "hf_batched": _section(hf_bat),
+            "llm_infer": _section(infer),
+            "equivalence": equivalence,
+            "num_blocks": num_blocks,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
 
 
 @app.local_entrypoint()
@@ -282,9 +288,9 @@ def main(
     workload = build_workload(n, m)
     print(f"[benchmark] {command}: {n} requests x {m} new tokens, warmup={w}, iters={it}")
     print("[benchmark] running vLLM (own image, A100) ...")
-    vllm_res = bench_vllm.remote(n, m, w, it)
+    vllm_res = json.loads(bench_vllm.remote(n, m, w, it))
     print("[benchmark] running naive HF + llm-infer + equivalence (flash image, A100) ...")
-    main_res = bench_engine_and_hf.remote(n, m, w, it, vllm_res["outputs"])
+    main_res = json.loads(bench_engine_and_hf.remote(n, m, w, it, vllm_res["outputs"]))
 
     eq = main_res["equivalence"]
     rows_in = [
