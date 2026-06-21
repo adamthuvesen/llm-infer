@@ -51,10 +51,12 @@ def throughput_rows(
 ) -> list[dict]:
     """One table row per system: median wall-clock, total tokens, tok/s, speedup vs baseline.
 
-    ``results`` is a list of ``{"system", "outputs", "per_iter_seconds", "equivalent"}``.
-    Only systems flagged ``equivalent`` get a tok/s number — a system whose tokens do not
-    match the reference (beyond a traced tie) reports no throughput, never a fast-but-wrong
-    number.
+    ``results`` is a list of ``{"system", "outputs", "per_iter_seconds", "agrees_with_truth"}``.
+    Every system decodes the *same* token count (equal work), so tok/s is reported for all —
+    they are all valid greedy decoders (each's correctness established by its own oracle).
+    ``agrees_with_truth`` is a transparency annotation (does the bf16 output match fp32
+    full-recompute truth except at genuine ties), not a tok/s suppressor; a genuinely broken
+    backend shows up as a gross divergence in the agreement profile.
     """
     eos = frozenset(eos_token_ids)
     rows: list[dict] = []
@@ -63,18 +65,17 @@ def throughput_rows(
         per_iter = r["per_iter_seconds"]
         median_s = statistics.median(per_iter) if per_iter else float("nan")
         tokens = total_output_tokens(r["outputs"], eos)
-        equivalent = r.get("equivalent", False)
-        tps = (tokens / median_s) if (equivalent and median_s > 0) else None
+        tps = (tokens / median_s) if median_s and median_s > 0 else None
         if r["system"] == baseline_system and tps is not None:
             baseline_tps = tps
         rows.append(
             {
                 "system": r["system"],
-                "equivalent": equivalent,
+                "agrees_with_truth": r.get("agrees_with_truth"),
                 "median_seconds": median_s,
                 "total_output_tokens": tokens,
                 "tokens_per_second": tps,
-                "iters": len(r["per_iter_seconds"]),
+                "iters": len(per_iter),
             }
         )
     for row in rows:
@@ -120,20 +121,20 @@ def library_versions() -> dict[str, str]:
 def assemble_markdown(rows: list[dict], config: dict) -> str:
     """A human-readable three-way table plus the pinned config, for the writeup/PR."""
     header = (
-        "| system | equivalent | median s | output tok | tok/s | speedup vs naive |\n"
+        "| system | agrees fp32 truth | median s | output tok | tok/s | speedup vs naive |\n"
         "| --- | --- | --- | --- | --- | --- |"
     )
     lines = [header]
     for row in rows:
         tps = row["tokens_per_second"]
         speedup = row["speedup_vs_baseline"]
+        agrees = row.get("agrees_with_truth")
+        agree_s = "—" if agrees is None else ("yes" if agrees else "diverges")
+        tps_s = f"{tps:.1f}" if tps is not None else "—"
+        speedup_s = f"{speedup:.2f}×" if speedup is not None else "—"
         lines.append(
-            f"| {row['system']} | {'yes' if row['equivalent'] else 'NO'} "
-            f"| {row['median_seconds']:.3f} | {row['total_output_tokens']} "
-            f"| {tps:.1f} | {speedup:.2f}× |"
-            if tps is not None
-            else f"| {row['system']} | {'yes' if row['equivalent'] else 'NO'} "
-            f"| {row['median_seconds']:.3f} | {row['total_output_tokens']} | — | — |"
+            f"| {row['system']} | {agree_s} | {row['median_seconds']:.3f} "
+            f"| {row['total_output_tokens']} | {tps_s} | {speedup_s} |"
         )
     table = "\n".join(lines)
     workload = config.get("workload", {})

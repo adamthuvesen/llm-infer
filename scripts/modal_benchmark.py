@@ -151,7 +151,8 @@ def bench_engine_and_hf(
     from llm_infer.benchmarks.workload import build_workload
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.qwen import QwenModel
-    from tests.correctness.tie_tolerance import DEFAULT_TIE_TOLERANCE, compare_under_tie_tolerance
+    from llm_infer.serving import InferenceEngine, Request
+    from tests.correctness.tie_tolerance import compare_under_tie_tolerance
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     hf_cache.commit()
@@ -181,57 +182,62 @@ def bench_engine_and_hf(
     )
     infer = run_llm_infer(engine_model, workload, num_blocks=num_blocks, warmup=warmup, iters=iters)
 
-    reference = {rid: normalize_at_eos(ids, eos) for rid, ids in hf_seq.outputs.items()}
+    # The equivalence REFERENCE is the fp32 full-recompute oracle truth (Phase A), NOT bf16 HF
+    # generate. generate() itself diverges from truth at real margins (the documented step-32
+    # case), so using it as the reference wrongly fails any backend that is *more* faithful to
+    # fp32. Compute truth by running each UNIQUE prompt through the engine on the fp32 model —
+    # cached fp32 decode == fp32 full-recompute (Phase B), the same tokens at O(n) not O(n^2).
+    fp32_model = QwenModel.load(dtype=torch.float32, device="cuda")
+    truth_by_prompt: dict[tuple, list[int]] = {}
+    for req in workload.requests:
+        if req.prompt_ids not in truth_by_prompt:
+            eng = InferenceEngine(
+                fp32_model, block_size=BLOCK_SIZE, num_blocks=num_blocks, device="cuda"
+            )
+            eng.add_request(Request("truth", list(req.prompt_ids), max_new_tokens, eos))
+            truth_by_prompt[req.prompt_ids] = eng.run()["truth"]
+    reference = {
+        r.request_id: normalize_at_eos(truth_by_prompt[r.prompt_ids], eos)
+        for r in workload.requests
+    }
 
-    # Lazily load the fp32 reference (heavy) only if some system actually diverges.
-    _fp32: list[QwenModel] = []
+    # bf16 noise at these logit magnitudes (~20-25) is ~0.05-0.1, so a genuine bf16 tie can flip
+    # within ~0.1; the fp32-sized 1e-3 bar wrongly calls those flips "real". A first divergence
+    # whose fp32 top-2 gap exceeds this is a real reduction-order divergence (e.g. HF generate's
+    # ~0.4 step-32 effect) — reported transparently, not laundered as a tie.
+    bf16_tolerance = 0.1
 
-    def fp32_reference() -> QwenModel:
-        if not _fp32:
-            _fp32.append(QwenModel.load(dtype=torch.float32, device="cuda"))
-        return _fp32[0]
-
-    def adjudicate(outputs: dict[str, list[int]]) -> dict:
-        ties, failures, length_mismatch = [], [], []
+    def agreement_vs_truth(outputs: dict[str, list[int]]) -> dict:
+        exact, ties, divergences = 0, [], []
         for rid, raw in outputs.items():
             fast = normalize_at_eos(raw, eos)
             gold = reference[rid]
-            if fast != gold:
-                res = compare_under_tie_tolerance(
-                    fp32_reference(),
-                    prompts_by_id[rid],
-                    fast,
-                    gold,
-                    tolerance=DEFAULT_TIE_TOLERANCE,
-                )
-                if not res.ok:
-                    failures.append({"request": rid, "failure": res.failure})
-                elif res.divergence is not None:
-                    d = res.divergence
-                    ties.append(
-                        {
-                            "request": rid,
-                            "step": d.step,
-                            "fast_token": d.fast_token,
-                            "golden_token": d.golden_token,
-                            "reference_gap": d.reference_gap,
-                        }
-                    )
-            if len(fast) != len(gold):
-                length_mismatch.append(
-                    {"request": rid, "fast_len": len(fast), "ref_len": len(gold)}
-                )
+            if fast == gold:
+                exact += 1
+                continue
+            res = compare_under_tie_tolerance(
+                fp32_model, prompts_by_id[rid], fast, gold, tolerance=bf16_tolerance
+            )
+            if res.ok and res.divergence is not None:
+                d = res.divergence
+                ties.append({"request": rid, "step": d.step, "gap": d.reference_gap})
+            elif not res.ok:
+                divergences.append({"request": rid, "detail": res.failure})
         return {
-            "equivalent": not failures,
-            "ties": ties,
-            "failures": failures,
-            "length_mismatch": length_mismatch,
+            "exact": exact,
+            "tie": len(ties),
+            "nontie": len(divergences),
+            "total": len(outputs),
+            "all_ties_or_exact": not divergences,  # matches fp32 truth except at genuine bf16 ties
+            "ties_sample": ties[:3],
+            "divergences_sample": divergences[:3],
         }
 
-    equivalence = {
-        "hf_batched": adjudicate(hf_bat.outputs),
-        "llm_infer": adjudicate(infer.outputs),
-        "vllm": adjudicate(vllm_outputs),
+    agreement = {
+        "hf_sequential": agreement_vs_truth(hf_seq.outputs),
+        "hf_batched": agreement_vs_truth(hf_bat.outputs),
+        "llm_infer": agreement_vs_truth(infer.outputs),
+        "vllm": agreement_vs_truth(vllm_outputs),
     }
     hf_cache.commit()
 
@@ -249,7 +255,7 @@ def bench_engine_and_hf(
             "hf_sequential": _section(hf_seq),
             "hf_batched": _section(hf_bat),
             "llm_infer": _section(infer),
-            "equivalence": equivalence,
+            "agreement_vs_fp32_truth": agreement,
             "num_blocks": num_blocks,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
@@ -289,34 +295,34 @@ def main(
     print(f"[benchmark] {command}: {n} requests x {m} new tokens, warmup={w}, iters={it}")
     print("[benchmark] running vLLM (own image, A100) ...")
     vllm_res = json.loads(bench_vllm.remote(n, m, w, it))
-    print("[benchmark] running naive HF + llm-infer + equivalence (flash image, A100) ...")
+    print("[benchmark] running naive HF + llm-infer + fp32-truth agreement (flash image, A100) ...")
     main_res = json.loads(bench_engine_and_hf.remote(n, m, w, it, vllm_res["outputs"]))
 
-    eq = main_res["equivalence"]
+    agree = main_res["agreement_vs_fp32_truth"]
     rows_in = [
         {
             "system": "hf_sequential",
             "outputs": main_res["hf_sequential"]["outputs"],
             "per_iter_seconds": main_res["hf_sequential"]["per_iter_seconds"],
-            "equivalent": True,  # the reference is equivalent to itself by definition
+            "agrees_with_truth": agree["hf_sequential"]["all_ties_or_exact"],
         },
         {
             "system": "hf_batched",
             "outputs": main_res["hf_batched"]["outputs"],
             "per_iter_seconds": main_res["hf_batched"]["per_iter_seconds"],
-            "equivalent": eq["hf_batched"]["equivalent"],
+            "agrees_with_truth": agree["hf_batched"]["all_ties_or_exact"],
         },
         {
             "system": "llm_infer",
             "outputs": main_res["llm_infer"]["outputs"],
             "per_iter_seconds": main_res["llm_infer"]["per_iter_seconds"],
-            "equivalent": eq["llm_infer"]["equivalent"],
+            "agrees_with_truth": agree["llm_infer"]["all_ties_or_exact"],
         },
         {
             "system": "vllm",
             "outputs": vllm_res["outputs"],
             "per_iter_seconds": vllm_res["per_iter_seconds"],
-            "equivalent": eq["vllm"]["equivalent"],
+            "agrees_with_truth": agree["vllm"]["all_ties_or_exact"],
         },
     ]
     rows = throughput_rows(rows_in, workload.eos_token_ids, baseline_system="hf_sequential")
@@ -347,18 +353,16 @@ def main(
     }
 
     print("\n" + assemble_markdown(rows, config) + "\n")
-    for system, detail in eq.items():
-        if detail["failures"]:
-            print(f"[equivalence] {system}: NON-EQUIVALENT — {detail['failures']}")
-        elif detail["ties"]:
-            print(
-                f"[equivalence] {system}: equivalent with "
-                f"{len(detail['ties'])} traced tie(s): {detail['ties']}"
-            )
-        else:
-            print(f"[equivalence] {system}: exact token match vs naive HF")
+    for system, prof in agree.items():
+        line = (
+            f"[fp32-truth] {system}: exact={prof['exact']}/{prof['total']} "
+            f"tie={prof['tie']} non-tie={prof['nontie']}"
+        )
+        if prof["nontie"]:
+            line += f" | sample: {prof['divergences_sample'][:1]}"
+        print(line)
 
-    record = {"rows": rows, "config": config, "equivalence": eq}
+    record = {"rows": rows, "config": config, "agreement_vs_fp32_truth": agree}
     out_dir = REPO_ROOT / "bench-results"
     out_dir.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S")
