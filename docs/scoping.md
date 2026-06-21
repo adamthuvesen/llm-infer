@@ -4,7 +4,7 @@
 
 # nano-infer — scoping doc
 
-A minimal, honest LLM inference engine for **Qwen2.5-Coder-3B**, measured as an **rlvr-sql rollout backend**. Engine first; beautiful explanation second; expansion only if it serves the claim.
+A minimal, honest LLM inference engine for **Qwen2.5-Coder-3B-Instruct**, measured as an **rlvr-sql rollout backend**. Engine first; beautiful explanation second; expansion only if it serves the claim.
 
 ## The claim (capability statement, not a number)
 
@@ -114,11 +114,33 @@ Build only if it replays **real engine events**, not a simulation. The engine em
 
 ## Expansion path (post-v1, only if it serves the claim)
 
-- v2: FlexAttention backend (more ownership, no raw CUDA/Triton).
-- v3: **Triton paged-attention kernel** — the real systems-depth milestone; separate repo. Acceptance: matches reference within tolerance, faster than torch reference, documented limits.
-- v4: scheduling depth — prefix caching, chunked prefill, priority/fairness, cancellation, token budgeting.
-- v5: serving depth — OpenAI-compatible endpoint, streaming, metrics, load generator.
-- v6: optimized rlvr-sql rollout backend + **wall-clock decomposition writeup** (the hub that ties nano-infer + quantization + kernel repos together).
+The original v1/v1.5 scope is complete. The post-v1 plan changed after the local speed
+campaign: the first big win was not a new backend, but removing KV materialization waste in
+the existing decode path.
+
+- **v2: performance foundation — mostly done, paused.** Profiling/no-sync cleanup, packed KV
+  reads, vectorized KV writes, and read-plan reuse moved the frozen rlvr-sql rollout from the
+  v1.5 baseline of **65.9 tok/s** to a clean best of **365.8 tok/s** on A100-80GB PCIe
+  (`bench-results/rollout-rollout-20260621T164905.json`). That is about **5.55x** over
+  baseline, but short of the **>=650 tok/s** campaign target. The useful profile after that
+  point shows `kv_read_gather` is no longer the wall; remaining time is decode orchestration,
+  projections/MLP, attention, prefill, KV writes, and GQA expansion.
+- **v3: decode execution architecture — next.** Implement the smallest graph-safe tranche
+  from `docs/decode-graph-plan.md`: static decode buckets, preallocated decode-plan tensors,
+  graph-compatible eager replay, then CUDA graph capture for the frozen rollout's 32-slot
+  bucket if the replay path preserves the accepted 3026-token sample. This is the next real
+  attempt at closing the remaining ~1.78x gap to 650 tok/s.
+- **v4: scheduler and serving depth.** Generalize beyond the frozen rollout: dynamic buckets,
+  prefix-cache ownership/refcounts, chunked prefill, cancellation/fairness, token budgeting,
+  streaming, metrics, an OpenAI-compatible endpoint, and a load generator.
+- **v5: backend/kernel depth.** Revisit FlexAttention, Triton, or a true no-gather paged
+  backend only once decode orchestration is cleaner. The v2 loop rejected direct
+  FlashAttention GQA, projection/MLP fusion, step-local prompt-prefix KV copying, and
+  no-gather paged KV attention because they changed the sampled token path or regressed speed;
+  do not retry those shapes without new profile evidence and a stricter acceptance story.
+- **v6: release-quality story.** Release when the engine either reaches the speed target or
+  has a measured architectural ceiling, with a wall-clock decomposition writeup that explains
+  the remaining vLLM gap honestly.
 
 ## Repos (hub-and-spoke, not a monorepo)
 
