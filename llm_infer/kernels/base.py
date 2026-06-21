@@ -44,3 +44,29 @@ class AttentionBackend(Protocol):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> torch.Tensor: ...
+
+    def forward_decode_batch(
+        self,
+        queries: torch.Tensor,
+        keys: list[torch.Tensor],
+        values: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Batched single-token decode for ``B`` independent requests in one call.
+
+        This is the fused-batch decode path: every running request advances by exactly one
+        token, but each has its own (ragged) KV history, so the requests cannot be stacked
+        into a dense tensor. The fast backend packs them into one ragged kernel call; the
+        reference loops. The win over calling :meth:`forward` per request is a single kernel
+        launch / matmul instead of ``B`` of them.
+
+        Shapes:
+            queries: ``(B, num_heads, head_dim)`` — one decode query per request.
+            keys, values: a length-``B`` list, each ``(num_heads, kv_len_i, head_dim)`` — the
+                request's full history including this step, already RoPE'd and GQA-expanded.
+                ``kv_len_i`` varies per request.
+
+        Returns:
+            ``(B, num_heads, head_dim)`` — one attention output per request, row ``i`` being
+            request ``i``'s output, identical to ``forward(queries[i:i+1]..., keys[i], values[i])``.
+        """
+        ...

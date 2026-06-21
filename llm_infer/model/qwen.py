@@ -174,6 +174,52 @@ class QwenModel:
         hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
         return (hidden @ self._lm_head().T)[-1]
 
+    @torch.no_grad()
+    def decode_many(
+        self,
+        cache: PagedKVCache,
+        tables: list[BlockTable],
+        token_ids: list[int],
+    ) -> torch.Tensor:
+        """Cached decode of one new token for each of ``B`` requests in ONE batched forward.
+
+        The batched counterpart of :meth:`decode_one`: the ``B`` new tokens run through the
+        layer stack together (one matmul per projection, not ``B``), while each request keeps
+        its **own** RoPE position and its **own** paged history — the new token's position is
+        its table's running length, never a batch-row index. Per-request KV write and history
+        gather are O(B) bookkeeping; the attention itself is one fused ragged call. Returns
+        ``(B, vocab)`` next-token logits and advances each table's length by one.
+        """
+        if not tables:
+            raise ValueError("decode_many needs at least one request")
+        if not (len(tables) == len(token_ids)):
+            raise ValueError(f"tables/token_ids length mismatch: {len(tables)} vs {len(token_ids)}")
+
+        positions = [table.length for table in tables]
+        new_lengths = [pos + 1 for pos in positions]
+        for table in tables:
+            table.reserve(1)
+        ids = torch.tensor(token_ids, dtype=torch.long, device=self.device)
+        hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)  # (B, hidden)
+
+        # One RoPE cos/sin row per request, each at the request's own absolute position.
+        cos, sin = self._rope_for_positions(
+            torch.tensor(positions, dtype=torch.float32, device=self.device)
+        )
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._decode_attention_batched(
+                    x, p, cos, sin, lyr, cache, tables, positions, new_lengths
+                ),
+            )
+        for table, new_length in zip(tables, new_lengths, strict=True):
+            table.length = new_length
+
+        hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+        return hidden @ self._lm_head().T  # (B, vocab)
+
     def _apply_decoder_layer(
         self, hidden: torch.Tensor, layer: int, attention: _AttentionFn
     ) -> torch.Tensor:
@@ -255,6 +301,45 @@ class QwenModel:
         k_hist, v_hist = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
         attn = self.backend.forward(q, k_hist, v_hist)
         return self._output_proj(attn, p)
+
+    def _decode_attention_batched(
+        self,
+        x: torch.Tensor,
+        p: str,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        tables: list[BlockTable],
+        positions: list[int],
+        new_lengths: list[int],
+    ) -> torch.Tensor:
+        """Batched decode attention: same per-request math as :meth:`_decode_attention`, fused.
+
+        ``x`` is ``(B, hidden)`` — one new token per request. Projection and RoPE run on all
+        ``B`` at once (each row rotated by its own position via the per-request ``cos``/``sin``).
+        Each request's new K/V is written to its own paged history and its full history gathered
+        (GQA-expanded) — ragged across requests — then one batched attention call returns the
+        ``B`` outputs. Identical per request to the single-request decode path.
+        """
+        q, k, v = self._project_heads(x, p)  # (heads, B, hd), (kv_heads, B, hd), (kv_heads, B, hd)
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+
+        keys: list[torch.Tensor] = []
+        values: list[torch.Tensor] = []
+        for b, table in enumerate(tables):
+            k_new = k[:, b, :].unsqueeze(0).contiguous()  # (1, num_kv_heads, head_dim)
+            v_new = v[:, b, :].unsqueeze(0).contiguous()
+            cache.write(table, layer, positions[b], k_new, v_new)
+            k_hist, v_hist = cache.read(table, layer, new_lengths[b])  # (L_b, num_kv_heads, hd)
+            k_exp, v_exp = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
+            keys.append(k_exp)  # (num_heads, L_b, head_dim)
+            values.append(v_exp)
+
+        queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
+        attn = self.backend.forward_decode_batch(queries, keys, values)  # (B, num_heads, head_dim)
+        return self._output_proj(attn.transpose(0, 1).contiguous(), p)  # (B, hidden)
 
     def _project_heads(
         self, x: torch.Tensor, p: str

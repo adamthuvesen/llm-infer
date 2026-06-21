@@ -43,6 +43,30 @@ class TorchNaiveAttention:
         out = torch.matmul(weights, value.float())
         return out.to(query.dtype)
 
+    def forward_decode_batch(
+        self,
+        queries: torch.Tensor,
+        keys: list[torch.Tensor],
+        values: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Reference batched decode: loop over requests, reusing the single-request path.
+
+        No fusion — each request is attended exactly as :meth:`forward` would alone, so the
+        batched result is identical-by-construction to running each request serially. That is
+        the whole point of the reference: the fast backend's fused ragged kernel is validated
+        against this loop.
+        """
+        if not (len(keys) == len(values) == queries.shape[0]):
+            raise ValueError(
+                f"queries/keys/values count mismatch: "
+                f"{queries.shape[0]}, {len(keys)}, {len(values)}"
+            )
+        outs = [
+            self.forward(q.unsqueeze(1), k, v).squeeze(1)
+            for q, k, v in zip(queries, keys, values, strict=True)
+        ]
+        return torch.stack(outs, dim=0)
+
 
 def _causal_mask(q_len: int, kv_len: int, device: torch.device) -> torch.Tensor:
     """Additive mask: 0 where attention is allowed, -inf where it is forbidden.

@@ -63,32 +63,50 @@ class InferenceEngine:
         self.scheduler.add(request)
 
     def step(self) -> StepResult:
-        """Admit, advance every running request by one token, then free finished ones."""
+        """Admit, advance every running request by one token, then free finished ones.
+
+        Newly-admitted requests emit their first token via a (per-request) cached prefill;
+        every already-running request advances by one token through a single **batched**
+        decode forward (``decode_many``) rather than one forward each — the fused-batch decode
+        that makes continuous batching a throughput win, not just a scheduling one.
+        """
         result = StepResult()
 
         for request in self.scheduler.admit():
             request.block_table = self.cache.new_request()
             result.admitted.append(request.request_id)
 
+        to_decode: list[Request] = []
         for request in self.scheduler.running:
-            if not request.prefilled:
-                logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
-                request.prefilled = True
-            else:
-                logits = self.model.decode_one(
-                    self.cache, request.block_table, request.last_token
-                )
-            token = greedy(logits)
-            request.record(token)
-            result.tokens[request.request_id] = token
-            if request.finished:
-                result.finished.append(request.request_id)
+            if request.prefilled:
+                to_decode.append(request)
+                continue
+            logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
+            request.prefilled = True
+            self._record(request, greedy(logits), result)
+
+        if to_decode:
+            logits = self.model.decode_many(
+                self.cache,
+                [r.block_table for r in to_decode],
+                [r.last_token for r in to_decode],
+            )
+            for i, request in enumerate(to_decode):
+                self._record(request, greedy(logits[i]), result)
 
         for request in [r for r in self.scheduler.running if r.finished]:
             request.block_table.free()
             self.scheduler.release(request)
 
         return result
+
+    @staticmethod
+    def _record(request: Request, token: int, result: StepResult) -> None:
+        """Append a sampled token to a request and note it (and any finish) in the step result."""
+        request.record(token)
+        result.tokens[request.request_id] = token
+        if request.finished:
+            result.finished.append(request.request_id)
 
     def run(self) -> dict[str, list[int]]:
         """Step until the queue and running set drain; return each request's generated ids."""
