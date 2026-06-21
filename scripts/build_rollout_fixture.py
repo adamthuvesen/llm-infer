@@ -76,6 +76,14 @@ def _eos_token_ids(model_id: str, revision: str, tokenizer: object) -> list[int]
     return sorted(ids)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main() -> None:
     sys.path.insert(0, str(RLVR_SQL_ROOT / "src"))
     sys.path.insert(0, str(LLM_INFER_ROOT))
@@ -149,7 +157,8 @@ def main() -> None:
             "split": "dev (validation)",
             "hf_repo": SPIDER_HF_REPO,
             "hf_revision": SPIDER_HF_REVISION,
-            "tables_json": str(tables_json),
+            "tables_json_source": "spider_data/tables.json",
+            "tables_json_sha256": _sha256_file(tables_json),
         },
         "prompt_builder": {
             "source": "rlvr-sql eval/prompt.py build_messages(style='cot'), exemplars=()",

@@ -10,7 +10,8 @@
     "split": "dev (validation)",
     "hf_repo": "xlangai/spider",
     "hf_revision": "0c350918f3f29ec754f1181c65cdce76cd6c133c",
-    "tables_json": "/Users/adamthuvesen/dev/menti/rlvr-sql/data/spider/spider_data/tables.json"
+    "tables_json_source": "spider_data/tables.json",
+    "tables_json_sha256": "61bb20aa401f03164e2d7f3b16509b7b5f79cc9c943ca7bd159046df1159e2ed"
   },
   "prompt_builder": {
     "source": "rlvr-sql eval/prompt.py build_messages(style='cot'), exemplars=()",
