@@ -53,12 +53,22 @@ class BlockAllocator:
         return out
 
     def free(self, blocks: list[int]) -> None:
-        """Return blocks to the pool. Rejects out-of-range ids and double-frees loudly."""
+        """Return blocks to the pool, rejecting bad frees loudly and atomically.
+
+        Validates the *entire* batch before mutating ``_free`` — out-of-range ids,
+        already-free ids, and duplicates within the argument all raise before any block
+        is returned. A failed free therefore leaves the free list (and the next
+        allocation) untouched, never half-applied: a partially-applied free could return
+        a still-owned block to the pool and alias another request's KV pages.
+        """
         free_set = set(self._free)
+        seen: set[int] = set()
         for block in blocks:
             if not 0 <= block < self.num_blocks:
                 raise ValueError(f"block id {block} out of range [0, {self.num_blocks})")
             if block in free_set:
                 raise ValueError(f"double free of block id {block}")
-            free_set.add(block)
-            self._free.append(block)
+            if block in seen:
+                raise ValueError(f"duplicate block id {block} in free() argument")
+            seen.add(block)
+        self._free.extend(blocks)
