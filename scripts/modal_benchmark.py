@@ -63,13 +63,24 @@ flash_image = (
 )
 
 # vLLM image: vLLM pulls its own torch + CUDA runtime, so it must not share the flash env.
-# VLLM_WORKER_MULTIPROC_METHOD=spawn makes vLLM's V1 engine core *spawn* (not fork) its
-# subprocess — a forked child cannot re-initialize CUDA, which aborts the engine otherwise.
+# Two env pins keep it running on a toolkit-less (no nvcc) base:
+#   * VLLM_WORKER_MULTIPROC_METHOD=spawn — the V1 engine core *spawns* (not forks) its
+#     subprocess; a forked child cannot re-initialize CUDA, which aborts the engine.
+#   * VLLM_USE_FLASHINFER_SAMPLER=0 — use the native PyTorch top-k/top-p sampler instead of
+#     FlashInfer's, which JIT-compiles a CUDA kernel (needs nvcc) at startup. We decode
+#     greedy (temp 0 = argmax), so the sampler backend cannot change tokens, and throughput
+#     stays on vLLM's optimized FLASH_ATTN attention path (precompiled, no JIT).
 # The exact resolved vLLM version is recorded into the result at runtime (reproducible).
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("vllm")
-    .env({"HF_HOME": HF_CACHE, "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+    .env(
+        {
+            "HF_HOME": HF_CACHE,
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        }
+    )
     .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
     .workdir(REMOTE_ROOT)
     .run_commands("pip install --no-deps -e .")

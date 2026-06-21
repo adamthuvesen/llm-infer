@@ -269,6 +269,10 @@ def run_vllm(
             "max_model_len": max_model_len,
             "dtype": "bfloat16",
             "tensor_parallel_size": 1,
+            # Native sampler (VLLM_USE_FLASHINFER_SAMPLER=0, image env) — flashinfer's sampler
+            # JIT-needs nvcc; greedy decoding (argmax) is sampler-backend-independent anyway.
+            "sampler": "native-torch",
+            "attention_backend": "FLASH_ATTN (vLLM auto-selected, precompiled)",
         },
     )
     return result
