@@ -122,8 +122,7 @@ def run_llm_infer(
             return None
         return Sampler(temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed)
 
-    def decode_once() -> dict[str, list[int]]:
-        profiler = TimingProfiler(device) if collect_profile else None
+    def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
         engine = InferenceEngine(
             model,
             block_size=BLOCK_SIZE,
@@ -142,13 +141,11 @@ def run_llm_infer(
                 )
             )
         outputs = engine.run()
-        if profiler is not None:
-            profiles.append(profiler.summary().as_dict())
         return outputs
 
     result = time_system(
         "llm_infer",
-        decode_once,
+        lambda: decode_once(),
         warmup=warmup,
         iters=iters,
         config={
@@ -162,7 +159,13 @@ def run_llm_infer(
             "profile": collect_profile,
         },
     )
-    result.profiles = profiles[-iters:] if iters else []
+    if collect_profile:
+        _sync()
+        profiler = TimingProfiler(device)
+        decode_once(profiler)
+        _sync()
+        profiles.append(profiler.summary().as_dict())
+    result.profiles = profiles
     return result
 
 
