@@ -35,7 +35,7 @@ import torch
 
 from llm_infer.benchmarks.workload import Workload
 from llm_infer.model.qwen import QwenModel
-from llm_infer.serving import InferenceEngine, Request
+from llm_infer.serving import InferenceEngine, Request, Sampler
 
 BLOCK_SIZE = 128
 
@@ -53,6 +53,18 @@ class RunResult:
 def _sync() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def _sampling_config(sampling: object) -> dict[str, object]:
+    """Render a system's decoding config for the pinned record (greedy vs sampled)."""
+    if sampling is None:
+        return {"mode": "greedy", "temperature": 0.0}
+    return {
+        "mode": "sampling",
+        "temperature": sampling.temperature,
+        "top_p": sampling.top_p,
+        "seed": sampling.seed,
+    }
 
 
 def time_system(
@@ -93,11 +105,26 @@ def run_llm_infer(
     iters: int,
     device: str = "cuda",
 ) -> RunResult:
-    """This engine, flash backend, all requests in one paged cache under the batching loop."""
+    """This engine, flash backend, all requests in one paged cache under the batching loop.
+
+    Greedy by default; under ``workload.sampling`` each ``decode_once`` builds a fresh seeded
+    :class:`Sampler`, so every measured iteration reproduces identical tokens (the seed is
+    re-applied per iteration) — the median wall-clock measures equal work, not RNG drift.
+    """
+    sampling = workload.sampling
+
+    def make_sampler() -> Sampler | None:
+        if sampling is None:
+            return None
+        return Sampler(temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed)
 
     def decode_once() -> dict[str, list[int]]:
         engine = InferenceEngine(
-            model, block_size=BLOCK_SIZE, num_blocks=num_blocks, device=device
+            model,
+            block_size=BLOCK_SIZE,
+            num_blocks=num_blocks,
+            device=device,
+            sampler=make_sampler(),
         )
         for req in workload.requests:
             engine.add_request(
@@ -122,6 +149,7 @@ def run_llm_infer(
             "num_blocks": num_blocks,
             # All running requests advance in one fused batched decode (decode_many) per step.
             "batched_forward": True,
+            "sampling": _sampling_config(sampling),
         },
     )
 
@@ -134,21 +162,34 @@ def run_hf_sequential(
     iters: int,
     device: str = "cuda",
 ) -> RunResult:
-    """Naive baseline: HF ``generate()`` once per request, sequentially."""
+    """Naive baseline (the floor): HF ``generate()`` once per request, sequentially.
+
+    Greedy by default; under ``workload.sampling`` it samples with the pinned temperature/
+    top-p and re-seeds (``set_seed``) at the start of every ``decode_once`` so each measured
+    iteration reproduces identical tokens.
+    """
     eos = sorted(workload.eos_token_ids)
+    sampling = workload.sampling
+    gen_kwargs: dict[str, object] = {
+        "max_new_tokens": workload.max_new_tokens,
+        "num_beams": 1,
+        "eos_token_id": eos,
+        "pad_token_id": eos[0],
+    }
+    if sampling is None:
+        gen_kwargs["do_sample"] = False
+    else:
+        gen_kwargs.update(do_sample=True, temperature=sampling.temperature, top_p=sampling.top_p)
 
     def decode_once() -> dict[str, list[int]]:
+        if sampling is not None:
+            from transformers import set_seed
+
+            set_seed(sampling.seed)
         outputs: dict[str, list[int]] = {}
         for req in workload.requests:
             input_ids = torch.tensor([req.prompt_ids], device=device)
-            gen = hf_model.generate(
-                input_ids,
-                max_new_tokens=workload.max_new_tokens,
-                do_sample=False,
-                num_beams=1,
-                eos_token_id=eos,
-                pad_token_id=eos[0],
-            )
+            gen = hf_model.generate(input_ids, **gen_kwargs)
             outputs[req.request_id] = gen[0, input_ids.shape[1] :].tolist()
         return outputs
 
@@ -161,6 +202,7 @@ def run_hf_sequential(
             "method": "per-request model.generate()",
             "attn_implementation": getattr(hf_model.config, "_attn_implementation", "unknown"),
             "dtype": str(next(hf_model.parameters()).dtype),
+            "sampling": _sampling_config(sampling),
         },
     )
 
@@ -222,14 +264,17 @@ def run_vllm(
     gpu_memory_utilization: float = 0.90,
     max_num_seqs: int = 256,
 ) -> RunResult:
-    """vLLM offline generate, greedy, prefix caching off, flags pinned and recorded.
+    """vLLM offline generate, bf16, prefix caching off, flags pinned and recorded.
 
-    The ``vllm`` import is local so the rest of the benchmark loads on the flash image
-    (which has no vLLM); this runner only ever executes on the dedicated vLLM image.
+    Greedy on the base weights for the Phase D benchmark; the rollout passes the merged
+    grpo-s0 path as ``workload.model_id`` plus ``workload.sampling``. Either way vLLM runs
+    bf16 — the model's native dtype. The ``vllm`` import is local so the rest of the benchmark
+    loads on the flash image (which has no vLLM); this runner only runs on the vLLM image.
     """
     import vllm
     from vllm import LLM, SamplingParams
 
+    sampling = workload.sampling
     max_model_len = max(workload.prompt_lengths) + workload.max_new_tokens
     llm = LLM(
         model=workload.model_id,
@@ -241,13 +286,27 @@ def run_vllm(
         max_model_len=max_model_len,
         tensor_parallel_size=1,
     )
-    params = SamplingParams(
-        temperature=0.0,
-        max_tokens=workload.max_new_tokens,
-        n=1,
-        stop_token_ids=sorted(workload.eos_token_ids),
-        ignore_eos=False,
-    )
+    # Greedy (Phase D) → temperature 0. Rollout → the pinned temperature/top-p, seeded for
+    # a reproducible per-iteration token set. n=1 because the G=4 replication is already in
+    # the workload (32 independent completions), so every system decodes identical request set.
+    if sampling is None:
+        params = SamplingParams(
+            temperature=0.0,
+            max_tokens=workload.max_new_tokens,
+            n=1,
+            stop_token_ids=sorted(workload.eos_token_ids),
+            ignore_eos=False,
+        )
+    else:
+        params = SamplingParams(
+            temperature=sampling.temperature,
+            top_p=sampling.top_p,
+            seed=sampling.seed,
+            max_tokens=workload.max_new_tokens,
+            n=1,
+            stop_token_ids=sorted(workload.eos_token_ids),
+            ignore_eos=False,
+        )
     prompts = [{"prompt_token_ids": list(req.prompt_ids)} for req in workload.requests]
     ids_by_index = [req.request_id for req in workload.requests]
 
@@ -274,9 +333,11 @@ def run_vllm(
             "dtype": "bfloat16",
             "tensor_parallel_size": 1,
             # Native sampler (VLLM_USE_FLASHINFER_SAMPLER=0, image env) — flashinfer's sampler
-            # JIT-needs nvcc; greedy decoding (argmax) is sampler-backend-independent anyway.
+            # JIT-needs nvcc; under temperature/top-p vLLM samples on this native path.
             "sampler": "native-torch",
             "attention_backend": "FLASH_ATTN (vLLM auto-selected, precompiled)",
+            "sampling": _sampling_config(sampling),
+            "model": workload.model_id,
         },
     )
     return result
