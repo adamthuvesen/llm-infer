@@ -1,7 +1,7 @@
 # Keeping the GPU busy — the rlvr-sql rollout-timing hook (Phase E)
 
 This is the differentiator: the one number that makes `llm-infer` an *rlvr-sql rollout
-backend* rather than a nano-vLLM clone. Phase D proved the engine decodes a synthetic
+backend* rather than a generic vLLM clone. Phase D proved the engine decodes a synthetic
 workload correctly and beats naive HF (`docs/benchmark.md`). Phase E points it at the
 **real** thing it exists to serve — one frozen rlvr-sql GRPO rollout batch — and times it
 against vLLM (rlvr-sql's current rollout backend, the ceiling) and naive HF (the floor).

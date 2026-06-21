@@ -19,6 +19,7 @@ use different RNG, so identical tokens are neither expected nor honest to requir
 
     modal run scripts/modal_rollout.py --command smoke    # cheap wiring + bf16 sanity (2 comp)
     modal run scripts/modal_rollout.py --command rollout  # the frozen batch (32 comp, 1024 tok)
+    modal run scripts/modal_rollout.py --command rollout --profile  # diagnostic extra run
 """
 
 from __future__ import annotations
@@ -161,6 +162,7 @@ def rollout_engine_and_hf(
     warmup: int,
     iters: int,
     with_sample_text: bool,
+    profile: bool,
 ) -> str:
     """This engine (flash, bf16, seeded sampler) and the naive HF floor, on the merged weights."""
     import torch
@@ -196,7 +198,14 @@ def rollout_engine_and_hf(
         model_id=MERGED_MODEL_PATH,
         revision=None,
     )
-    infer = run_llm_infer(engine_model, workload, num_blocks=num_blocks, warmup=warmup, iters=iters)
+    infer = run_llm_infer(
+        engine_model,
+        workload,
+        num_blocks=num_blocks,
+        warmup=warmup,
+        iters=iters,
+        collect_profile=profile,
+    )
 
     hf_model = (
         AutoModelForCausalLM.from_pretrained(MERGED_MODEL_PATH, dtype=torch.bfloat16)
@@ -217,6 +226,7 @@ def rollout_engine_and_hf(
             "outputs": {k: [int(x) for x in v] for k, v in run.outputs.items()},
             "per_iter_seconds": [float(s) for s in run.per_iter_seconds],
             "config": run.config,
+            "profiles": run.profiles,
         }
 
     return json.dumps(
@@ -239,6 +249,7 @@ def main(
     max_completion: int = 0,
     warmup: int = -1,
     iters: int = 0,
+    profile: bool = False,
 ) -> None:
     """Orchestrate both GPU functions, assemble the pinned rollout record, print the table.
 
@@ -286,7 +297,7 @@ def main(
     vllm_res = json.loads(rollout_vllm.remote(n_prompts, g, max_comp, w, it, with_sample_text))
     print("[rollout] running llm-infer + HF floor (flash image, A100) ...")
     main_res = json.loads(
-        rollout_engine_and_hf.remote(n_prompts, g, max_comp, w, it, with_sample_text)
+        rollout_engine_and_hf.remote(n_prompts, g, max_comp, w, it, with_sample_text, profile)
     )
 
     rows_in = [
@@ -343,7 +354,16 @@ def main(
             "hf_sequential": main_res["hf_sequential"]["config"],
             "vllm": vllm_res["config"],
         },
-        "repro_command": f"modal run scripts/modal_rollout.py --command {command}",
+        "profile": {
+            "requested": profile,
+            "diagnostic_only": True,
+            "note": "Profiles are collected in an extra llm-infer run outside headline timing.",
+        },
+        "profiles": {"llm_infer": main_res["llm_infer"].get("profiles", [])},
+        "repro_command": (
+            f"modal run scripts/modal_rollout.py --command {command}"
+            f"{' --profile' if profile else ''}"
+        ),
     }
 
     print("\n" + assemble_rollout_markdown(rows, config) + "\n")

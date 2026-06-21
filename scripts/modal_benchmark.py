@@ -15,6 +15,7 @@ number — validate before you brag.
 
     modal run scripts/modal_benchmark.py --command smoke    # cheap wiring check (N=2, 8 tok)
     modal run scripts/modal_benchmark.py --command bench    # full run (N=32, 128 tok)
+    modal run scripts/modal_benchmark.py --command bench --profile  # diagnostic extra run
 """
 
 from __future__ import annotations
@@ -127,6 +128,7 @@ def bench_engine_and_hf(
     warmup: int,
     iters: int,
     vllm_outputs: dict,
+    profile: bool,
 ) -> dict:
     """Run naive-HF (sequential + batched) and this engine, then adjudicate all equivalence.
 
@@ -180,7 +182,14 @@ def bench_engine_and_hf(
     engine_model = QwenModel.load(
         dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda"
     )
-    infer = run_llm_infer(engine_model, workload, num_blocks=num_blocks, warmup=warmup, iters=iters)
+    infer = run_llm_infer(
+        engine_model,
+        workload,
+        num_blocks=num_blocks,
+        warmup=warmup,
+        iters=iters,
+        collect_profile=profile,
+    )
 
     # The equivalence REFERENCE is the fp32 full-recompute oracle truth (Phase A), NOT bf16 HF
     # generate. generate() itself diverges from truth at real margins (the documented step-32
@@ -246,6 +255,7 @@ def bench_engine_and_hf(
             "outputs": {k: [int(x) for x in v] for k, v in run.outputs.items()},
             "per_iter_seconds": [float(s) for s in run.per_iter_seconds],
             "config": run.config,
+            "profiles": run.profiles,
         }
 
     # JSON string, not a dict — see bench_vllm: the local entrypoint env has no torch, so the
@@ -270,6 +280,7 @@ def main(
     max_new_tokens: int = 0,
     warmup: int = -1,
     iters: int = 0,
+    profile: bool = False,
 ) -> None:
     """Orchestrate both GPU functions, assemble the pinned record, print the table, write JSON.
 
@@ -296,7 +307,7 @@ def main(
     print("[benchmark] running vLLM (own image, A100) ...")
     vllm_res = json.loads(bench_vllm.remote(n, m, w, it))
     print("[benchmark] running naive HF + llm-infer + fp32-truth agreement (flash image, A100) ...")
-    main_res = json.loads(bench_engine_and_hf.remote(n, m, w, it, vllm_res["outputs"]))
+    main_res = json.loads(bench_engine_and_hf.remote(n, m, w, it, vllm_res["outputs"], profile))
 
     agree = main_res["agreement_vs_fp32_truth"]
     rows_in = [
@@ -349,7 +360,16 @@ def main(
             "llm_infer": {**main_res["llm_infer"]["config"], "num_blocks": main_res["num_blocks"]},
             "vllm": vllm_res["config"],
         },
-        "repro_command": f"modal run scripts/modal_benchmark.py --command {command}",
+        "profile": {
+            "requested": profile,
+            "diagnostic_only": True,
+            "note": "Profiles are collected in an extra llm-infer run outside headline timing.",
+        },
+        "profiles": {"llm_infer": main_res["llm_infer"].get("profiles", [])},
+        "repro_command": (
+            f"modal run scripts/modal_benchmark.py --command {command}"
+            f"{' --profile' if profile else ''}"
+        ),
     }
 
     print("\n" + assemble_markdown(rows, config) + "\n")

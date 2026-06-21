@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import torch
+
 from llm_infer.kv_cache.block_table import BlockTable
 
 
@@ -23,9 +25,10 @@ class Request:
     eos_token_ids: frozenset[int]
 
     block_table: BlockTable | None = None
-    generated: list[int] = field(default_factory=list)
     prefilled: bool = False
     finished: bool = False
+    _generated_tokens: list[torch.Tensor] = field(default_factory=list, init=False, repr=False)
+    _generated_cache: list[int] | None = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.prompt_ids:
@@ -34,14 +37,37 @@ class Request:
             raise ValueError(f"max_new_tokens must be >= 1; got {self.max_new_tokens}")
 
     @property
+    def generated(self) -> list[int]:
+        """Generated ids materialized as Python ints at output/test boundaries."""
+        if self._generated_cache is None:
+            if not self._generated_tokens:
+                self._generated_cache = []
+            else:
+                stacked = torch.stack([token.reshape(()) for token in self._generated_tokens])
+                self._generated_cache = [int(token) for token in stacked.cpu().tolist()]
+        return list(self._generated_cache)
+
+    @property
     def last_token(self) -> int:
-        """The most recently produced token — the one a decode step feeds back in."""
-        if not self.generated:
+        """The most recently produced token as a Python int, for boundary callers."""
+        if not self._generated_tokens:
             raise ValueError(f"request {self.request_id!r} has produced no tokens yet")
         return self.generated[-1]
 
-    def record(self, token_id: int) -> None:
+    @property
+    def last_token_tensor(self) -> torch.Tensor:
+        """The most recently produced token, still on its original device."""
+        if not self._generated_tokens:
+            raise ValueError(f"request {self.request_id!r} has produced no tokens yet")
+        return self._generated_tokens[-1]
+
+    def record(self, token_id: int | torch.Tensor, *, is_eos: bool | None = None) -> None:
         """Append a sampled token and apply the stop rule (EOS or length cap)."""
-        self.generated.append(token_id)
-        if token_id in self.eos_token_ids or len(self.generated) >= self.max_new_tokens:
+        token = torch.as_tensor(token_id, dtype=torch.long).reshape(())
+        self._generated_tokens.append(token.detach())
+        self._generated_cache = None
+
+        if is_eos is None:
+            is_eos = int(token.cpu().item()) in self.eos_token_ids
+        if is_eos or len(self._generated_tokens) >= self.max_new_tokens:
             self.finished = True

@@ -167,6 +167,82 @@ def test_two_requests_do_not_collide() -> None:
     assert torch.equal(got_bv, vb)
 
 
+def test_read_many_packs_ragged_histories() -> None:
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=2, head_dim=3, dtype=torch.float32
+    )
+    a = cache.new_request()
+    b = cache.new_request()
+    a.reserve(3)
+    b.reserve(5)
+
+    ka, va = _ramp(3, 2, 3, 0.0), _ramp(3, 2, 3, 100.0)
+    kb, vb = _ramp(5, 2, 3, 1000.0), _ramp(5, 2, 3, 2000.0)
+    cache.write(a, layer=0, start_pos=0, key=ka, value=va)
+    cache.write(b, layer=0, start_pos=0, key=kb, value=vb)
+
+    key, value, cu_seqlens, max_len = cache.read_many([a, b], layer=0, lengths=[3, 5])
+
+    assert torch.equal(key, torch.cat([ka, kb], dim=0))
+    assert torch.equal(value, torch.cat([va, vb], dim=0))
+    assert torch.equal(cu_seqlens.cpu(), torch.tensor([0, 3, 8], dtype=torch.int32))
+    assert max_len == 5
+
+
+def test_read_many_plan_reuses_indices_across_layers() -> None:
+    cache = PagedKVCache(
+        num_layers=2, num_blocks=8, block_size=4, num_kv_heads=2, head_dim=3, dtype=torch.float32
+    )
+    a = cache.new_request()
+    b = cache.new_request()
+    a.reserve(3)
+    b.reserve(5)
+
+    layer0_a, layer0_av = _ramp(3, 2, 3, 0.0), _ramp(3, 2, 3, 100.0)
+    layer0_b, layer0_bv = _ramp(5, 2, 3, 1000.0), _ramp(5, 2, 3, 2000.0)
+    layer1_a, layer1_av = _ramp(3, 2, 3, 3000.0), _ramp(3, 2, 3, 4000.0)
+    layer1_b, layer1_bv = _ramp(5, 2, 3, 5000.0), _ramp(5, 2, 3, 6000.0)
+    cache.write(a, layer=0, start_pos=0, key=layer0_a, value=layer0_av)
+    cache.write(b, layer=0, start_pos=0, key=layer0_b, value=layer0_bv)
+    cache.write(a, layer=1, start_pos=0, key=layer1_a, value=layer1_av)
+    cache.write(b, layer=1, start_pos=0, key=layer1_b, value=layer1_bv)
+
+    plan = cache.plan_read_many([a, b], lengths=[3, 5])
+    key0, value0 = cache.read_many_plan(layer=0, plan=plan)
+    key1, value1 = cache.read_many_plan(layer=1, plan=plan)
+
+    assert torch.equal(plan.cu_seqlens.cpu(), torch.tensor([0, 3, 8], dtype=torch.int32))
+    assert plan.lengths == [3, 5]
+    assert plan.max_len == 5
+    assert torch.equal(key0, torch.cat([layer0_a, layer0_b], dim=0))
+    assert torch.equal(value0, torch.cat([layer0_av, layer0_bv], dim=0))
+    assert torch.equal(key1, torch.cat([layer1_a, layer1_b], dim=0))
+    assert torch.equal(value1, torch.cat([layer1_av, layer1_bv], dim=0))
+
+
+def test_write_many_stores_one_decode_row_per_request() -> None:
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=2, head_dim=3, dtype=torch.float32
+    )
+    a = cache.new_request()
+    b = cache.new_request()
+    a.reserve(4)
+    b.reserve(4)
+    a.length = 2
+    b.length = 3
+
+    key = _ramp(2, 2, 3, 10.0)
+    value = _ramp(2, 2, 3, 100.0)
+    cache.write_many([a, b], layer=0, positions=[2, 3], key=key, value=value)
+
+    got_a, got_av = cache.read(a, layer=0, length=3)
+    got_b, got_bv = cache.read(b, layer=0, length=4)
+    assert torch.equal(got_a[2], key[0])
+    assert torch.equal(got_b[3], key[1])
+    assert torch.equal(got_av[2], value[0])
+    assert torch.equal(got_bv[3], value[1])
+
+
 def test_layers_are_independent() -> None:
     cache = PagedKVCache(
         num_layers=2, num_blocks=4, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32

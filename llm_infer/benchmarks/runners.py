@@ -35,6 +35,7 @@ import torch
 
 from llm_infer.benchmarks.workload import Workload
 from llm_infer.model.qwen import QwenModel
+from llm_infer.profiling import TimingProfiler
 from llm_infer.serving import InferenceEngine, Request, Sampler
 
 BLOCK_SIZE = 128
@@ -48,6 +49,7 @@ class RunResult:
     outputs: dict[str, list[int]]
     per_iter_seconds: list[float]
     config: dict[str, object] = field(default_factory=dict)
+    profiles: list[dict[str, object]] = field(default_factory=list)
 
 
 def _sync() -> None:
@@ -104,6 +106,7 @@ def run_llm_infer(
     warmup: int,
     iters: int,
     device: str = "cuda",
+    collect_profile: bool = False,
 ) -> RunResult:
     """This engine, flash backend, all requests in one paged cache under the batching loop.
 
@@ -112,19 +115,21 @@ def run_llm_infer(
     re-applied per iteration) — the median wall-clock measures equal work, not RNG drift.
     """
     sampling = workload.sampling
+    profiles: list[dict[str, object]] = []
 
     def make_sampler() -> Sampler | None:
         if sampling is None:
             return None
         return Sampler(temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed)
 
-    def decode_once() -> dict[str, list[int]]:
+    def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
         engine = InferenceEngine(
             model,
             block_size=BLOCK_SIZE,
             num_blocks=num_blocks,
             device=device,
             sampler=make_sampler(),
+            profiler=profiler,
         )
         for req in workload.requests:
             engine.add_request(
@@ -135,11 +140,12 @@ def run_llm_infer(
                     workload.eos_token_ids,
                 )
             )
-        return engine.run()
+        outputs = engine.run()
+        return outputs
 
-    return time_system(
+    result = time_system(
         "llm_infer",
-        decode_once,
+        lambda: decode_once(),
         warmup=warmup,
         iters=iters,
         config={
@@ -150,8 +156,17 @@ def run_llm_infer(
             # All running requests advance in one fused batched decode (decode_many) per step.
             "batched_forward": True,
             "sampling": _sampling_config(sampling),
+            "profile": collect_profile,
         },
     )
+    if collect_profile:
+        _sync()
+        profiler = TimingProfiler(device)
+        decode_once(profiler)
+        _sync()
+        profiles.append(profiler.summary().as_dict())
+    result.profiles = profiles
+    return result
 
 
 def run_hf_sequential(

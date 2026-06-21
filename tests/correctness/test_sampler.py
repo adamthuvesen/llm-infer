@@ -37,15 +37,18 @@ def test_temperature_zero_equals_argmax_single_and_batched() -> None:
     logits = torch.randn(7, 4096)
     sampler = Sampler(temperature=0.0)
 
-    assert sampler.sample_many(logits) == torch.argmax(logits, dim=-1).tolist()
+    assert torch.equal(sampler.sample_many(logits), torch.argmax(logits, dim=-1))
     for row in logits:
-        assert sampler.sample(row) == greedy(row) == int(torch.argmax(row).item())
+        token = sampler.sample(row)
+        assert token.ndim == 0
+        assert int(token) == greedy(row) == int(torch.argmax(row).item())
 
 
 def test_temperature_zero_breaks_ties_like_argmax() -> None:
     """On an exact tie, temperature 0 picks the first max index, exactly as ``greedy``."""
     logits = torch.tensor([1.0, 1.0, 0.5])
-    assert Sampler(temperature=0.0).sample(logits) == greedy(logits) == 0
+    token = Sampler(temperature=0.0).sample(logits)
+    assert int(token) == greedy(logits) == 0
 
 
 def test_top_p_truncates_to_the_nucleus() -> None:
@@ -53,7 +56,7 @@ def test_top_p_truncates_to_the_nucleus() -> None:
     logits = torch.tensor([[10.0, 0.0, -10.0]])  # softmax ~ [0.99995, 4.5e-5, 2e-9]
     sampler = Sampler(temperature=1.0, top_p=0.5, seed=0)
     # The top token alone exceeds top_p=0.5, so it is the only one kept: every draw is token 0.
-    assert all(sampler.sample_many(logits) == [0] for _ in range(8))
+    assert all(sampler.sample_many(logits).tolist() == [0] for _ in range(8))
 
 
 def test_top_p_one_is_a_no_op_full_softmax() -> None:
@@ -69,7 +72,7 @@ def test_seed_is_reproducible() -> None:
     logits = torch.randn(16, 256, generator=torch.Generator().manual_seed(1))
     a = Sampler(temperature=1.0, seed=123).sample_many(logits)
     b = Sampler(temperature=1.0, seed=123).sample_many(logits)
-    assert a == b
+    assert torch.equal(a, b)
 
 
 def test_different_seeds_diverge() -> None:
@@ -77,7 +80,7 @@ def test_different_seeds_diverge() -> None:
     logits = torch.randn(64, 4096, generator=torch.Generator().manual_seed(2))
     a = Sampler(temperature=1.0, seed=0).sample_many(logits)
     b = Sampler(temperature=1.0, seed=1).sample_many(logits)
-    assert a != b
+    assert not torch.equal(a, b)
 
 
 def test_invalid_params_rejected() -> None:
