@@ -355,13 +355,14 @@ class QwenModel:
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
 
-        keys: list[torch.Tensor] = []
-        values: list[torch.Tensor] = []
-        for b, table in enumerate(tables):
-            k_new = k[:, b, :].unsqueeze(0).contiguous()  # (1, num_kv_heads, head_dim)
-            v_new = v[:, b, :].unsqueeze(0).contiguous()
-            with self._profile("kv_write"):
-                cache.write(table, layer, positions[b], k_new, v_new)
+        with self._profile("kv_write"):
+            cache.write_many(
+                tables,
+                layer,
+                positions,
+                k.transpose(0, 1).contiguous(),
+                v.transpose(0, 1).contiguous(),
+            )
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
         with self._profile("kv_read_gather"):
@@ -374,6 +375,8 @@ class QwenModel:
             if packed_forward is not None:
                 attn = packed_forward(queries, k_exp, v_exp, cu_seqlens_k, max_seqlen_k)
             else:
+                keys: list[torch.Tensor] = []
+                values: list[torch.Tensor] = []
                 for k_chunk, v_chunk in zip(
                     k_exp.split(new_lengths), v_exp.split(new_lengths), strict=True
                 ):

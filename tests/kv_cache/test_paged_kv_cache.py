@@ -189,6 +189,29 @@ def test_read_many_packs_ragged_histories() -> None:
     assert max_len == 5
 
 
+def test_write_many_stores_one_decode_row_per_request() -> None:
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=2, head_dim=3, dtype=torch.float32
+    )
+    a = cache.new_request()
+    b = cache.new_request()
+    a.reserve(4)
+    b.reserve(4)
+    a.length = 2
+    b.length = 3
+
+    key = _ramp(2, 2, 3, 10.0)
+    value = _ramp(2, 2, 3, 100.0)
+    cache.write_many([a, b], layer=0, positions=[2, 3], key=key, value=value)
+
+    got_a, got_av = cache.read(a, layer=0, length=3)
+    got_b, got_bv = cache.read(b, layer=0, length=4)
+    assert torch.equal(got_a[2], key[0])
+    assert torch.equal(got_b[3], key[1])
+    assert torch.equal(got_av[2], value[0])
+    assert torch.equal(got_bv[3], value[1])
+
+
 def test_layers_are_independent() -> None:
     cache = PagedKVCache(
         num_layers=2, num_blocks=4, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32

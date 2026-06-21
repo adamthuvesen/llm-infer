@@ -67,6 +67,31 @@ class PagedKVCache:
         self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = key
         self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = value
 
+    def write_many(
+        self,
+        tables: list[BlockTable],
+        layer: int,
+        positions: list[int],
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        """Store one K/V row per request for a batched decode step.
+
+        ``key``/``value`` are ``(B, num_kv_heads, head_dim)`` and row ``i`` is written
+        into ``tables[i]`` at ``positions[i]``.
+        """
+        if not (len(tables) == len(positions) == key.shape[0] == value.shape[0]):
+            raise ValueError(
+                f"tables/positions/key/value batch mismatch: "
+                f"{len(tables)}, {len(positions)}, {key.shape[0]}, {value.shape[0]}"
+            )
+        slots = [
+            table.physical_slot(pos) for table, pos in zip(tables, positions, strict=True)
+        ]
+        idx = torch.as_tensor(slots, dtype=torch.long, device=key.device)
+        self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = key
+        self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = value
+
     def read(
         self, table: BlockTable, layer: int, length: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
