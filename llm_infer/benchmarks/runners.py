@@ -253,8 +253,12 @@ def run_vllm(
 
     def decode_once() -> dict[str, list[int]]:
         results = llm.generate(prompts, params, use_tqdm=False)
-        # vLLM may reorder; map each result back by its input index.
-        return {ids_by_index[i]: list(results[i].outputs[0].token_ids) for i in range(len(results))}
+        # Coerce to plain Python ints: vLLM token_ids can be tensor/array scalars, which pickle
+        # with a torch ref and fail to deserialize in the (torch-less) local `modal run` env.
+        return {
+            ids_by_index[i]: [int(t) for t in results[i].outputs[0].token_ids]
+            for i in range(len(results))
+        }
 
     result = time_system(
         "vllm",
