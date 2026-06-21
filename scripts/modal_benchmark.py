@@ -180,7 +180,14 @@ def bench_engine_and_hf(
     engine_model = QwenModel.load(
         dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda"
     )
-    infer = run_llm_infer(engine_model, workload, num_blocks=num_blocks, warmup=warmup, iters=iters)
+    infer = run_llm_infer(
+        engine_model,
+        workload,
+        num_blocks=num_blocks,
+        warmup=warmup,
+        iters=iters,
+        collect_profile=True,
+    )
 
     # The equivalence REFERENCE is the fp32 full-recompute oracle truth (Phase A), NOT bf16 HF
     # generate. generate() itself diverges from truth at real margins (the documented step-32
@@ -246,6 +253,7 @@ def bench_engine_and_hf(
             "outputs": {k: [int(x) for x in v] for k, v in run.outputs.items()},
             "per_iter_seconds": [float(s) for s in run.per_iter_seconds],
             "config": run.config,
+            "profiles": run.profiles,
         }
 
     # JSON string, not a dict — see bench_vllm: the local entrypoint env has no torch, so the
@@ -349,6 +357,7 @@ def main(
             "llm_infer": {**main_res["llm_infer"]["config"], "num_blocks": main_res["num_blocks"]},
             "vllm": vllm_res["config"],
         },
+        "profiles": {"llm_infer": main_res["llm_infer"].get("profiles", [])},
         "repro_command": f"modal run scripts/modal_benchmark.py --command {command}",
     }
 

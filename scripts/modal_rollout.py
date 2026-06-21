@@ -196,7 +196,14 @@ def rollout_engine_and_hf(
         model_id=MERGED_MODEL_PATH,
         revision=None,
     )
-    infer = run_llm_infer(engine_model, workload, num_blocks=num_blocks, warmup=warmup, iters=iters)
+    infer = run_llm_infer(
+        engine_model,
+        workload,
+        num_blocks=num_blocks,
+        warmup=warmup,
+        iters=iters,
+        collect_profile=True,
+    )
 
     hf_model = (
         AutoModelForCausalLM.from_pretrained(MERGED_MODEL_PATH, dtype=torch.bfloat16)
@@ -217,6 +224,7 @@ def rollout_engine_and_hf(
             "outputs": {k: [int(x) for x in v] for k, v in run.outputs.items()},
             "per_iter_seconds": [float(s) for s in run.per_iter_seconds],
             "config": run.config,
+            "profiles": run.profiles,
         }
 
     return json.dumps(
@@ -343,6 +351,7 @@ def main(
             "hf_sequential": main_res["hf_sequential"]["config"],
             "vllm": vllm_res["config"],
         },
+        "profiles": {"llm_infer": main_res["llm_infer"].get("profiles", [])},
         "repro_command": f"modal run scripts/modal_rollout.py --command {command}",
     }
 

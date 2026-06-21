@@ -53,25 +53,25 @@ class Sampler:
         """Whether this sampler decodes greedily (temperature 0) — the proven oracle path."""
         return self.temperature == 0.0
 
-    def sample(self, logits: torch.Tensor) -> int:
-        """One token id from a 1-D ``(vocab,)`` logit row (the per-request prefill path)."""
+    def sample(self, logits: torch.Tensor) -> torch.Tensor:
+        """One scalar token tensor from a 1-D ``(vocab,)`` row (the prefill path)."""
         if logits.ndim != 1:
             raise ValueError(f"expected 1-D logits, got shape {tuple(logits.shape)}")
         if self.is_greedy:
-            return greedy(logits)
+            return torch.argmax(logits)
         probs = self._nucleus_probs(logits.unsqueeze(0))  # (1, vocab)
         token = torch.multinomial(probs, num_samples=1, generator=self._gen(logits.device))
-        return int(token.item())
+        return token.squeeze()
 
-    def sample_many(self, logits: torch.Tensor) -> list[int]:
-        """One token id per row of a 2-D ``(B, vocab)`` batch (one fused draw, decode path)."""
+    def sample_many(self, logits: torch.Tensor) -> torch.Tensor:
+        """One token tensor per row of a 2-D ``(B, vocab)`` batch, kept on device."""
         if logits.ndim != 2:
             raise ValueError(f"expected 2-D logits, got shape {tuple(logits.shape)}")
         if self.is_greedy:
-            return torch.argmax(logits, dim=-1).tolist()
+            return torch.argmax(logits, dim=-1)
         probs = self._nucleus_probs(logits)  # (B, vocab)
         tokens = torch.multinomial(probs, num_samples=1, generator=self._gen(logits.device))
-        return tokens.squeeze(-1).tolist()
+        return tokens.squeeze(-1)
 
     def _gen(self, device: torch.device) -> torch.Generator:
         """The seeded generator, created once on first use (on the logits' device).

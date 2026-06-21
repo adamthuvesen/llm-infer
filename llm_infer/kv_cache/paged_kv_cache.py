@@ -61,7 +61,9 @@ class PagedKVCache:
         GQA expansion not yet. The block table must already cover these positions.
         """
         n = key.shape[0]
-        idx = torch.as_tensor(table.physical_slots(start_pos, n), dtype=torch.long)
+        idx = torch.as_tensor(
+            table.physical_slots(start_pos, n), dtype=torch.long, device=key.device
+        )
         self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = key
         self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = value
 
@@ -69,7 +71,9 @@ class PagedKVCache:
         self, table: BlockTable, layer: int, length: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather K/V for positions ``0 .. length-1`` as ``(length, num_kv_heads, head_dim)``."""
-        idx = torch.as_tensor(table.physical_slots(0, length), dtype=torch.long)
+        idx = torch.as_tensor(
+            table.physical_slots(0, length), dtype=torch.long, device=self.key.device
+        )
         key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
         value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
         return key, value
