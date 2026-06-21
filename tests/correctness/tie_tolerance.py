@@ -87,7 +87,20 @@ def compare_under_tie_tolerance(
         None,
     )
     if step is None:
-        # Exact token-for-token match (modulo length) — no tie waiver needed.
+        # No token diverged in the overlap. Equal length → exact match. Unequal length →
+        # one sequence is a strict prefix of the other with no traced tie; that is a
+        # truncation/over-run, NOT a numerical tie, so it must fail the bar rather than
+        # slip through as "equivalent" (the bar is token-for-token, ties excepted).
+        if len(fast_tokens) != len(golden_tokens):
+            return TieToleranceResult(
+                ok=False,
+                divergence=None,
+                failure=(
+                    f"no token diverged but lengths differ "
+                    f"(fast={len(fast_tokens)}, golden={len(golden_tokens)}) — a "
+                    f"prefix-equal truncation is not a tie; the sequences must match in full"
+                ),
+            )
         return TieToleranceResult(ok=True, divergence=None, failure=None)
 
     fast, golden = fast_tokens[step], golden_tokens[step]
