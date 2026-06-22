@@ -33,7 +33,7 @@ llm_infer/
   serving/      # request queue, greedy sampler, continuous-batching decode loop         [B]
   benchmarks/   # naive HF vs llm-infer vs vLLM                                          [Phase D]
 tests/correctness/   # the HF-exact greedy oracle + committed golden fixtures + the flash tie bar
-docs/                # scoping.md (source of truth for scope) + fixture-format spec
+docs/                # scoping.md (source of truth for scope) + architecture.md + fixture-format spec
 scripts/             # golden generation + the Modal A100 flash oracle harness
 ```
 

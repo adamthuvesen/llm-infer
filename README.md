@@ -31,6 +31,9 @@ full plan and non-goals.
 
 ## Layout
 
+Start with [`docs/architecture.md`](docs/architecture.md) for a guided map of modules, flows,
+and diagrams.
+
 - `kernels/` — the `AttentionBackend` protocol, a slow readable `torch_naive` reference
   (the truth every other backend is validated against), and `flash_attn_paged` (the fast
   GPU-only backend).
