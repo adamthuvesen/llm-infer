@@ -63,8 +63,15 @@ class Request:
             raise ValueError(f"request {self.request_id!r} has produced no tokens yet")
         return self._generated_tokens[-1]
 
+    @property
+    def remaining_tokens(self) -> int:
+        """How many more tokens may be emitted before the max-new-token cap."""
+        return self.max_new_tokens - len(self._generated_tokens)
+
     def record(self, token_id: int | torch.Tensor, *, is_eos: bool | None = None) -> None:
         """Append a sampled token and apply the stop rule (EOS or length cap)."""
+        if self.finished:
+            raise ValueError(f"request {self.request_id!r} is already finished")
         token = torch.as_tensor(token_id, dtype=torch.long).reshape(())
         self._generated_tokens.append(token.detach())
         self._generated_cache = None

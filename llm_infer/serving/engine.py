@@ -27,6 +27,7 @@ from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import Sampler
+from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
 
 
 @dataclass
@@ -36,7 +37,7 @@ class StepResult:
     admitted: list[str] = field(default_factory=list)
     prefill_chunks: dict[str, tuple[int, int]] = field(default_factory=dict)
     finished: list[str] = field(default_factory=list)
-    tokens: dict[str, int | torch.Tensor] = field(default_factory=dict)
+    tokens: dict[str, list[int | torch.Tensor]] = field(default_factory=dict)
 
 
 class InferenceEngine:
@@ -52,6 +53,7 @@ class InferenceEngine:
         sampler: Sampler | None = None,
         profiler: TimingProfiler | None = None,
         prefill_chunk_size: int | None = None,
+        speculative: SpeculativeDecodingConfig | None = None,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -69,9 +71,12 @@ class InferenceEngine:
         # Default to greedy (temperature 0) — token-for-token the proven oracle path. The
         # rollout passes Sampler(temperature=1.0, top_p=1.0, seed=...) for sampled decoding.
         self.sampler = sampler or Sampler()
+        if speculative is not None and not self.sampler.is_greedy:
+            raise ValueError("speculative decoding v1 supports only greedy sampling")
         self.profiler = profiler
         self.model.profiler = profiler
         self.prefill_chunk_size = prefill_chunk_size
+        self.speculative = PromptLookupDraft(speculative) if speculative is not None else None
         self._requests: dict[str, Request] = {}
 
     def add_request(self, request: Request) -> None:
@@ -107,20 +112,7 @@ class InferenceEngine:
         self._prefill_requests(to_prefill, result)
 
         if to_decode:
-            last_tokens = torch.stack([r.last_token_tensor for r in to_decode]).to(
-                self.model.device
-            )
-            with self._record_time("decode"):
-                logits = self.model.decode_many(
-                    self.cache,
-                    [r.block_table for r in to_decode],
-                    last_tokens,
-                )
-            with self._record_time("sampling"):
-                tokens = self.sampler.sample_many(logits)
-            eos_flags = self._eos_flags(tokens, to_decode)
-            for request, token, is_eos in zip(to_decode, tokens, eos_flags, strict=True):
-                self._record(request, token, is_eos, result)
+            self._decode_requests(to_decode, result)
 
         for request in [r for r in self.scheduler.running if r.finished]:
             request.block_table.free()
@@ -192,6 +184,107 @@ class InferenceEngine:
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
 
+    def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
+        """Advance decode-ready requests, optionally using prompt-lookup speculation."""
+        if self.speculative is None:
+            self._decode_normal(requests, result)
+            return
+
+        fallback: list[Request] = []
+        for request in requests:
+            draft = self._draft_for(request)
+            if not draft:
+                fallback.append(request)
+                continue
+            self._decode_speculative(request, draft, result)
+
+        if fallback:
+            self._decode_normal(fallback, result)
+
+    def _decode_normal(self, requests: list[Request], result: StepResult) -> None:
+        """The original one-token batched decode path."""
+        last_tokens = torch.stack([request.last_token_tensor for request in requests]).to(
+            self.model.device
+        )
+        with self._record_time("decode"):
+            logits = self.model.decode_many(
+                self.cache,
+                [request.block_table for request in requests],
+                last_tokens,
+            )
+        with self._record_time("sampling"):
+            tokens = self.sampler.sample_many(logits)
+        eos_flags = self._eos_flags(tokens, requests)
+        for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
+            self._record(request, token, is_eos, result)
+
+    def _draft_for(self, request: Request) -> list[int]:
+        """Return a draft only when there is room for draft tokens plus verifier recovery."""
+        if self.speculative is None:
+            return []
+        max_draft_tokens = request.remaining_tokens - 1
+        if max_draft_tokens < 1:
+            return []
+        return self.speculative.draft(
+            request.prompt_ids + request.generated,
+            max_tokens=max_draft_tokens,
+        )
+
+    def _decode_speculative(self, request: Request, draft: list[int], result: StepResult) -> None:
+        """Verify one request's draft and emit the accepted prefix plus recovery token."""
+        decode_tokens = getattr(self.model, "decode_tokens", None)
+        if decode_tokens is None:
+            raise TypeError(
+                f"{type(self.model).__name__} must implement decode_tokens() "
+                "when speculative decoding is enabled"
+            )
+        if request.block_table is None:
+            raise ValueError(f"request {request.request_id!r} has no block table")
+
+        original_length = request.block_table.length
+        draft_tensor = torch.tensor(draft, dtype=torch.long, device=self.model.device)
+        verify_input = torch.cat([
+            request.last_token_tensor.to(self.model.device).reshape(1),
+            draft_tensor,
+        ])
+        with self._record_time("speculative_decode"):
+            logits = decode_tokens(self.cache, request.block_table, verify_input)
+
+        verifier_tokens = torch.argmax(logits, dim=-1)
+        accepted = self._accepted_prefix_length(verifier_tokens[:-1], draft_tensor)
+
+        emitted: list[int | torch.Tensor] = []
+        emitted.extend(draft[:accepted])
+        if not self._contains_eos(emitted, request):
+            if accepted == len(draft):
+                emitted.append(verifier_tokens[-1])
+            else:
+                emitted.append(verifier_tokens[accepted])
+
+        emitted = self._truncate_after_eos(emitted, request)
+        if not emitted:
+            raise ValueError("speculative verification produced no token to emit")
+
+        request.block_table.length = min(original_length + len(emitted), request.block_table.length)
+        for token in emitted:
+            if request.finished:
+                break
+            self._record(request, token, self._is_eos(token, request), result)
+
+    def _accepted_prefix_length(
+        self, verifier_tokens: torch.Tensor, draft_tokens: torch.Tensor
+    ) -> int:
+        """Length of the contiguous draft prefix matched by greedy verifier tokens."""
+        matches = verifier_tokens == draft_tokens
+        with self._record_host_time("cpu_gpu_sync"):
+            flags = [bool(flag) for flag in matches.cpu().tolist()]
+        accepted = 0
+        for flag in flags:
+            if not flag:
+                break
+            accepted += 1
+        return accepted
+
     def _cache_prompt_chunk(self, request: Request, result: StepResult) -> torch.Tensor | None:
         """Cache one prompt chunk and return final-prompt logits when ready to sample."""
         if request.block_table is None:
@@ -239,8 +332,8 @@ class InferenceEngine:
     ) -> None:
         """Append a sampled token to a request and note it (and any finish) in the step result."""
         request.record(token, is_eos=is_eos)
-        result.tokens[request.request_id] = token
-        if request.finished:
+        result.tokens.setdefault(request.request_id, []).append(token)
+        if request.finished and request.request_id not in result.finished:
             result.finished.append(request.request_id)
 
     def run(self) -> dict[str, list[int]]:
@@ -272,6 +365,27 @@ class InferenceEngine:
             for token, request in zip(flat, requests, strict=True):
                 flags.append(int(token.cpu().item()) in request.eos_token_ids)
         return flags
+
+    def _is_eos(self, token: int | torch.Tensor, request: Request) -> bool:
+        if isinstance(token, torch.Tensor):
+            with self._record_host_time("cpu_gpu_sync"):
+                token_id = int(token.cpu().item())
+        else:
+            token_id = token
+        return token_id in request.eos_token_ids
+
+    def _contains_eos(self, tokens: list[int | torch.Tensor], request: Request) -> bool:
+        return any(self._is_eos(token, request) for token in tokens)
+
+    def _truncate_after_eos(
+        self, tokens: list[int | torch.Tensor], request: Request
+    ) -> list[int | torch.Tensor]:
+        truncated: list[int | torch.Tensor] = []
+        for token in tokens:
+            truncated.append(token)
+            if self._is_eos(token, request):
+                break
+        return truncated
 
     def _record_time(self, name: str):
         if self.profiler is None:

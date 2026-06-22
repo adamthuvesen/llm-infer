@@ -11,5 +11,14 @@ from __future__ import annotations
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import Sampler, greedy
+from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
 
-__all__ = ["InferenceEngine", "Request", "Sampler", "StepResult", "greedy"]
+__all__ = [
+    "InferenceEngine",
+    "PromptLookupDraft",
+    "Request",
+    "Sampler",
+    "SpeculativeDecodingConfig",
+    "StepResult",
+    "greedy",
+]
