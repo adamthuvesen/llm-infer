@@ -132,6 +132,13 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   ceiling is named: the post-cleanup profile shows `kv_read_gather` is no longer the wall;
   remaining time is decode orchestration, projections/MLP, attention, prefill, KV writes, and
   GQA expansion, none of which the v2 toolkit (no-sync + KV vectorization) can move further.
+- **Prefix caching — refcounted block sharing for rollout siblings.** The canonical prefix-cache
+  technique now shares full prompt blocks by pointer across known G=4 sibling completions,
+  with refcounted physical ownership and copy-on-write only for the final partial prompt block.
+  Frozen rollout evidence preserved the accepted **3026** sampled tokens and improved the
+  engine from **365.8 tok/s / $0.18 per 1k rollouts** to **411.5 tok/s / $0.16 per 1k
+  rollouts**, with prompt prefill token-ops reduced from **15,416** to **3,854** (pinned:
+  `bench-results/rollout-rollout-20260622T173732.json`).
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
@@ -156,10 +163,6 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Prefix caching** — refcounted KV-block *sharing* across requests with a common prefix (next).
-  This is the canonical technique the engine most conspicuously lacks. Explicitly **not** the
-  step-local prompt-prefix KV *copy* already tried and reverted in v2 — this is shared,
-  refcounted block ownership, the real thing.
 - **Chunked prefill / mixed prefill-decode** — admit and interleave prefill chunks with the
   decode batch instead of the v1 "prefill fully, then decode" split.
 - **Speculative decoding** — draft-and-verify: propose several tokens cheaply, then verify them
