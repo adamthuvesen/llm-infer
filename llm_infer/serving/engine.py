@@ -1,17 +1,18 @@
 """The minimal continuous-batching decode loop — the Phase B vertical slice runner.
 
 Wires the model, the paged KV-cache, and the scheduler into one step loop. Each
-``step`` advances every running request by exactly one token: a freshly admitted
-request emits its first token via cached prefill, an already-running one via a cached
-decode. Finished requests are freed at the end of the step (the decode-step boundary),
+``step`` advances every decode-ready request by exactly one token and advances each
+not-yet-prefilled prompt by a bounded cached prefill chunk. A freshly admitted short
+request can still emit its first token in one step; a long prompt may take several
+steps to become decode-ready, letting already-running requests keep decoding between
+chunks. Finished requests are freed at the end of the step (the decode-step boundary),
 which returns their blocks and budget so a queued request can be admitted next step.
 
 Token selection is pluggable through a :class:`~llm_infer.serving.sampler.Sampler`; it
 defaults to greedy (temperature 0 — the proven oracle path) and the rlvr-sql rollout passes
-a seeded temperature/top-p sampler. Otherwise this is the v1 loop only: no streaming, no
-chunked prefill, no mixed prefill/decode fusion. Under greedy, each request runs through the
-same single-request cached path, so batching two requests gives token-for-token the same
-result as running each alone.
+a seeded temperature/top-p sampler. There is still no streaming or OpenAI-compatible serving
+surface. Under greedy, each request runs through the same cached path, so batching two
+requests gives token-for-token the same result as running each alone.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ class StepResult:
     """What happened in one engine step — enough to trace the vertical slice."""
 
     admitted: list[str] = field(default_factory=list)
+    prefill_chunks: dict[str, tuple[int, int]] = field(default_factory=dict)
     finished: list[str] = field(default_factory=list)
     tokens: dict[str, int | torch.Tensor] = field(default_factory=dict)
 
@@ -49,7 +51,10 @@ class InferenceEngine:
         device: str = "cpu",
         sampler: Sampler | None = None,
         profiler: TimingProfiler | None = None,
+        prefill_chunk_size: int | None = None,
     ) -> None:
+        if prefill_chunk_size is not None and prefill_chunk_size < 1:
+            raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
         self.model = model
         self.cache = PagedKVCache(
             num_layers=model.num_layers,
@@ -66,6 +71,7 @@ class InferenceEngine:
         self.sampler = sampler or Sampler()
         self.profiler = profiler
         self.model.profiler = profiler
+        self.prefill_chunk_size = prefill_chunk_size
         self._requests: dict[str, Request] = {}
 
     def add_request(self, request: Request) -> None:
@@ -78,10 +84,12 @@ class InferenceEngine:
     def step(self) -> StepResult:
         """Admit, advance every running request by one token, then free finished ones.
 
-        Newly-admitted requests emit their first token via a (per-request) cached prefill;
-        every already-running request advances by one token through a single **batched**
-        decode forward (``decode_many``) rather than one forward each — the fused-batch decode
-        that makes continuous batching a throughput win, not just a scheduling one.
+        Newly-admitted requests cache at most ``prefill_chunk_size`` prompt tokens, or their
+        full prompt when no chunk limit is configured. A request becomes decode-ready only
+        when its full prompt has been cached and its first token sampled. Every already-ready
+        request advances by one token through a single **batched** decode forward
+        (``decode_many``) rather than one forward each — the fused-batch decode that makes
+        continuous batching a throughput win, not just a scheduling one.
         """
         result = StepResult()
 
@@ -144,9 +152,9 @@ class InferenceEngine:
             handled.update(candidate.request_id for candidate in group)
 
     def _prefill_one(self, request: Request, result: StepResult) -> None:
-        request.block_table = self.cache.new_request()
-        with self._record_time("prefill"):
-            logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
+        logits = self._cache_prompt_chunk(request, result)
+        if logits is None:
+            return
         request.prefilled = True
         with self._record_time("sampling"):
             token = self.sampler.sample(logits)
@@ -159,13 +167,23 @@ class InferenceEngine:
                 f"prefix group {requests[0].prefix_group_id!r} contains different prompts"
             )
 
-        leader = requests[0]
-        leader.block_table = self.cache.new_request()
-        with self._record_time("prefill"):
-            logits = self.model.prefill(prompt_ids, self.cache, leader.block_table)
+        leaders = [request for request in requests if request.block_table is not None]
+        if len(leaders) > 1:
+            raise ValueError(
+                f"prefix group {requests[0].prefix_group_id!r} has multiple active leaders"
+            )
+        leader = leaders[0] if leaders else requests[0]
+        logits = self._cache_prompt_chunk(leader, result)
+        if logits is None:
+            return
+
         leader.prefilled = True
-        for request in requests[1:]:
+        leader.prompt_cached_tokens = len(prompt_ids)
+        for request in requests:
+            if request is leader:
+                continue
             request.block_table = self.cache.fork_request(leader.block_table)
+            request.prompt_cached_tokens = leader.prompt_cached_tokens
             request.prefilled = True
 
         with self._record_time("sampling"):
@@ -173,6 +191,48 @@ class InferenceEngine:
         eos_flags = self._eos_flags(torch.stack(tokens), requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
+
+    def _cache_prompt_chunk(self, request: Request, result: StepResult) -> torch.Tensor | None:
+        """Cache one prompt chunk and return final-prompt logits when ready to sample."""
+        if request.block_table is None:
+            request.block_table = self.cache.new_request()
+
+        start_pos = request.prompt_cached_tokens
+        if request.block_table.length != start_pos:
+            raise ValueError(
+                f"request {request.request_id!r} block table length "
+                f"{request.block_table.length} != cached prompt length {start_pos}"
+            )
+        remaining = len(request.prompt_ids) - start_pos
+        if remaining < 1:
+            raise ValueError(f"request {request.request_id!r} has no prompt tokens left")
+
+        chunk_size = self.prefill_chunk_size or len(request.prompt_ids)
+        chunk_size = min(chunk_size, remaining)
+        end_pos = start_pos + chunk_size
+        result.prefill_chunks[request.request_id] = (start_pos, end_pos)
+
+        with self._record_time("prefill"):
+            if start_pos == 0 and end_pos == len(request.prompt_ids):
+                logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
+            else:
+                prefill_chunk = getattr(self.model, "prefill_chunk", None)
+                if prefill_chunk is None:
+                    raise TypeError(
+                        f"{type(self.model).__name__} must implement prefill_chunk() "
+                        "when prefill_chunk_size splits a prompt"
+                    )
+                logits = prefill_chunk(
+                    request.prompt_ids,
+                    self.cache,
+                    request.block_table,
+                    start_pos=start_pos,
+                    chunk_size=chunk_size,
+                )
+        request.prompt_cached_tokens = end_pos
+        if end_pos < len(request.prompt_ids):
+            return None
+        return logits
 
     def _record(
         self, request: Request, token: int | torch.Tensor, is_eos: bool, result: StepResult

@@ -10,11 +10,11 @@ Two decode paths share one layer stack:
 
 * :meth:`logits` — full recompute over the whole sequence, no cache. The Phase A
   reference and the oracle's path; left bit-for-bit intact.
-* :meth:`prefill` / :meth:`decode_one` — the Phase B paged/cached path. Prefill writes
-  every prompt position's K/V into the paged store; each decode step computes only the
-  new token, appends its K/V, and attends against the gathered history through the
-  *same* ``torch_naive`` backend (gathered K/V, materialized softmax — no fast kernel).
-  RoPE positions advance **per request** (each request's own length), never a batch row.
+* :meth:`prefill` / :meth:`prefill_chunk` / :meth:`decode_one` — the paged/cached path.
+  Prefill writes prompt K/V into the paged store, either all at once or in causal chunks;
+  each decode step computes only the new token, appends its K/V, and attends against the
+  gathered history through the *same* ``torch_naive`` backend. RoPE positions advance
+  **per request** (each request's own length), never a batch row.
 """
 
 from __future__ import annotations
@@ -85,9 +85,7 @@ class QwenModel:
         config = AutoConfig.from_pretrained(model_id, revision=revision)
         hf = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype)
         hf.eval()
-        weights = {
-            name: tensor.detach().to(device) for name, tensor in hf.state_dict().items()
-        }
+        weights = {name: tensor.detach().to(device) for name, tensor in hf.state_dict().items()}
         return cls(
             weights=weights,
             config=config,
@@ -143,6 +141,59 @@ class QwenModel:
                 lambda x, p, lyr: self._prefill_attention(x, p, cos, sin, lyr, cache, table),
             )
         table.length = seq_len
+
+        with self._profile("logits"):
+            last = _rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
+            return (last @ self._lm_head().T)[-1]
+
+    @torch.no_grad()
+    def prefill_chunk(
+        self,
+        prompt_ids: list[int],
+        cache: PagedKVCache,
+        table: BlockTable,
+        *,
+        start_pos: int,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        """Cached prefill for ``prompt_ids[start_pos:end]``.
+
+        The chunk is equivalent to a HuggingFace ``past_key_values`` prefill step: every
+        layer writes the current chunk's K/V at its absolute prompt positions, gathers the
+        prefix-plus-current history for that layer, and runs causal attention for the chunk
+        queries only. The backend mask treats query row ``i`` as absolute position
+        ``start_pos + i``, so current-chunk tokens see earlier chunk tokens but never future
+        ones. Returns the logits for the last token in the chunk; the engine samples only
+        when the chunk reaches the end of the prompt.
+        """
+        if not prompt_ids:
+            raise ValueError("prompt_ids must be non-empty")
+        if not 0 <= start_pos < len(prompt_ids):
+            raise ValueError(f"start_pos must be in [0, {len(prompt_ids)}); got {start_pos}")
+        if chunk_size < 1:
+            raise ValueError(f"chunk_size must be >= 1; got {chunk_size}")
+        if table.length != start_pos:
+            raise ValueError(
+                f"chunk start {start_pos} must equal cached prompt length {table.length}"
+            )
+
+        end_pos = min(len(prompt_ids), start_pos + chunk_size)
+        chunk_ids = prompt_ids[start_pos:end_pos]
+        table.reserve(len(chunk_ids))
+        ids = torch.tensor(chunk_ids, dtype=torch.long, device=self.device)
+        hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
+
+        positions = torch.arange(start_pos, end_pos, dtype=torch.float32, device=self.device)
+        cos, sin = self._rope_for_positions(positions)
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._prefill_chunk_attention(
+                    x, p, cos, sin, lyr, cache, table, start_pos, end_pos
+                ),
+            )
+        table.length = end_pos
 
         with self._profile("logits"):
             last = _rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
@@ -297,6 +348,40 @@ class QwenModel:
         with self._profile("projections_mlp"):
             return self._output_proj(attn, p)
 
+    def _prefill_chunk_attention(
+        self,
+        x: torch.Tensor,
+        p: str,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        table: BlockTable,
+        start_pos: int,
+        end_pos: int,
+    ) -> torch.Tensor:
+        """Chunked prefill attention over cached prefix plus the current prompt chunk."""
+        with self._profile("projections_mlp"):
+            q, k, v = self._project_heads(x, p)
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+        with self._profile("kv_write"):
+            cache.write(
+                table,
+                layer,
+                start_pos,
+                k.transpose(0, 1).contiguous(),
+                v.transpose(0, 1).contiguous(),
+            )
+        with self._profile("kv_read_gather"):
+            k_hist, v_hist = cache.read(table, layer, end_pos)
+        with self._profile("gqa_expand"):
+            k_hist, v_hist = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
+        with self._profile("attention"):
+            attn = self.backend.forward(q, k_hist, v_hist)
+        with self._profile("projections_mlp"):
+            return self._output_proj(attn, p)
+
     def _decode_attention(
         self,
         x: torch.Tensor,
@@ -404,9 +489,7 @@ class QwenModel:
         v = v.view(seq_len, self.num_kv_heads, self.head_dim).transpose(0, 1)
         return q, k, v
 
-    def _expand_kv(
-        self, k: torch.Tensor, v: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _expand_kv(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """GQA: repeat each KV head over its group of query heads (done before the backend)."""
         repeat = self.num_heads // self.num_kv_heads
         return k.repeat_interleave(repeat, dim=0), v.repeat_interleave(repeat, dim=0)
