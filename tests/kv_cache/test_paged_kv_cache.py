@@ -103,6 +103,27 @@ def test_block_table_free_returns_blocks() -> None:
     assert table.length == 0
 
 
+def test_block_table_fork_refcounts_shared_blocks_until_last_free() -> None:
+    alloc = BlockAllocator(num_blocks=8)
+    original = BlockTable(alloc, block_size=4)
+    original.reserve(6)
+    original.length = 6
+    forked = original.fork_shared()
+
+    assert forked.blocks == original.blocks
+    assert forked.length == original.length
+    for block in original.blocks:
+        assert alloc.refcount(block) == 2
+
+    forked.free()
+    assert alloc.num_free == 6
+    for block in original.blocks:
+        assert alloc.refcount(block) == 1
+
+    original.free()
+    assert alloc.num_free == 8
+
+
 def _ramp(n: int, kv_heads: int, head_dim: int, offset: float) -> torch.Tensor:
     return torch.arange(n * kv_heads * head_dim, dtype=torch.float32).reshape(
         n, kv_heads, head_dim
@@ -121,6 +142,96 @@ def test_cache_write_read_round_trip() -> None:
     got_k, got_v = cache.read(table, layer=0, length=6)
     assert torch.equal(got_k, key)
     assert torch.equal(got_v, value)
+
+
+def test_shared_prompt_free_lifecycle_waits_for_all_siblings() -> None:
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32
+    )
+    leader = cache.new_request()
+    leader.reserve(6)
+    cache.write(
+        leader,
+        layer=0,
+        start_pos=0,
+        key=_ramp(6, 1, 2, 0.0),
+        value=_ramp(6, 1, 2, 100.0),
+    )
+    leader.length = 6
+    siblings = [cache.fork_request(leader) for _ in range(3)]
+    prompt_blocks = list(leader.blocks)
+
+    assert cache.allocator.num_free == 6
+    for block in prompt_blocks:
+        assert cache.allocator.refcount(block) == 4
+
+    siblings[0].free()
+    assert cache.allocator.num_free == 6
+    for block in prompt_blocks:
+        assert cache.allocator.refcount(block) == 3
+
+    siblings[1].free()
+    siblings[2].free()
+    assert cache.allocator.num_free == 6
+    for block in prompt_blocks:
+        assert cache.allocator.refcount(block) == 1
+
+    leader.free()
+    assert cache.allocator.num_free == 8
+
+
+def test_cow_copies_only_last_partial_prompt_block() -> None:
+    cache = PagedKVCache(
+        num_layers=2, num_blocks=8, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32
+    )
+    leader = cache.new_request()
+    leader.reserve(6)
+    prompt_k = _ramp(6, 1, 2, 0.0)
+    prompt_v = _ramp(6, 1, 2, 100.0)
+    for layer in range(2):
+        cache.write(leader, layer=layer, start_pos=0, key=prompt_k + layer, value=prompt_v + layer)
+    leader.length = 6
+    sibling = cache.fork_request(leader)
+    full_block, partial_block = leader.blocks
+
+    sibling.reserve(1)
+    cache.prepare_write(sibling, start_pos=6, count=1)
+
+    assert sibling.blocks[0] == full_block
+    assert sibling.blocks[1] != partial_block
+    assert cache.allocator.refcount(full_block) == 2
+    assert cache.allocator.refcount(partial_block) == 1
+    assert cache.allocator.refcount(sibling.blocks[1]) == 1
+
+    for layer in range(2):
+        got_k, got_v = cache.read(sibling, layer=layer, length=6)
+        assert torch.equal(got_k, prompt_k + layer)
+        assert torch.equal(got_v, prompt_v + layer)
+
+
+def test_full_prompt_blocks_are_not_cowed_at_block_boundary() -> None:
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32
+    )
+    leader = cache.new_request()
+    leader.reserve(4)
+    cache.write(
+        leader,
+        layer=0,
+        start_pos=0,
+        key=_ramp(4, 1, 2, 0.0),
+        value=_ramp(4, 1, 2, 100.0),
+    )
+    leader.length = 4
+    sibling = cache.fork_request(leader)
+    shared_full_block = leader.blocks[0]
+
+    sibling.reserve(1)
+    cache.prepare_write(sibling, start_pos=4, count=1)
+
+    assert sibling.blocks[0] == shared_full_block
+    assert sibling.blocks[1] != shared_full_block
+    assert cache.allocator.refcount(shared_full_block) == 2
 
 
 def test_cache_incremental_append_like_decode() -> None:

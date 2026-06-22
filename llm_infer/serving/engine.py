@@ -86,20 +86,17 @@ class InferenceEngine:
         result = StepResult()
 
         for request in self.scheduler.admit():
-            request.block_table = self.cache.new_request()
             result.admitted.append(request.request_id)
 
         to_decode: list[Request] = []
+        to_prefill: list[Request] = []
         for request in self.scheduler.running:
             if request.prefilled:
                 to_decode.append(request)
                 continue
-            with self._record_time("prefill"):
-                logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
-            request.prefilled = True
-            with self._record_time("sampling"):
-                token = self.sampler.sample(logits)
-            self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
+            to_prefill.append(request)
+
+        self._prefill_requests(to_prefill, result)
 
         if to_decode:
             last_tokens = torch.stack([r.last_token_tensor for r in to_decode]).to(
@@ -122,6 +119,60 @@ class InferenceEngine:
             self.scheduler.release(request)
 
         return result
+
+    def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
+        """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
+        handled: set[str] = set()
+        for request in requests:
+            if request.request_id in handled:
+                continue
+            if request.prefix_group_id is None:
+                self._prefill_one(request, result)
+                handled.add(request.request_id)
+                continue
+
+            group = [
+                candidate
+                for candidate in requests
+                if candidate.prefix_group_id == request.prefix_group_id
+            ]
+            if len(group) == 1:
+                self._prefill_one(request, result)
+                handled.add(request.request_id)
+                continue
+            self._prefill_shared_group(group, result)
+            handled.update(candidate.request_id for candidate in group)
+
+    def _prefill_one(self, request: Request, result: StepResult) -> None:
+        request.block_table = self.cache.new_request()
+        with self._record_time("prefill"):
+            logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
+        request.prefilled = True
+        with self._record_time("sampling"):
+            token = self.sampler.sample(logits)
+        self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
+
+    def _prefill_shared_group(self, requests: list[Request], result: StepResult) -> None:
+        prompt_ids = requests[0].prompt_ids
+        if any(request.prompt_ids != prompt_ids for request in requests):
+            raise ValueError(
+                f"prefix group {requests[0].prefix_group_id!r} contains different prompts"
+            )
+
+        leader = requests[0]
+        leader.block_table = self.cache.new_request()
+        with self._record_time("prefill"):
+            logits = self.model.prefill(prompt_ids, self.cache, leader.block_table)
+        leader.prefilled = True
+        for request in requests[1:]:
+            request.block_table = self.cache.fork_request(leader.block_table)
+            request.prefilled = True
+
+        with self._record_time("sampling"):
+            tokens = [self.sampler.sample(logits) for _ in requests]
+        eos_flags = self._eos_flags(torch.stack(tokens), requests)
+        for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
+            self._record(request, token, is_eos, result)
 
     def _record(
         self, request: Request, token: int | torch.Tensor, is_eos: bool, result: StepResult

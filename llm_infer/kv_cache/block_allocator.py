@@ -1,10 +1,9 @@
-"""The block allocator: a free list over a fixed pool of physical KV-cache blocks.
+"""The block allocator: a refcounted free list over physical KV-cache blocks.
 
 The cache is paged — token K/V is stored in fixed-size blocks, and a request owns a
-list of physical block ids (its block table). The allocator is the single owner of
-which blocks are free; it hands blocks out on prefill/decode growth and takes them
-back when a request finishes, so a finished request's blocks are reused by the next
-one. Nothing here knows about tensors — it is pure bookkeeping over integer ids.
+list of physical block ids (its block table). The allocator is the single owner of which
+blocks are free and which live blocks are shared by more than one table. Nothing here knows
+about tensors — it is pure bookkeeping over integer ids.
 """
 
 from __future__ import annotations
@@ -34,6 +33,7 @@ class BlockAllocator:
         self.num_blocks = num_blocks
         # Stack of free ids; pop/extend from the end so freed blocks are reused soon.
         self._free: list[int] = list(range(num_blocks))
+        self._refcounts: list[int] = [0] * num_blocks
 
     @property
     def num_free(self) -> int:
@@ -50,25 +50,46 @@ class BlockAllocator:
             )
         out = self._free[-count:]
         del self._free[-count:]
+        for block in out:
+            self._refcounts[block] = 1
         return out
 
+    def retain(self, blocks: list[int]) -> None:
+        """Increment refcounts for blocks added to another block table."""
+        self._validate_live_blocks(blocks, action="retain")
+        for block in blocks:
+            self._refcounts[block] += 1
+
     def free(self, blocks: list[int]) -> None:
-        """Return blocks to the pool, rejecting bad frees loudly and atomically.
+        """Release table references, returning only last-owner blocks to the pool.
 
         Validates the *entire* batch before mutating ``_free`` — out-of-range ids,
-        already-free ids, and duplicates within the argument all raise before any block
-        is returned. A failed free therefore leaves the free list (and the next
-        allocation) untouched, never half-applied: a partially-applied free could return
-        a still-owned block to the pool and alias another request's KV pages.
+        already-free ids, and duplicates within the argument all raise before any refcount
+        changes. A failed free therefore leaves the free list (and the next allocation)
+        untouched, never half-applied: a partially-applied release could return a still-owned
+        block to the pool and alias another request's KV pages.
         """
-        free_set = set(self._free)
+        self._validate_live_blocks(blocks, action="free")
+        for block in blocks:
+            self._refcounts[block] -= 1
+            if self._refcounts[block] == 0:
+                self._free.append(block)
+
+    def refcount(self, block: int) -> int:
+        """Current owner count for one physical block."""
+        if not 0 <= block < self.num_blocks:
+            raise ValueError(f"block id {block} out of range [0, {self.num_blocks})")
+        return self._refcounts[block]
+
+    def _validate_live_blocks(self, blocks: list[int], *, action: str) -> None:
         seen: set[int] = set()
         for block in blocks:
             if not 0 <= block < self.num_blocks:
                 raise ValueError(f"block id {block} out of range [0, {self.num_blocks})")
-            if block in free_set:
-                raise ValueError(f"double free of block id {block}")
+            if self._refcounts[block] == 0:
+                if action == "free":
+                    raise ValueError(f"double free of block id {block}")
+                raise ValueError(f"cannot {action} free block id {block}")
             if block in seen:
-                raise ValueError(f"duplicate block id {block} in free() argument")
+                raise ValueError(f"duplicate block id {block} in {action}() argument")
             seen.add(block)
-        self._free.extend(blocks)

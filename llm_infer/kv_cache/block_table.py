@@ -41,6 +41,20 @@ class BlockTable:
         if needed_blocks > len(self.blocks):
             self.blocks.extend(self.allocator.allocate(needed_blocks - len(self.blocks)))
 
+    def fork_shared(self) -> BlockTable:
+        """Create another table pointing at the same physical blocks.
+
+        Used after one sibling request has prefetched a prompt. The fork starts at the same
+        logical length and shares every current block by refcount; generated-token writes make
+        the last partial block private before mutation.
+        """
+        fork = BlockTable(self.allocator, self.block_size)
+        fork.blocks = list(self.blocks)
+        fork.length = self.length
+        if fork.blocks:
+            self.allocator.retain(fork.blocks)
+        return fork
+
     def physical_slot(self, pos: int) -> int:
         """Flat slot index (``block * block_size + offset``) for logical position ``pos``."""
         if not 0 <= pos < self.capacity:

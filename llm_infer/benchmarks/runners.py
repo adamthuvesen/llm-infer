@@ -107,6 +107,7 @@ def run_llm_infer(
     iters: int,
     device: str = "cuda",
     collect_profile: bool = False,
+    enable_prefix_caching: bool = False,
 ) -> RunResult:
     """This engine, flash backend, all requests in one paged cache under the batching loop.
 
@@ -116,6 +117,10 @@ def run_llm_infer(
     """
     sampling = workload.sampling
     profiles: list[dict[str, object]] = []
+    baseline_prefill_tokens = sum(workload.prompt_lengths)
+    shared_prefill_tokens = sum(
+        len(prompt) for prompts in _prompt_groups(workload).values() for prompt in prompts
+    )
 
     def make_sampler() -> Sampler | None:
         if sampling is None:
@@ -138,6 +143,7 @@ def run_llm_infer(
                     list(req.prompt_ids),
                     workload.max_new_tokens,
                     workload.eos_token_ids,
+                    prefix_group_id=req.case_id if enable_prefix_caching else None,
                 )
             )
         outputs = engine.run()
@@ -155,6 +161,15 @@ def run_llm_infer(
             "num_blocks": num_blocks,
             # All running requests advance in one fused batched decode (decode_many) per step.
             "batched_forward": True,
+            "prefix_caching": enable_prefix_caching,
+            "prefill_token_ops": {
+                "per_sibling_baseline": baseline_prefill_tokens,
+                "shared_prefix": shared_prefill_tokens
+                if enable_prefix_caching
+                else baseline_prefill_tokens,
+                "reduction": baseline_prefill_tokens
+                - (shared_prefill_tokens if enable_prefix_caching else baseline_prefill_tokens),
+            },
             "sampling": _sampling_config(sampling),
             "profile": collect_profile,
         },
@@ -167,6 +182,14 @@ def run_llm_infer(
         profiles.append(profiler.summary().as_dict())
     result.profiles = profiles
     return result
+
+
+def _prompt_groups(workload: Workload) -> dict[str, set[tuple[int, ...]]]:
+    """Group explicitly by workload case id; mismatched ids/prompts stay visible."""
+    groups: dict[str, set[tuple[int, ...]]] = {}
+    for req in workload.requests:
+        groups.setdefault(req.case_id, set()).add(req.prompt_ids)
+    return groups
 
 
 def run_hf_sequential(
