@@ -26,6 +26,7 @@ class Request:
     prefix_group_id: str | None = None
 
     block_table: BlockTable | None = None
+    prompt_cached_tokens: int = 0
     prefilled: bool = False
     finished: bool = False
     _generated_tokens: list[torch.Tensor] = field(default_factory=list, init=False, repr=False)

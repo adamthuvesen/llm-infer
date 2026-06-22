@@ -164,8 +164,9 @@ production inference path** for multi-request work.
 
 1. **Admit:** scheduler moves waiting → running if block budget fits
    ([`Scheduler.admit`](../llm_infer/scheduler/scheduler.py)).
-2. For each running request without `prefilled`: `model.prefill()` writes all prompt K/V to
-   paged cache → sampler picks first token.
+2. For each running request without `prefilled`: cache one prompt chunk, bounded by
+   `InferenceEngine(prefill_chunk_size=...)`. When the full prompt is cached, sampler picks
+   the first token.
 3. For all already-prefilled running requests: **one** `model.decode_many()` batched forward
    → `sampler.sample_many()`.
 4. **Finish:** requests hitting EOS or length cap get `block_table.free()` and scheduler
@@ -253,14 +254,16 @@ sequenceDiagram
 
     loop each running request
         alt not prefilled yet
-            Engine->>Model: prefill(prompt_ids, cache, table)
-            Model->>Cache: write K/V per layer
-            Model->>Backend: forward(q, k, v)
+            Engine->>Model: prefill_chunk(prompt_ids, cache, table, start, chunk_size)
+            Model->>Cache: write chunk K/V per layer
+            Model->>Backend: forward(q, cached_prefix_plus_chunk_kv, v)
             Backend-->>Model: attention out
-            Model-->>Engine: last-position logits
-            Engine->>Samp: sample(logits)
-            Samp-->>Engine: token
-            Engine->>Engine: request.record(token)
+            alt prompt complete
+                Model-->>Engine: last-position logits
+                Engine->>Samp: sample(logits)
+                Samp-->>Engine: token
+                Engine->>Engine: request.record(token)
+            end
         else already prefilled
             Note over Engine: collect into to_decode batch
         end

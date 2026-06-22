@@ -116,12 +116,16 @@ legibility**. Speed is a side-quest with its own track, last.
 **Primary forward track — engine technique-completeness + legibility**
 
 4. **Chunked prefill / mixed prefill-decode.** Interleave prefill chunks with the decode batch.
-5. **Serving depth.** Streaming, an OpenAI-compatible endpoint, metrics, and a load generator.
-6. **Expand *Keeping the GPU Busy*.** Narrate the architecture and the honest dead-ends.
+5. **Speculative decoding.** Draft-and-verify with a deliberately chosen draft source; do
+   not pretend the single-3B frame magically supplies one.
+6. **KV-cache-theater visualizer.** Trace-driven block allocation, decode-step, and batch-size
+   views after the core engine techniques land.
+7. **Serving depth.** Streaming, an OpenAI-compatible endpoint, metrics, and a load generator.
+8. **Expand *Keeping the GPU Busy*.** Narrate the architecture and the honest dead-ends.
 
 **Secondary track — speed, later, for fun**
 
-7. **Quantization** (gpt-fast style: projection/MLP matmuls + KV bandwidth) is the real
+9. **Quantization** (gpt-fast style: projection/MLP matmuls + KV bandwidth) is the real
    remaining lever. **650 tok/s is a checkpoint quantization may clear, not a goal to grind
    toward.** Backend/kernel depth (FlexAttention, Triton, no-gather paged) stays parked here.
 

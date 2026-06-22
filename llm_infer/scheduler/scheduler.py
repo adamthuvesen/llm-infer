@@ -1,10 +1,10 @@
 """Continuous-batching admission over a fixed block budget.
 
-v1, narrowly (per the scoping doc): at decode-step boundaries finished requests leave
-and queued requests enter. No chunked prefill, no mixed prefill/decode optimization,
-no preemption. Admission is a reservation scheme — a request is admitted only if the
-worst-case blocks it could ever need fit alongside everything already running, so a
-running request never runs out of blocks mid-decode and never has to be evicted.
+At decode-step boundaries finished requests leave and queued requests enter. Admission is
+a reservation scheme — a request is admitted only if the worst-case blocks it could ever
+need fit alongside everything already running, so a running request never runs out of
+blocks mid-decode and never has to be evicted. Serving may execute prefill in chunks, but
+this scheduler still reserves the request's full prompt-plus-decode budget up front.
 
 Physical block allocation stays lazy (the block table pulls blocks as the sequence
 grows); this scheduler only reserves a *budget* against the pool size, which upper-
