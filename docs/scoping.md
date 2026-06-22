@@ -102,9 +102,13 @@ kernels/
 - **Benchmark equivalence across all three systems:** same prompts, `max_new_tokens`, stop tokens, greedy decoding, warmup/measurement windows.
 - **No silent gaming.** The directional floor is naive-baseline-relative, not vLLM-relative.
 
-## KV Cache Theater (deferred — trace-driven or skip)
+## KV Cache Theater (planned later — trace-driven)
 
-Build only if it replays **real engine events**, not a simulation. The engine emits a trace; the visualizer is a debugger + proof artifact, not decoration. Separate repo / app, fed by llm-infer traces. Event schema:
+Planned as a later-stage artifact, after the core engine techniques land (it's the
+*KV-cache-theater visualizer* bullet in the primary forward track above). Build it only if it
+replays **real engine events**, not a simulation. The engine emits a trace; the visualizer is a
+debugger + proof artifact, not decoration. Separate repo / app, fed by llm-infer traces. Event
+schema:
 
 `request_admitted · prefill_started · block_allocated · decode_step · request_finished · block_freed · batch_size_changed · tokens_per_second_sampled`
 
@@ -152,14 +156,23 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Prefix caching** — refcounted KV-block *sharing* across requests with a common prefix. This
-  is the canonical technique the engine most conspicuously lacks. Explicitly **not** the
+- **Prefix caching** — refcounted KV-block *sharing* across requests with a common prefix (next).
+  This is the canonical technique the engine most conspicuously lacks. Explicitly **not** the
   step-local prompt-prefix KV *copy* already tried and reverted in v2 — this is shared,
   refcounted block ownership, the real thing.
 - **Chunked prefill / mixed prefill-decode** — admit and interleave prefill chunks with the
   decode batch instead of the v1 "prefill fully, then decode" split.
+- **Speculative decoding** — draft-and-verify: propose several tokens cheaply, then verify them
+  in one forward pass. A canonical modern inference technique, a real speed lever, and very
+  teachable. The honest constraint: it needs a *draft source* — a smaller draft model, an
+  n-gram / prompt-lookup table, or self-speculation — and a single-3B frame has no obvious
+  second model, so pick the draft source that fits when the slice is designed.
+- **KV-cache-theater visualizer** — a later-stage "show how the engine works" artifact: a
+  trace-driven view of block allocation, decode steps, and batch-size changes (see the *KV Cache
+  Theater* section below for the event schema). It comes after the core techniques land.
 - **Serving depth** — streaming, an OpenAI-compatible endpoint, metrics, and a load generator,
-  so the engine is drivable as a real server rather than only through the frozen harness.
+  so the engine is drivable as a real server rather than only through the frozen harness. This
+  is the final engine piece — it makes the engine drivable as a real server.
 - **Expand *Keeping the GPU Busy*** — grow the writeup into a narration of the architecture and
   the honest dead-ends (the v2 ceiling and the decode-graph rejection above), so the doc
   teaches the engine, not just the one rollout number.

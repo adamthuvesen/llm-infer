@@ -22,7 +22,8 @@ the ceiling, never the thing we beat; the gap to it is named, not hidden.
 
 The engine itself is the goal — a small, legible paged inference engine. Speed and the
 rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**: prefix
-caching → chunked prefill → serving depth, with quantization as a later speed lever.
+caching → chunked prefill → speculative decoding → (later) a trace visualizer and serving
+depth, with quantization as a later speed lever.
 The decode-graph / static-bucket idea was built and rejected (a measured dead-end — see
 [`docs/scoping.md`](docs/scoping.md)). See [`docs/scoping.md`](docs/scoping.md) for the
 full plan and non-goals.
