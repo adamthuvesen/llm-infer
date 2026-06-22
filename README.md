@@ -20,6 +20,7 @@ the ceiling, never the thing we beat; the gap to it is named, not hidden.
 | **E** differentiator | one frozen rlvr-sql rollout-timing comparison ([`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md)) | ✅ |
 | **v2** speed pass | profiling, no-sync cleanup, packed KV reads/writes, read-plan reuse | ✅ 365.8 tok/s, ceiling named |
 | **prefix caching** | refcounted KV-block sharing for G=4 rollout siblings | ✅ 411.5 tok/s, 3026-token path preserved |
+| **speculative decoding v1** | prompt-lookup n-gram draft + greedy verifier, no second model | ✅ correctness slice, no speed claim |
 
 The engine itself is the goal — a small, legible paged inference engine. Speed and the
 rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**: chunked
@@ -112,12 +113,15 @@ legibility**. Speed is a side-quest with its own track, last.
    same prompt. Full prompt blocks are shared by pointer; only the last partial prompt block
    copy-on-writes on first generated-token append. Frozen rollout sampled token count remains
    3026.
+4. **Speculative decoding v1.** A prompt-lookup / n-gram draft source proposes short drafts
+   copied from tokens already present in the prompt/history. The main model verifies
+   `last_token + draft` in one cached forward, accepts only the matching greedy prefix, and
+   falls back to the verifier's next token on mismatch or no draft. It is off by default and
+   supports greedy decoding only; sampled rollouts keep the existing path.
 
 **Primary forward track — engine technique-completeness + legibility**
 
-4. **Chunked prefill / mixed prefill-decode.** Interleave prefill chunks with the decode batch.
-5. **Speculative decoding.** Draft-and-verify with a deliberately chosen draft source; do
-   not pretend the single-3B frame magically supplies one.
+5. **Chunked prefill / mixed prefill-decode.** Interleave prefill chunks with the decode batch.
 6. **KV-cache-theater visualizer.** Trace-driven block allocation, decode-step, and batch-size
    views after the core engine techniques land.
 7. **Serving depth.** Streaming, an OpenAI-compatible endpoint, metrics, and a load generator.

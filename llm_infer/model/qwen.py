@@ -10,11 +10,11 @@ Two decode paths share one layer stack:
 
 * :meth:`logits` — full recompute over the whole sequence, no cache. The Phase A
   reference and the oracle's path; left bit-for-bit intact.
-* :meth:`prefill` / :meth:`prefill_chunk` / :meth:`decode_one` — the paged/cached path.
-  Prefill writes prompt K/V into the paged store, either all at once or in causal chunks;
-  each decode step computes only the new token, appends its K/V, and attends against the
-  gathered history through the *same* ``torch_naive`` backend. RoPE positions advance
-  **per request** (each request's own length), never a batch row.
+* :meth:`prefill` / :meth:`prefill_chunk` / :meth:`decode_one` / :meth:`decode_tokens` —
+  the paged/cached path. Prefill writes prompt K/V into the paged store, either all at once
+  or in causal chunks; each decode step computes new token(s), appends K/V, and attends
+  against the gathered history through the *same* ``torch_naive`` backend. RoPE positions
+  advance **per request** (each request's own length), never a batch row.
 """
 
 from __future__ import annotations
@@ -282,6 +282,46 @@ class QwenModel:
         with self._profile("logits"):
             hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return hidden @ self._lm_head().T  # (B, vocab)
+
+    @torch.no_grad()
+    def decode_tokens(
+        self,
+        cache: PagedKVCache,
+        table: BlockTable,
+        token_ids: list[int] | torch.Tensor,
+    ) -> torch.Tensor:
+        """Cached decode of several contiguous tokens for one request.
+
+        Used by speculative verification: the input is ``last_token + draft``.
+        Row ``i`` returns next-token logits after token ``i`` has been appended, so
+        draft ids can be checked in one forward pass. The caller owns any rollback
+        of ``table.length`` when the draft is rejected.
+        """
+        ids = torch.as_tensor(token_ids, dtype=torch.long, device=self.device).reshape(-1)
+        if ids.numel() < 1:
+            raise ValueError("decode_tokens needs at least one token")
+
+        start_pos = table.length
+        count = int(ids.numel())
+        end_pos = start_pos + count
+        table.reserve(count)
+        hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
+
+        positions = torch.arange(start_pos, end_pos, dtype=torch.float32, device=self.device)
+        cos, sin = self._rope_for_positions(positions)
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._prefill_chunk_attention(
+                    x, p, cos, sin, lyr, cache, table, start_pos, end_pos
+                ),
+            )
+        table.length = end_pos
+
+        with self._profile("logits"):
+            hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+            return hidden @ self._lm_head().T
 
     def _apply_decoder_layer(
         self, hidden: torch.Tensor, layer: int, attention: _AttentionFn

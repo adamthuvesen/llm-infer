@@ -57,6 +57,7 @@ flowchart TB
         Engine["InferenceEngine step loop"]
         Request["Request state"]
         Sampler["Sampler greedy or top-p"]
+        Spec["PromptLookupDraft optional speculative source"]
     end
 
     subgraph scheduler [scheduler/]
@@ -91,6 +92,7 @@ flowchart TB
     Engine --> Sched
     Engine --> Request
     Engine --> Sampler
+    Engine --> Spec
     Engine --> Qwen
     Engine --> PagedKV
     Qwen --> Protocol
@@ -175,6 +177,25 @@ production inference path** for multi-request work.
 
 The vertical slice test in [`test_paged_decode.py`](../tests/correctness/test_paged_decode.py)
 proves: admit 2 → decode → one finishes → third admitted → all correct.
+
+### Flow B2 — Optional prompt-lookup speculative decode
+
+Implemented behind `InferenceEngine(..., speculative=SpeculativeDecodingConfig(...))`. This is
+off by default and v1 is greedy-only; sampled rollouts keep the normal `decode_many()` path.
+
+1. A request becomes eligible only after prompt prefill has completed and it already has a
+   `last_token` from the normal prefill/sample path.
+2. [`PromptLookupDraft`](../llm_infer/serving/speculative.py) searches the already-seen
+   prompt/history for the longest repeated n-gram suffix and copies the following tokens as a
+   short draft. No second model is involved.
+3. [`QwenModel.decode_tokens`](../llm_infer/model/qwen.py) verifies `last_token + draft` in one
+   cached forward. The logits rows predict the next token after each input row.
+4. The engine accepts only the longest contiguous greedy match. On mismatch, or when no draft is
+   available, it emits the verifier/normal next token. EOS truncates the emission immediately, so
+   no later draft or verifier token is recorded after EOS.
+5. If a draft is rejected, `BlockTable.length` is rolled back to the accepted boundary. Extra
+   K/V rows may remain in allocated pages but are outside the logical cache and are overwritten
+   by later appends.
 
 ### Flow C — Correctness gate (local + GPU)
 
