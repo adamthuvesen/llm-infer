@@ -23,6 +23,7 @@ class Request:
     prompt_ids: list[int]
     max_new_tokens: int
     eos_token_ids: frozenset[int]
+    prefix_group_id: str | None = None
 
     block_table: BlockTable | None = None
     prefilled: bool = False

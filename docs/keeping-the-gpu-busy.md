@@ -135,6 +135,31 @@ generation. This is the hook that connects `llm_infer`'s throughput to that loop
 $/1k rollouts at a pinned GPU price, on a frozen, reproducible batch built from rlvr-sql's own
 prompt builders and anchored to the shipped `grpo-s0` checkpoint.
 
+### Prefix caching update
+
+Run `2026-06-22` on branch `adam/feat-prefix-caching`, same frozen workload and command
+(`modal run scripts/modal_rollout.py --command rollout`), with prefix caching enabled for
+known G=4 sibling completions of the same prompt. Raw local artifact:
+`bench-results/rollout-rollout-20260622T173732.json`.
+
+| system | wall-clock s | output tok | tok/s | $/1k rollouts | vs floor |
+| --- | --- | --- | --- | --- | --- |
+| `hf_sequential` (floor) | 81.86 | 3366 | 41.1 | $1.78 | 1.00× |
+| **`llm_infer`** (ours, prefix caching) | **7.35** | **3026** | **411.5** | **$0.16** | **10.01×** |
+| `vllm` (ceiling) | 1.37 | 2864 | 2096.3 | $0.03 | 50.98× |
+
+The acceptance-critical sampled length stayed fixed: `llm_infer` produced **3026** scored
+tokens, matching the accepted campaign seed path. Prefix caching reduced prompt prefill work
+for the rollout shape from **15,416** per-sibling prompt token-ops to **3,854** shared-prefix
+token-ops, a **11,562 token-op / 75%** reduction (`prefill_token_ops` in the artifact).
+
+Economically, the engine improves from the prior accepted frozen baseline of **365.8 tok/s**
+and **$0.18 / 1k rollouts** to **411.5 tok/s** and **$0.16 / 1k rollouts** on the same
+sampled token count. The implementation is deliberately scoped to sharing by construction:
+the rollout requests carry known sibling group ids, full prompt blocks are shared by
+refcounted block-table pointers, and only the final partial prompt block is copy-on-written
+when a sibling first appends generated tokens.
+
 ### Pinned configuration
 
 - **GPU:** A100-80GB, one per image, `tensor_parallel_size=1`, 1410 MHz SM clock. This run:

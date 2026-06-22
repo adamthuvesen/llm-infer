@@ -205,6 +205,7 @@ def rollout_engine_and_hf(
         warmup=warmup,
         iters=iters,
         collect_profile=profile,
+        enable_prefix_caching=True,
     )
 
     hf_model = (

@@ -20,6 +20,22 @@ def test_valid_free_returns_all_blocks() -> None:
     assert allocator.num_free == 4
 
 
+def test_refcounted_free_waits_for_last_owner() -> None:
+    allocator = BlockAllocator(4)
+    held = allocator.allocate(2)
+    allocator.retain(held)
+    assert allocator.refcount(held[0]) == 2
+    assert allocator.refcount(held[1]) == 2
+
+    allocator.free([held[0]])
+    assert allocator.refcount(held[0]) == 1
+    assert allocator.num_free == 2
+
+    allocator.free([held[0]])
+    assert allocator.refcount(held[0]) == 0
+    assert allocator.num_free == 3
+
+
 def test_duplicate_in_argument_raises_without_mutation() -> None:
     allocator = BlockAllocator(4)
     held = allocator.allocate(2)  # owns 2 blocks; 2 remain free

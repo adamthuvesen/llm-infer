@@ -207,6 +207,8 @@ class QwenModel:
         new_lengths = [pos + 1 for pos in positions]
         for table in tables:
             table.reserve(1)
+        for table, pos in zip(tables, positions, strict=True):
+            cache.prepare_write(table, pos, 1)
         ids = torch.as_tensor(token_ids, dtype=torch.long, device=self.device)
         hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)  # (B, hidden)
 

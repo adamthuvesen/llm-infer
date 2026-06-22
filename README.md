@@ -19,11 +19,12 @@ the ceiling, never the thing we beat; the gap to it is named, not hidden.
 | **D** evidence | batch-correctness suite + three-way benchmark ([`docs/benchmark.md`](docs/benchmark.md)) | ✅ |
 | **E** differentiator | one frozen rlvr-sql rollout-timing comparison ([`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md)) | ✅ |
 | **v2** speed pass | profiling, no-sync cleanup, packed KV reads/writes, read-plan reuse | ✅ 365.8 tok/s, ceiling named |
+| **prefix caching** | refcounted KV-block sharing for G=4 rollout siblings | ✅ 411.5 tok/s, 3026-token path preserved |
 
 The engine itself is the goal — a small, legible paged inference engine. Speed and the
-rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**: prefix
-caching → chunked prefill → speculative decoding → (later) a trace visualizer and serving
-depth, with quantization as a later speed lever.
+rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**: chunked
+prefill → speculative decoding → (later) a trace visualizer and serving depth, with
+quantization as a later speed lever.
 The decode-graph / static-bucket idea was built and rejected (a measured dead-end — see
 [`docs/scoping.md`](docs/scoping.md)). See [`docs/scoping.md`](docs/scoping.md) for the
 full plan and non-goals.
@@ -84,6 +85,13 @@ Two v2 directions were tried and **rejected with evidence**, not left as TODOs:
   prompt-prefix KV copying, and no-gather paged KV attention all changed the sampled token path
   or regressed speed. Do not retry without a new profile-backed reason.
 
+**Prefix caching evidence — accepted token path preserved** (same frozen rollout, run
+2026-06-22, pinned `bench-results/rollout-rollout-20260622T173732.json`): refcounted prompt
+block sharing for known G=4 siblings keeps `llm_infer` at the accepted **3026** sampled tokens
+while reducing prompt prefill token-ops from **15,416** to **3,854**. The engine reaches
+**411.5 tok/s** and **$0.16 / 1k rollouts**, improving over the prior 365.8 tok/s / $0.18
+baseline.
+
 ## Roadmap
 
 The engine is the goal, so the forward plan is sequenced by **technique-completeness and
@@ -97,11 +105,13 @@ legibility**. Speed is a side-quest with its own track, last.
    KV-materialization wins harvested, ceiling measured. The decode-graph / static-bucket idea
    was built and **rejected** (a measured dead-end — slower, and it shifted the sampled token
    count); the CUDA-graph axis is closed for this workload.
+3. **Prefix caching.** Refcounted KV-block sharing across known sibling completions of the
+   same prompt. Full prompt blocks are shared by pointer; only the last partial prompt block
+   copy-on-writes on first generated-token append. Frozen rollout sampled token count remains
+   3026.
 
 **Primary forward track — engine technique-completeness + legibility**
 
-3. **Prefix caching.** Refcounted KV-block *sharing* across requests with a common prefix — the
-   canonical technique the engine most lacks. Not the KV-copy approach tried and reverted in v2.
 4. **Chunked prefill / mixed prefill-decode.** Interleave prefill chunks with the decode batch.
 5. **Serving depth.** Streaming, an OpenAI-compatible endpoint, metrics, and a load generator.
 6. **Expand *Keeping the GPU Busy*.** Narrate the architecture and the honest dead-ends.
