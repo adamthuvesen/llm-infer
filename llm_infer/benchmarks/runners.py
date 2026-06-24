@@ -36,7 +36,7 @@ import torch
 from llm_infer.benchmarks.workload import Workload
 from llm_infer.model.qwen import QwenModel
 from llm_infer.profiling import TimingProfiler
-from llm_infer.serving import InferenceEngine, Request, SamplingParams
+from llm_infer.serving import GREEDY, InferenceEngine, Request, SamplingParams
 
 BLOCK_SIZE = 128
 
@@ -111,10 +111,12 @@ def run_llm_infer(
 ) -> RunResult:
     """This engine, flash backend, all requests in one paged cache under the batching loop.
 
-    Greedy by default; under ``workload.sampling`` each ``decode_once`` builds a fresh engine
-    whose ``default_sampling`` carries the pinned temperature/top-p/seed, so every measured
-    iteration reproduces identical tokens (the seed is re-applied per iteration via a fresh
-    per-request generator) — the median wall-clock measures equal work, not RNG drift.
+    Greedy by default; under ``workload.sampling`` each request carries its OWN SamplingParams
+    with a seed derived from the pinned base seed plus the request's index, so the ``G``
+    completions of a prompt are independent draws (a real GRPO group needs diverse rollouts, not
+    ``G`` identical ones), while every iteration still reproduces the same tokens (the same
+    derived seeds) — the median wall-clock measures equal work, not RNG drift. A shared seed
+    would seed every request's generator identically and collapse the group to one completion.
     """
     sampling = workload.sampling
     profiles: list[dict[str, object]] = []
@@ -123,11 +125,18 @@ def run_llm_infer(
         len(prompt) for prompts in _prompt_groups(workload).values() for prompt in prompts
     )
 
-    def make_sampling() -> SamplingParams | None:
+    def request_sampling(index: int) -> SamplingParams:
+        """This request's sampling: greedy when the workload is greedy, else its own seed.
+
+        The seed is ``base_seed + index`` so each request in the expanded ``prompts × G`` list
+        draws independently yet reproducibly. ``request.generator()`` seeds from the request's
+        own params, so the per-request seed (not a shared engine default) is what actually drives
+        each draw — that is the bug this closes.
+        """
         if sampling is None:
-            return None
+            return GREEDY
         return SamplingParams(
-            temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed
+            temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed + index
         )
 
     def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
@@ -136,10 +145,9 @@ def run_llm_infer(
             block_size=BLOCK_SIZE,
             num_blocks=num_blocks,
             device=device,
-            default_sampling=make_sampling(),
             profiler=profiler,
         )
-        for req in workload.requests:
+        for index, req in enumerate(workload.requests):
             engine.add_request(
                 Request(
                     req.request_id,
@@ -147,6 +155,7 @@ def run_llm_infer(
                     workload.max_new_tokens,
                     workload.eos_token_ids,
                     prefix_group_id=req.case_id if enable_prefix_caching else None,
+                    sampling=request_sampling(index),
                 )
             )
         outputs = engine.run()
