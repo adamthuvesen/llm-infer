@@ -26,7 +26,7 @@ def test_committed_kv_trace_fixture_matches_generator(monkeypatch: pytest.Monkey
     assert (ROOT / FIXTURE_PATH).read_text(encoding="utf-8") == build_trace_jsonl()
 
 
-def test_kv_trace_fixture_is_schema_v2_ordered_and_real_engine_shaped() -> None:
+def test_kv_trace_fixture_is_schema_v2_ordered_and_shaped() -> None:
     events = _fixture_events()
     names = {event["event"] for event in events}
 

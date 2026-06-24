@@ -1,154 +1,262 @@
 """Generate the committed schema-v2 trace used by the KV trace visualizer.
 
-The fixture deliberately runs through ``InferenceEngine(trace=...)`` with a tiny model-shaped
-object that writes real KV rows. It avoids loading Qwen weights, but it still exercises the
-same scheduler, paged cache, request lifecycle, chunked prefill, decode, and trace emission
-path as engine traces from a full model.
+This is a **self-contained synthetic generator**: it does not import the inference
+engine or torch. It runs a small, simplified continuous-batching simulation — FIFO
+admission against a fixed block budget, chunked prefill, prefix-group sharing, batched
+decode, and throughput sampling — and emits schema-v2 trace events that mirror the
+shape ``InferenceEngine(trace=...)`` produces.
+
+The trace is a labelled **synthetic sample**, not a measured benchmark: the prompts,
+token ids, and per-step clock are all invented. Keeping the generator standalone lets
+the visualizer ship on its own without the engine.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
-
-import torch
-
-from llm_infer.kv_cache import BlockTable, PagedKVCache
-from llm_infer.serving import InferenceEngine, Request
-from llm_infer.tracing import TraceRecorder
 
 FIXTURE_PATH = Path("docs/assets/kv_trace_schema_v2.jsonl")
 
-
-# Simulated wall-clock advance per traced sample. The fixture runs a toy model on CPU,
-# so it has no meaningful real latency; this fixed step stands in for a plausible decode
-# step (~6 ms) purely so the throughput samples are deterministic AND land in a realistic
-# range instead of the old 0.25 s/step that read as ~5 tok/s. The trace is a labelled
-# synthetic sample, not a measured benchmark.
+SCHEMA_VERSION = 2
+BLOCK_SIZE = 4
+NUM_BLOCKS = 12
+PREFILL_CHUNK = 2
+# Simulated per-sample step latency. Stands in for a plausible decode step (~6 ms) so the
+# throughput samples are deterministic AND land in a realistic range, instead of reading
+# as ~5 tok/s. This is invented time for a synthetic sample, not a measurement.
 STEP_SECONDS = 0.006
 
 
-class FixtureClock:
-    """Deterministic clock so throughput samples are stable in git and realistically paced."""
-
-    def __init__(self, step_seconds: float = STEP_SECONDS) -> None:
-        self._ticks = -1
-        self._step_seconds = step_seconds
-
-    def __call__(self) -> float:
-        self._ticks += 1
-        return self._ticks * self._step_seconds
+def blocks_for(prompt_len: int, max_new: int) -> int:
+    """Worst-case blocks: the prompt plus its decode budget, minus the prefill-sampled token."""
+    max_positions = prompt_len + max_new - 1
+    return -(-max_positions // BLOCK_SIZE)  # ceil division
 
 
-class TraceFixtureModel:
-    """Model-shaped test double that exercises real KV writes and deterministic logits."""
+@dataclass
+class Req:
+    """One simulated request: a prompt length, a decode budget, and a deterministic ramp."""
+
+    request_id: str
+    prompt_len: int
+    max_new: int
+    base_token: int
+    group: str | None = None
+    cached: int = 0
+    prefilled: bool = False
+    finished: bool = False
+    generated: list[int] = field(default_factory=list)
+
+    @property
+    def reserved(self) -> int:
+        return blocks_for(self.prompt_len, self.max_new)
+
+    def emit_token(self) -> int:
+        """Append the next token (a per-request ramp) and apply the length cap."""
+        token = self.base_token + len(self.generated)
+        self.generated.append(token)
+        if len(self.generated) >= self.max_new:
+            self.finished = True
+        return token
+
+
+class TraceBuilder:
+    """Accumulates ordered schema-v2 events with a running sequence/step/throughput clock."""
 
     def __init__(self) -> None:
-        self.num_layers = 1
-        self.num_kv_heads = 1
-        self.head_dim = 4
-        self.dtype = torch.float32
-        self.device = torch.device("cpu")
-        self.profiler = None
+        self.events: list[dict[str, object]] = []
+        self.seq = 0
+        self.step = 0
+        self.total_tokens = 0
+        self.samples = 0
+        self.last_batch = 0
 
-    def prefill(
-        self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
-    ) -> torch.Tensor:
-        return self.prefill_chunk(prompt_ids, cache, table, start_pos=0, chunk_size=len(prompt_ids))
-
-    def prefill_chunk(
-        self,
-        prompt_ids: list[int],
-        cache: PagedKVCache,
-        table: BlockTable,
-        *,
-        start_pos: int,
-        chunk_size: int,
-    ) -> torch.Tensor:
-        end_pos = min(len(prompt_ids), start_pos + chunk_size)
-        table.reserve(end_pos - start_pos)
-        positions = torch.arange(start_pos, end_pos, dtype=torch.float32).reshape(-1, 1, 1)
-        prompt_marker = torch.full_like(positions, float(prompt_ids[0]))
-        key = torch.cat(
-            [
-                positions,
-                prompt_marker,
-                positions + prompt_marker / 100.0,
-                positions + 0.5,
-            ],
-            dim=-1,
+    def emit(self, event: str, **fields: object) -> None:
+        self.seq += 1
+        self.events.append(
+            {
+                "event": event,
+                "schema_version": SCHEMA_VERSION,
+                "sequence": self.seq,
+                "step": self.step,
+                **fields,
+            }
         )
-        cache.write(table, layer=0, start_pos=start_pos, key=key, value=key + 1000.0)
-        table.length = end_pos
-        return self._logits(20 + prompt_ids[0] + end_pos)
 
-    def decode_many(
-        self,
-        cache: PagedKVCache,
-        tables: list[BlockTable],
-        token_ids: list[int] | torch.Tensor,
-    ) -> torch.Tensor:
-        tokens = torch.as_tensor(token_ids, dtype=torch.long)
-        positions = [table.length for table in tables]
-        for table in tables:
-            table.reserve(1)
-        key = torch.stack(
-            [
-                torch.tensor(
-                    [[float(pos), float(token), float(pos + token), 1.0]],
-                    dtype=torch.float32,
-                )
-                for pos, token in zip(positions, tokens.tolist(), strict=True)
-            ]
+    def batch_changed(self, size: int, waiting: int) -> None:
+        if size == self.last_batch:
+            return
+        self.emit(
+            "batch_size_changed",
+            previous_batch_size=self.last_batch,
+            batch_size=size,
+            waiting=waiting,
         )
-        cache.write_many(tables, layer=0, positions=positions, key=key, value=key + 2000.0)
-        for table, pos in zip(tables, positions, strict=True):
-            table.length = pos + 1
-        return torch.stack([self._logits(int(token) + 1) for token in tokens.tolist()])
+        self.last_batch = size
 
-    def _logits(self, token_id: int) -> torch.Tensor:
-        logits = torch.full((128,), -100.0)
-        logits[token_id] = 100.0
-        return logits
+    def throughput(self, tokens_this_step: int) -> None:
+        if tokens_this_step == 0:
+            return
+        self.total_tokens += tokens_this_step
+        self.samples += 1
+        elapsed = self.samples * STEP_SECONDS
+        self.emit(
+            "tokens_per_second_sampled",
+            tokens_emitted=tokens_this_step,
+            total_generated_tokens=self.total_tokens,
+            elapsed_seconds=elapsed,
+            tokens_per_second=self.total_tokens / elapsed,
+        )
+
+    def to_jsonl(self) -> str:
+        return "\n".join(json.dumps(event, sort_keys=True) for event in self.events) + "\n"
+
+
+def _admit(tb: TraceBuilder, waiting: list[Req], running: list[Req], committed: int) -> int:
+    """FIFO admission with head-of-line blocking, mirroring the scheduler's block budget."""
+    while waiting:
+        need = waiting[0].reserved
+        if committed + need > NUM_BLOCKS:
+            break
+        request = waiting.pop(0)
+        running.append(request)
+        committed += need
+        fields = {"prefix_group_id": request.group} if request.group is not None else {}
+        tb.emit(
+            "request_admitted",
+            request_id=request.request_id,
+            prompt_tokens=request.prompt_len,
+            max_new_tokens=request.max_new,
+            reserved_blocks=need,
+            **fields,
+        )
+    return committed
+
+
+def _prefill_chunk(tb: TraceBuilder, leader: Req) -> bool:
+    """Cache one prompt chunk for the leader; return True when its prompt is fully cached."""
+    start = leader.cached
+    end = min(leader.prompt_len, start + PREFILL_CHUNK)
+    tb.emit(
+        "prefill_chunk_started",
+        request_id=leader.request_id,
+        start_pos=start,
+        end_pos=end,
+        total_prompt_tokens=leader.prompt_len,
+    )
+    leader.cached = end
+    completed = end == leader.prompt_len
+    tb.emit(
+        "prefill_chunk_progress",
+        request_id=leader.request_id,
+        start_pos=start,
+        end_pos=end,
+        cached_tokens=end,
+        total_prompt_tokens=leader.prompt_len,
+        completed=completed,
+    )
+    return completed
+
+
+def _prefill(tb: TraceBuilder, to_prefill: list[Req]) -> int:
+    """Advance prefill for unstarted requests; prefix siblings share the leader's cache."""
+    tokens_emitted = 0
+    handled: set[str] = set()
+    for request in to_prefill:
+        if request.request_id in handled:
+            continue
+        group = (
+            [r for r in to_prefill if r.group == request.group]
+            if request.group is not None
+            else [request]
+        )
+        handled.update(r.request_id for r in group)
+
+        leader = group[0]
+        if not _prefill_chunk(tb, leader):
+            continue
+
+        # Prompt fully cached: siblings fork the leader's cache (no prefill events of their
+        # own), and every group member samples its first token from the prefill logits.
+        tokens = []
+        for member in group:
+            member.prefilled = True
+            member.cached = leader.prompt_len
+            tokens.append(member.emit_token())
+        tb.emit(
+            "decode_step",
+            request_ids=[member.request_id for member in group],
+            batch_size=len(group),
+            token_ids=tokens,
+            tokens_emitted=len(tokens),
+            token_source="prefill",
+        )
+        tokens_emitted += len(tokens)
+    return tokens_emitted
+
+
+def _decode(tb: TraceBuilder, to_decode: list[Req]) -> int:
+    """One batched decode step advancing every already-ready request by a token."""
+    if not to_decode:
+        return 0
+    tokens = [request.emit_token() for request in to_decode]
+    tb.emit(
+        "decode_step",
+        request_ids=[request.request_id for request in to_decode],
+        batch_size=len(to_decode),
+        token_ids=tokens,
+        tokens_emitted=len(tokens),
+        token_source="decode",
+    )
+    return len(tokens)
 
 
 def build_trace_jsonl() -> str:
-    recorder = TraceRecorder()
-    engine = InferenceEngine(
-        TraceFixtureModel(),
-        block_size=4,
-        num_blocks=12,
-        prefill_chunk_size=2,
-        trace=recorder,
-        trace_clock=FixtureClock(),
-    )
-    # Scenario, in admission (FIFO) order. With 12 blocks the first four fit at once and
-    # the last two queue, so the trace shows real waiting pressure, continuous-batching
-    # churn, and a KV wall that fills to capacity:
-    #   rollout-a/-b  shared 4-token prompt (prefix group) — b reuses a's prefilled cache
-    #   code-gen      12-token prompt → six chunked prefill steps while others decode
-    #   summarize     7-token prompt → multi-chunk prefill
-    #   chat-quick    2-token prompt → admitted once capacity frees, fast finisher
-    #   translate     9-token prompt → admitted last
-    stop = frozenset({127})
-    engine.add_request(Request("rollout-a", [12, 7, 7, 3], 5, stop, prefix_group_id="rollout"))
-    engine.add_request(Request("rollout-b", [12, 7, 7, 3], 5, stop, prefix_group_id="rollout"))
-    engine.add_request(Request("code-gen", [5, 1, 8, 2, 7, 3, 9, 4, 6, 2, 8, 1], 8, stop))
-    engine.add_request(Request("summarize", [6, 2, 9, 4, 1, 7, 3], 4, stop))
-    engine.add_request(Request("chat-quick", [4, 9], 6, stop))
-    engine.add_request(Request("translate", [3, 8, 1, 6, 2, 9, 5, 7, 4], 6, stop))
+    """Run the synthetic scenario and return its schema-v2 JSONL.
 
-    outputs = engine.run()
-    expected_lengths = {
-        "rollout-a": 5,
-        "rollout-b": 5,
-        "code-gen": 8,
-        "summarize": 4,
-        "chat-quick": 6,
-        "translate": 6,
-    }
-    if {request_id: len(tokens) for request_id, tokens in outputs.items()} != expected_lengths:
-        raise RuntimeError(f"unexpected fixture output lengths: {outputs}")
-    return recorder.to_jsonl() + "\n"
+    Six requests against twelve blocks: the first four fit at once and the last two queue,
+    so the trace shows real waiting pressure, continuous-batching churn, a long chunked
+    prefill (``code-gen``), prefix-shared rollouts, and a KV wall that fills to capacity.
+    """
+    tb = TraceBuilder()
+    waiting = [
+        Req("rollout-a", prompt_len=4, max_new=5, base_token=36, group="rollout"),
+        Req("rollout-b", prompt_len=4, max_new=5, base_token=36, group="rollout"),
+        Req("code-gen", prompt_len=12, max_new=8, base_token=37),
+        Req("summarize", prompt_len=7, max_new=4, base_token=33),
+        Req("chat-quick", prompt_len=2, max_new=6, base_token=26),
+        Req("translate", prompt_len=9, max_new=6, base_token=32),
+    ]
+    running: list[Req] = []
+    committed = 0
+    step = 0
+
+    while waiting or running:
+        tb.step = step
+        committed = _admit(tb, waiting, running, committed)
+        tb.batch_changed(len(running), len(waiting))
+
+        to_decode = [r for r in running if r.prefilled]
+        to_prefill = [r for r in running if not r.prefilled]
+        tokens_this_step = _prefill(tb, to_prefill) + _decode(tb, to_decode)
+
+        for request in [r for r in running if r.finished]:
+            tb.emit(
+                "request_finished",
+                request_id=request.request_id,
+                token_ids=request.generated,
+                generated_tokens=len(request.generated),
+                reason="length",
+            )
+            committed -= request.reserved
+            running.remove(request)
+        tb.batch_changed(len(running), len(waiting))
+        tb.throughput(tokens_this_step)
+        step += 1
+
+    return tb.to_jsonl()
 
 
 def main() -> None:
