@@ -146,9 +146,13 @@ class Scheduler:
         freeing and later recomputing it wastes the least work. ``exclude`` is the request that
         needs the block (when a single request drives the pressure), which must not evict itself;
         pass ``None`` when the whole running batch is the block-needer.
+
+        A **finished** request is never a victim: it is about to relinquish its KV anyway, and
+        evicting it would both discard a completed output and raise (recompute refuses a finished
+        request). The engine releases finishers promptly, so this is also a belt-and-suspenders.
         """
         for request in reversed(self.running):
-            if request is not exclude:
+            if request is not exclude and not request.finished:
                 return request
         return None
 

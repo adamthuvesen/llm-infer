@@ -153,6 +153,48 @@ def test_prefill_skips_a_request_preempted_mid_step() -> None:
         )
 
 
+def test_finishers_under_pressure_do_not_crash_and_stay_exact() -> None:
+    """A request that finishes mid-step must never be hit by a same-step preemption.
+
+    Regression: a 1-token request finishes during prefill but lingered in the running set until
+    the end-of-step sweep, so a later preemption that step could select it as the LIFO victim —
+    and recompute raises on a finished request, killing the step (and the serving engine thread).
+    The fix releases finishers right after each prefill/decode op and skips finished victims. We
+    interleave 1-token finishers with longer growers under a tight pool, assert no step raises and
+    that no finished request is ever left in the running set, then that outputs stay token-exact.
+    """
+    model = _tiny_qwen()
+    requests = [
+        ([1, 5, 9], 1, "quick-a"),  # finishes on its prefill token
+        ([2, 6, 10], 6, "long-a"),
+        ([3, 7, 11], 1, "quick-b"),
+        ([4, 8, 12], 6, "long-b"),
+        ([1, 7, 13], 1, "quick-c"),
+        ([2, 8, 14], 6, "long-c"),
+    ]
+    recorder = TraceRecorder()
+    engine = InferenceEngine(
+        model, block_size=2, num_blocks=4, preemption=True, prefill_chunk_size=1, trace=recorder
+    )
+    tracked = [Request(rid, list(prompt), max_new, EOS) for prompt, max_new, rid in requests]
+    for request in tracked:
+        engine.add_request(request)
+
+    steps = 0
+    while engine.scheduler.has_work():
+        engine.step()  # must not raise even when a finisher and a preemption land in one step
+        steps += 1
+        assert steps < 400, "engine made no forward progress"
+        for running in engine.scheduler.running:
+            assert not running.finished, f"{running.request_id!r} finished but stayed in running"
+
+    assert any(e.event == "request_preempted" for e in recorder.events), "scenario must preempt"
+    tight = {request.request_id: request.generated for request in tracked}
+    roomy = _run(model, requests, num_blocks=32, preemption=False, block_size=2, prefill_chunk_size=1)
+    for _, _, request_id in requests:
+        assert tight[request_id] == roomy[request_id], f"{request_id}: output diverged"
+
+
 def test_preemption_preserves_batched_equals_serial() -> None:
     """Under preemption, each request batched == run alone — eviction adds no drift."""
     model = _tiny_qwen()

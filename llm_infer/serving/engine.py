@@ -183,10 +183,8 @@ class InferenceEngine:
             if to_decode:
                 self._decode_requests(to_decode, result)
 
-            for request in [r for r in self.scheduler.running if r.finished]:
-                self._trace_request_finished(request)
-                request.block_table.free()
-                self.scheduler.release(request)
+            # Finishers are freed inside each prefill/decode op (see _release_finished_in), so by
+            # here the running set already excludes them; nothing left to sweep.
             self._trace_batch_size_changed()
             self._trace_throughput_sample(result)
 
@@ -392,6 +390,7 @@ class InferenceEngine:
             token = self._sample_one(logits, request)
         self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
         self._trace_decode_step([request], [token], token_source="prefill")
+        self._release_finished_in([request])
 
     def _prefill_shared_group(self, requests: list[Request], result: StepResult) -> None:
         prompt_ids = requests[0].prompt_ids
@@ -426,6 +425,7 @@ class InferenceEngine:
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
         self._trace_decode_step(requests, tokens, token_source="prefill")
+        self._release_finished_in(requests)
 
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
@@ -465,6 +465,7 @@ class InferenceEngine:
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
         self._trace_decode_step(requests, list(tokens), token_source="decode")
+        self._release_finished_in(requests)
 
     def _params_for(self, request: Request) -> SamplingParams:
         """The request's own sampling params, or the engine default when it set none."""
@@ -590,6 +591,7 @@ class InferenceEngine:
                 break
             self._record(request, token, self._is_eos(token, request), result)
         self._trace_decode_step([request], emitted, token_source="speculative")
+        self._release_finished_in([request])
 
     def _accepted_prefix_length(
         self, verifier_tokens: torch.Tensor, draft_tokens: torch.Tensor
@@ -676,6 +678,23 @@ class InferenceEngine:
         result.tokens.setdefault(request.request_id, []).append(token)
         if request.finished and request.request_id not in result.finished:
             result.finished.append(request.request_id)
+
+    def _release_finished_in(self, requests: list[Request]) -> None:
+        """Free and release any of ``requests`` that just finished, promptly.
+
+        Called at the end of each prefill/decode op — after its ``decode_step`` trace, so the
+        finish events stay ordered after the token that produced them. Releasing here rather than
+        at a single end-of-step sweep returns a finisher's KV before the *next* prefill/decode
+        this step needs room, and takes it out of the running set so it can never be selected as a
+        preemption victim (recompute refuses a finished request). Resume samples nothing and never
+        finishes, so prefill and decode together cover every finish source.
+        """
+        for request in requests:
+            if request.finished and self._is_running(request):
+                self._trace_request_finished(request)
+                if request.block_table is not None:
+                    request.block_table.free()
+                self.scheduler.release(request)
 
     def run(self) -> dict[str, list[int]]:
         """Step until the queue and running set drain; return each request's generated ids."""
