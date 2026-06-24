@@ -104,13 +104,14 @@ def create_app(
     async def chat_completions(request: ChatCompletionRequest):
         _reject_unsupported(request)
         _check_sampling(request)
+        model = _resolve_model(request.model, model_id)
         prompt_ids = _apply_chat_template(tokenizer, request.messages)
         return await _serve(
             request_kind="chat",
             prompt_ids=prompt_ids,
             max_new_tokens=request.max_tokens,
             stream=request.stream,
-            model=request.model,
+            model=model,
             sampling=_sampling_params(request),
             stop=_stop_sequences(request.stop),
         )
@@ -118,6 +119,7 @@ def create_app(
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest):
         _check_sampling(request)
+        model = _resolve_model(request.model, model_id)
         if isinstance(request.prompt, list):
             raise HTTPException(400, "batched 'prompt' (list) is not supported; send one string")
         prompt_ids = tokenizer.encode(request.prompt)
@@ -128,7 +130,7 @@ def create_app(
             prompt_ids=prompt_ids,
             max_new_tokens=request.max_tokens,
             stream=request.stream,
-            model=request.model,
+            model=model,
             sampling=_sampling_params(request),
             stop=_stop_sequences(request.stop),
         )
@@ -136,7 +138,9 @@ def create_app(
     @app.post("/v1/responses")
     async def responses(request: ResponsesRequest):
         _reject_responses_unsupported(request)
+        model = _resolve_model(request.model, model_id)
         prompt_ids = _responses_prompt_ids(tokenizer, request)
+        _assert_capacity(async_engine, prompt_ids, request.max_output_tokens)
         stop = _stop_sequences(request.stop)
         request_id = async_engine.next_request_id()
         created = int(time.time())
@@ -154,7 +158,7 @@ def create_app(
                 detok=StopSequenceDetokenizer(tokenizer, stop),
                 response_id=response_id,
                 created=created,
-                model=request.model,
+                model=model,
                 input_tokens=len(prompt_ids),
             )
             return StreamingResponse(sse, media_type="text/event-stream")
@@ -163,7 +167,7 @@ def create_app(
             detok=StopSequenceDetokenizer(tokenizer, stop),
             response_id=response_id,
             created=created,
-            model=request.model,
+            model=model,
             input_tokens=len(prompt_ids),
         )
 
@@ -177,6 +181,7 @@ def create_app(
         sampling: SamplingParams,
         stop: list[str],
     ):
+        _assert_capacity(async_engine, prompt_ids, max_new_tokens)
         request_id = async_engine.next_request_id()
         created = int(time.time())
         completion_id = f"cmpl-{request_id}"
@@ -488,6 +493,28 @@ def _apply_chat_template(tokenizer: object, messages: list[ChatMessage]) -> list
     if not ids:
         raise HTTPException(400, "chat template produced zero tokens")
     return ids
+
+
+def _resolve_model(requested: str, served: str) -> str:
+    """Validate the requested model against the one this server actually serves.
+
+    This is a single-model server, so any other id is a 404 (matching OpenAI / vLLM): a client
+    never gets a response that silently claims a model we did not run. Returns the canonical
+    served id, which every response then reports — we answer with what ran, not what was asked.
+    """
+    if requested != served:
+        raise HTTPException(404, f"model {requested!r} not found; this server serves {served!r}")
+    return served
+
+
+def _assert_capacity(
+    async_engine: AsyncInferenceEngine, prompt_ids: list[int], max_new_tokens: int
+) -> None:
+    """Reject a request too large for the KV pool with a clean 400, before it reaches the loop."""
+    try:
+        async_engine.assert_admissible(prompt_len=len(prompt_ids), max_new_tokens=max_new_tokens)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _reject_unsupported(request: ChatCompletionRequest) -> None:

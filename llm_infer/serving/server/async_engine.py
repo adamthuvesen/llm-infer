@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from llm_infer.scheduler.scheduler import blocks_for_length
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams
@@ -54,6 +55,9 @@ class _Stream:
     max_new_tokens: int
     aborted: bool = False
     eos_token_ids: frozenset[int] = field(default_factory=frozenset)
+    # Set when the engine refuses this submission on the background thread; the consumer
+    # re-raises it so the failure surfaces loudly instead of hanging on an empty stream.
+    error: Exception | None = None
 
 
 class AsyncInferenceEngine:
@@ -100,6 +104,22 @@ class AsyncInferenceEngine:
     def next_request_id(self) -> str:
         """A process-unique request id; the engine rejects duplicates loudly."""
         return f"req-{next(self._ids)}"
+
+    def assert_admissible(self, *, prompt_len: int, max_new_tokens: int) -> None:
+        """Reject a request too large for the pool *before* it reaches the engine thread.
+
+        The scheduler enforces the same worst-case-fits bound in ``add()``, but that runs on the
+        background loop where a raise would kill the engine for every client. Checking the request
+        shape here lets the handler return a clean 4xx and keeps the one loop alive. Raises
+        ``ValueError`` (the handler maps it to a 400) when even an empty pool could not hold it.
+        """
+        scheduler = self._engine.scheduler
+        need = blocks_for_length(prompt_len + max_new_tokens - 1, scheduler.block_size)
+        if need > scheduler.num_blocks:
+            raise ValueError(
+                f"request needs up to {need} KV blocks but the pool holds {scheduler.num_blocks}; "
+                "reduce the prompt length or max_tokens"
+            )
 
     def _bind_gauges(self, metrics: ServerMetrics) -> None:
         """Point the live-read gauges at real engine/scheduler/allocator state.
@@ -164,7 +184,9 @@ class AsyncInferenceEngine:
         try:
             while True:
                 item = await queue.get()
-                if item is None:  # loop signalled end-of-stream
+                if item is None:  # loop signalled end-of-stream (or refused the submission)
+                    if stream.error is not None:
+                        raise stream.error
                     return
                 if self._metrics is not None:
                     self._metrics.generated_tokens_total.inc()
@@ -200,8 +222,16 @@ class AsyncInferenceEngine:
             pending = self._submissions
             self._submissions = []
         for request, stream in pending:
+            try:
+                self._engine.add_request(request)
+            except Exception as exc:  # noqa: BLE001 — a bad submission must not kill the loop
+                # Preflight (assert_admissible) already rejects the common oversized case with a
+                # clean 4xx, so reaching here means an unexpected engine rejection. Fail just this
+                # stream — the consumer re-raises ``error`` — and keep serving every other client.
+                stream.error = exc
+                self._enqueue(stream, None)
+                continue
             self._streams[request.request_id] = stream
-            self._engine.add_request(request)
 
     def _apply_aborts(self) -> None:
         """Drop streams whose consumer disconnected, freeing their engine state.

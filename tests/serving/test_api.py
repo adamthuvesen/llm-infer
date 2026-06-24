@@ -55,9 +55,9 @@ class TinyTokenizer:
         return {"input_ids": ids, "attention_mask": [1] * len(ids)}
 
 
-def _build_app():
+def _build_app(*, block_size: int = 8, num_blocks: int = 64):
     model = _tiny_qwen()
-    engine = InferenceEngine(model, block_size=8, num_blocks=64)
+    engine = InferenceEngine(model, block_size=block_size, num_blocks=num_blocks)
     async_engine = AsyncInferenceEngine(engine)
     return create_app(
         async_engine=async_engine,
@@ -615,5 +615,65 @@ def test_concurrent_requests_use_their_own_sampling() -> None:
             )
         assert greedy_batched == greedy_alone
         assert isinstance(sampled, str)
+
+    _run(go())
+
+
+def test_oversized_request_is_rejected_and_engine_survives() -> None:
+    """A request too large for the KV pool returns a clean 400 and never kills the engine loop.
+
+    Regression: before the preflight, an oversized prompt raised inside the background engine
+    thread (the scheduler's worst-case-fits rejection), killing the one loop and hanging every
+    client. Now the handler rejects it with a 400, and a normal request on the same app is still
+    served — proof the loop stayed alive.
+    """
+
+    async def go() -> None:
+        # Pool holds 2 blocks of 8 → at most 16 cached positions; ask for far more than that.
+        app = _build_app(block_size=8, num_blocks=2)
+        async with app.router.lifespan_context(app), _client(app) as client:
+            oversized = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 1000},
+            )
+            assert oversized.status_code == 400
+            assert "block" in oversized.json()["detail"].lower()
+
+            # The engine loop is still alive: a request that fits the pool is served normally.
+            ok = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 4},
+            )
+            assert ok.status_code == 200
+            assert ok.json()["usage"]["completion_tokens"] == 4
+
+    _run(go())
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        (
+            "/v1/chat/completions",
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 3},
+        ),
+        ("/v1/completions", {"model": "gpt-4o", "prompt": "hi", "max_tokens": 3}),
+        ("/v1/responses", {"model": "gpt-4o", "input": "hi", "max_output_tokens": 3}),
+    ],
+)
+def test_unknown_model_is_404_not_a_silent_substitution(path: str, body: dict) -> None:
+    """A model id this server does not serve is a 404 — never a 200 echoing a model we did not run.
+
+    Regression: the handlers used to copy ``request.model`` into the response, so a request for
+    ``gpt-4o`` returned 200 while tiny-Qwen actually served it. The server now validates against
+    the one served id and reports what truly ran.
+    """
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(path, json=body)
+            assert resp.status_code == 404, f"{path} accepted an unknown model"
+            assert "gpt-4o" in resp.json()["detail"]
 
     _run(go())

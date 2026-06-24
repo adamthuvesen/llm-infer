@@ -151,6 +151,10 @@ class ScriptedAsyncEngine:
         self._counter += 1
         return f"req-{self._counter}"
 
+    def assert_admissible(self, *, prompt_len: int, max_new_tokens: int) -> None:
+        # No real KV pool here; the scripted source emits a fixed sequence regardless of size.
+        return None
+
     async def stream(
         self,
         *,

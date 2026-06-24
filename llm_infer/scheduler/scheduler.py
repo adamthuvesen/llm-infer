@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     from llm_infer.serving.request import Request
 
 
+def blocks_for_length(positions: int, block_size: int) -> int:
+    """Blocks needed to hold ``positions`` cached tokens — ceil division, the one source."""
+    return -(-positions // block_size)
+
+
 def max_blocks_for(request: Request, block_size: int) -> int:
     """Worst-case blocks a request can occupy: prompt plus its full decode budget.
 
@@ -36,8 +41,7 @@ def max_blocks_for(request: Request, block_size: int) -> int:
     The first generated token comes from prefill, so the most positions it can ever
     cache is ``len(prompt) + max_new_tokens - 1``.
     """
-    max_positions = len(request.prompt_ids) + request.max_new_tokens - 1
-    return -(-max_positions // block_size)  # ceil division
+    return blocks_for_length(len(request.prompt_ids) + request.max_new_tokens - 1, block_size)
 
 
 def blocks_for_footprint(request: Request, block_size: int) -> int:
@@ -47,8 +51,7 @@ def blocks_for_footprint(request: Request, block_size: int) -> int:
     token, so a resumed request's immediate footprint is ``len(prompt) + len(generated)``
     positions; a fresh request has no generated tokens, so this is just its prompt.
     """
-    positions = len(request.prompt_ids) + len(request.generated)
-    return -(-positions // block_size)  # ceil division
+    return blocks_for_length(len(request.prompt_ids) + len(request.generated), block_size)
 
 
 class Scheduler:
