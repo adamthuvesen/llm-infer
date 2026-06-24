@@ -375,8 +375,23 @@ function renderEventList() {
     fragment.append(button);
   }
   els.eventList.replaceChildren(fragment);
+  keepCurrentRowVisible();
+}
+
+// Scroll only the event-stream box to reveal the current row — never the page.
+// (element.scrollIntoView scrolls every scrollable ancestor, including the window,
+// which made the whole page creep down on each Play step.)
+function keepCurrentRowVisible() {
   const current = els.eventList.querySelector(".is-current");
-  if (current) current.scrollIntoView({ block: "nearest" });
+  if (!current) return;
+  const list = els.eventList;
+  const rowRect = current.getBoundingClientRect();
+  const listRect = list.getBoundingClientRect();
+  if (rowRect.top < listRect.top) {
+    list.scrollTop -= listRect.top - rowRect.top + 8;
+  } else if (rowRect.bottom > listRect.bottom) {
+    list.scrollTop += rowRect.bottom - listRect.bottom + 8;
+  }
 }
 
 /* ============================ theater scaffolding ============================ */
