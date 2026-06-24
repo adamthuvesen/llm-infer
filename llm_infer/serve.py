@@ -15,7 +15,7 @@ from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.sampler import Sampler
-from llm_infer.serving.server import AsyncInferenceEngine, create_app
+from llm_infer.serving.server import AsyncInferenceEngine, ServerMetrics, create_app
 
 # A 64-token page and a few hundred pages comfortably hold a handful of concurrent
 # chat sessions of the lengths this server is demoed at; tune via the CLI for a real load.
@@ -41,13 +41,15 @@ def build_qwen_app(
     engine = InferenceEngine(
         model, block_size=block_size, num_blocks=num_blocks, device=device, sampler=sampler
     )
-    async_engine = AsyncInferenceEngine(engine)
+    metrics = ServerMetrics()
+    async_engine = AsyncInferenceEngine(engine, metrics=metrics)
     return create_app(
         async_engine=async_engine,
         tokenizer=tokenizer,
         model_id=MODEL_ID,
         eos_token_ids=eos_token_ids,
         sampler=sampler,
+        metrics=metrics,
     )
 
 

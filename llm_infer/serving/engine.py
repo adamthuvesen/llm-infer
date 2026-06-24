@@ -103,6 +103,9 @@ class InferenceEngine:
         self._trace_total_tokens = 0
         self._last_traced_batch_size = 0
         self._requests: dict[str, Request] = {}
+        # Observability only: a running tally of preemptions for the serving metrics endpoint.
+        # Read live at scrape time; it never influences scheduling or decoding.
+        self.preemption_count = 0
 
     def add_request(self, request: Request) -> None:
         """Register and queue a request. Duplicate ids are rejected loudly."""
@@ -228,6 +231,7 @@ class InferenceEngine:
 
     def _preempt(self, victim: Request) -> None:
         """Evict ``victim`` by recompute: free its KV honestly, keep its tokens, requeue it."""
+        self.preemption_count += 1
         freed_blocks = victim.block_table.num_blocks if victim.block_table is not None else 0
         if victim.block_table is not None:
             victim.block_table.free()  # fires honest block_freed at the allocator boundary

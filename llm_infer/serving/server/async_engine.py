@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import threading
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -31,6 +32,7 @@ import torch
 
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
+from llm_infer.serving.server.metrics import ServerMetrics
 
 
 @dataclass
@@ -61,9 +63,16 @@ class AsyncInferenceEngine:
     loop thread and :meth:`stream` per request; :meth:`stop` joins the thread on shutdown.
     """
 
-    def __init__(self, engine: InferenceEngine, *, idle_sleep_s: float = 0.001) -> None:
+    def __init__(
+        self,
+        engine: InferenceEngine,
+        *,
+        idle_sleep_s: float = 0.001,
+        metrics: ServerMetrics | None = None,
+    ) -> None:
         self._engine = engine
         self._idle_sleep_s = idle_sleep_s
+        self._metrics = metrics
         self._submissions: list[tuple[Request, _Stream]] = []
         self._streams: dict[str, _Stream] = {}
         self._lock = threading.Lock()
@@ -71,6 +80,8 @@ class AsyncInferenceEngine:
         self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
         self._ids = itertools.count()
+        if metrics is not None:
+            self._bind_gauges(metrics)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -88,6 +99,26 @@ class AsyncInferenceEngine:
     def next_request_id(self) -> str:
         """A process-unique request id; the engine rejects duplicates loudly."""
         return f"req-{next(self._ids)}"
+
+    def _bind_gauges(self, metrics: ServerMetrics) -> None:
+        """Point the live-read gauges at real engine/scheduler/allocator state.
+
+        These are read-only scalar snapshots (running/waiting counts, free-pool size) taken at
+        scrape time, so a scrape always reflects the engine's state the instant ``/metrics`` is
+        hit rather than a value pushed on some earlier event.
+        """
+        engine = self._engine
+        scheduler = engine.scheduler
+        allocator = engine.cache.allocator
+        metrics.bind_engine_gauges(
+            preemptions=lambda: engine.preemption_count,
+            running_requests=lambda: len(scheduler.running),
+            waiting_requests=lambda: len(scheduler.waiting),
+            kv_blocks_used=lambda: allocator.num_used,
+            kv_blocks_free=lambda: allocator.num_free,
+            kv_blocks_total=lambda: allocator.num_blocks,
+            kv_utilization=lambda: allocator.num_used / allocator.num_blocks,
+        )
 
     async def stream(
         self,
@@ -121,13 +152,26 @@ class AsyncInferenceEngine:
         with self._lock:
             self._submissions.append((request, stream))
         self._wake.set()
+
+        arrival = time.perf_counter()
+        if self._metrics is not None:
+            self._metrics.requests_total.inc()
+        first_token_seen = False
         try:
             while True:
                 item = await queue.get()
                 if item is None:  # loop signalled end-of-stream
                     return
+                if self._metrics is not None:
+                    self._metrics.generated_tokens_total.inc()
+                    if not first_token_seen:
+                        first_token_seen = True
+                        self._metrics.ttft_seconds.observe(time.perf_counter() - arrival)
                 yield item
                 if item.finish_reason is not None:
+                    if self._metrics is not None:
+                        self._metrics.request_latency_seconds.observe(time.perf_counter() - arrival)
+                        self._metrics.requests_completed_total.inc(finish_reason=item.finish_reason)
                     return
         finally:
             stream.aborted = True

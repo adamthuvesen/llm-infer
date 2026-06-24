@@ -20,11 +20,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from llm_infer.serving.sampler import Sampler
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
+from llm_infer.serving.server.metrics import ServerMetrics
 from llm_infer.serving.server.protocol import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -59,9 +60,16 @@ def create_app(
     model_id: str,
     eos_token_ids: frozenset[int],
     sampler: Sampler | None = None,
+    metrics: ServerMetrics | None = None,
 ) -> FastAPI:
-    """Build the serving app around an injected engine, tokenizer, and sampler config."""
+    """Build the serving app around an injected engine, tokenizer, sampler, and metrics.
+
+    ``metrics`` should be the same :class:`ServerMetrics` the ``async_engine`` was built with,
+    so ``/metrics`` renders the instruments those request/token choke points feed and the live
+    gauges already bound to the engine. When omitted, ``/metrics`` reports an empty registry.
+    """
     sampler = sampler or Sampler()
+    metrics = metrics or ServerMetrics()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -76,6 +84,11 @@ def create_app(
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics_endpoint() -> PlainTextResponse:
+        # Counters reflect traffic already served; gauges read live engine state at this scrape.
+        return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
     @app.get("/v1/models")
     async def models() -> ModelList:

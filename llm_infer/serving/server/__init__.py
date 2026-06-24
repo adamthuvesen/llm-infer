@@ -13,10 +13,12 @@ from __future__ import annotations
 from llm_infer.serving.server.app import create_app
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
+from llm_infer.serving.server.metrics import ServerMetrics
 
 __all__ = [
     "AsyncInferenceEngine",
     "IncrementalDetokenizer",
+    "ServerMetrics",
     "TokenStreamItem",
     "create_app",
 ]
