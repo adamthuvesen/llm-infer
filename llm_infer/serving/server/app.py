@@ -141,6 +141,7 @@ def create_app(
         model = _resolve_model(request.model, model_id)
         prompt_ids = _responses_prompt_ids(tokenizer, request)
         _assert_capacity(async_engine, prompt_ids, request.max_output_tokens)
+        arrival = time.perf_counter()
         stop = _stop_sequences(request.stop)
         request_id = async_engine.next_request_id()
         created = int(time.time())
@@ -160,6 +161,8 @@ def create_app(
                 created=created,
                 model=model,
                 input_tokens=len(prompt_ids),
+                metrics=metrics,
+                arrival=arrival,
             )
             return StreamingResponse(sse, media_type="text/event-stream")
         return await _collect_response(
@@ -169,6 +172,8 @@ def create_app(
             created=created,
             model=model,
             input_tokens=len(prompt_ids),
+            metrics=metrics,
+            arrival=arrival,
         )
 
     async def _serve(
@@ -182,6 +187,7 @@ def create_app(
         stop: list[str],
     ):
         _assert_capacity(async_engine, prompt_ids, max_new_tokens)
+        arrival = time.perf_counter()
         request_id = async_engine.next_request_id()
         created = int(time.time())
         completion_id = f"cmpl-{request_id}"
@@ -200,6 +206,8 @@ def create_app(
                 completion_id=completion_id,
                 created=created,
                 model=model,
+                metrics=metrics,
+                arrival=arrival,
             )
             return StreamingResponse(sse, media_type="text/event-stream")
         return await _collect(
@@ -210,6 +218,8 @@ def create_app(
             created=created,
             model=model,
             prompt_tokens=len(prompt_ids),
+            metrics=metrics,
+            arrival=arrival,
         )
 
     return app
@@ -224,6 +234,8 @@ async def _collect(
     created: int,
     model: str,
     prompt_tokens: int,
+    metrics: ServerMetrics | None = None,
+    arrival: float | None = None,
 ):
     """Drain the token stream and assemble a single non-streaming response.
 
@@ -239,7 +251,7 @@ async def _collect(
         text_parts.append(fed.text)
         if fed.stopped:
             finish_reason = "stop"
-            await _finish_on_stop(token_stream)
+            await _finish_on_stop(token_stream, metrics, arrival)
             break
         if item.finish_reason is not None:
             finish_reason = item.finish_reason
@@ -280,6 +292,8 @@ async def _collect_response(
     created: int,
     model: str,
     input_tokens: int,
+    metrics: ServerMetrics | None = None,
+    arrival: float | None = None,
 ):
     """Drain the stream into one Responses ``response`` object (a single assistant message)."""
     text_parts: list[str] = []
@@ -289,7 +303,7 @@ async def _collect_response(
         fed = detok.feed(item.token_id)
         text_parts.append(fed.text)
         if fed.stopped:
-            await _finish_on_stop(token_stream)
+            await _finish_on_stop(token_stream, metrics, arrival)
             break
     else:
         text_parts.append(detok.finalize())
@@ -318,6 +332,8 @@ async def _stream_responses_sse(
     created: int,
     model: str,
     input_tokens: int,
+    metrics: ServerMetrics | None = None,
+    arrival: float | None = None,
 ) -> AsyncIterator[str]:
     """Emit the Responses semantic SSE events, not chat chunks.
 
@@ -348,7 +364,7 @@ async def _stream_responses_sse(
                 {"response_id": response_id, "delta": fed.text},
             )
         if fed.stopped:
-            await _finish_on_stop(token_stream)
+            await _finish_on_stop(token_stream, metrics, arrival)
             break
     else:
         tail = detok.finalize()
@@ -387,6 +403,8 @@ async def _stream_sse(
     completion_id: str,
     created: int,
     model: str,
+    metrics: ServerMetrics | None = None,
+    arrival: float | None = None,
 ) -> AsyncIterator[str]:
     """Emit OpenAI SSE chunks: per-token deltas, a finish chunk, then ``[DONE]``.
 
@@ -412,7 +430,7 @@ async def _stream_sse(
             yield _sse(_delta_chunk(request_kind, completion_id, created, model, fed.text))
         if fed.stopped:
             finish_reason = "stop"
-            await _finish_on_stop(token_stream)
+            await _finish_on_stop(token_stream, metrics, arrival)
             break
     else:
         tail = detok.finalize()
@@ -560,15 +578,29 @@ def _stop_sequences(stop: str | list[str] | None) -> list[str]:
     return sequences
 
 
-async def _finish_on_stop(token_stream: AsyncIterator[TokenStreamItem]) -> None:
-    """Halt generation on a stop hit: close the stream so the engine aborts the request.
+async def _finish_on_stop(
+    token_stream: AsyncIterator[TokenStreamItem],
+    metrics: ServerMetrics | None = None,
+    arrival: float | None = None,
+) -> None:
+    """Halt generation on a stop hit, then record it as a completed request.
 
     Closing the async generator fires its ``finally``, which flags the stream aborted; the
     background loop sees it at the next step boundary and calls ``engine.abort`` — freeing the
     request's KV so no compute is spent past the stop. This reuses the exact disconnect path, so
     a stop hit and a client disconnect halt the engine identically.
+
+    Because the consumer breaks out here, the async engine never sees this request reach a
+    ``finish_reason``, so its completion is counted *here* rather than in the stream wrapper —
+    otherwise a stop-truncated request would be served but vanish from the completed/latency
+    metrics, under-reporting successful traffic. (A genuine disconnect passes no ``metrics`` and
+    is therefore not counted as completed, which is correct: it never finished.)
     """
     await token_stream.aclose()
+    if metrics is not None:
+        metrics.requests_completed_total.inc(finish_reason="stop")
+        if arrival is not None:
+            metrics.request_latency_seconds.observe(time.perf_counter() - arrival)
 
 
 def _sampling_params(request: SamplingRequestBody | ResponsesRequest) -> SamplingParams:
