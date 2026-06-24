@@ -23,11 +23,15 @@ from dataclasses import dataclass, field
 
 import torch
 
-from llm_infer.kv_cache.block_allocator import BlockPoolEvent
+from llm_infer.kv_cache.block_allocator import BlockPoolEvent, OutOfBlocksError
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.qwen import QwenModel
 from llm_infer.profiling import TimingProfiler
-from llm_infer.scheduler.scheduler import Scheduler, max_blocks_for
+from llm_infer.scheduler.scheduler import (
+    Scheduler,
+    blocks_for_footprint,
+    max_blocks_for,
+)
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import Sampler
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
@@ -58,6 +62,7 @@ class InferenceEngine:
         profiler: TimingProfiler | None = None,
         prefill_chunk_size: int | None = None,
         speculative: SpeculativeDecodingConfig | None = None,
+        preemption: bool = False,
         trace: TraceRecorder | None = None,
         trace_clock: Callable[[], float] | None = None,
     ) -> None:
@@ -73,7 +78,8 @@ class InferenceEngine:
             dtype=model.dtype,
             device=device,
         )
-        self.scheduler = Scheduler(num_blocks, block_size)
+        self.preemption = preemption
+        self.scheduler = Scheduler(num_blocks, block_size, preemption=preemption)
         # Default to greedy (temperature 0) — token-for-token the proven oracle path. The
         # rollout passes Sampler(temperature=1.0, top_p=1.0, seed=...) for sampled decoding.
         self.sampler = sampler or Sampler()
@@ -119,7 +125,8 @@ class InferenceEngine:
         self._trace_step = self._step_index
         self._step_index += 1
         try:
-            for request in self.scheduler.admit():
+            admit_kwargs = {"free_blocks": self.cache.allocator.num_free} if self.preemption else {}
+            for request in self.scheduler.admit(**admit_kwargs):
                 result.admitted.append(request.request_id)
                 self._emit_trace(
                     "request_admitted",
@@ -127,18 +134,23 @@ class InferenceEngine:
                     prompt_tokens=len(request.prompt_ids),
                     max_new_tokens=request.max_new_tokens,
                     prefix_group_id=request.prefix_group_id,
-                    reserved_blocks=max_blocks_for(request, self.scheduler.block_size),
+                    reserved_blocks=self._reserved_blocks(request),
                 )
             self._trace_batch_size_changed()
 
             to_decode: list[Request] = []
             to_prefill: list[Request] = []
+            to_resume: list[Request] = []
             for request in self.scheduler.running:
                 if request.prefilled:
                     to_decode.append(request)
-                    continue
-                to_prefill.append(request)
+                elif request.generated:
+                    # Preempted earlier: rebuild its KV by recompute before it decodes again.
+                    to_resume.append(request)
+                else:
+                    to_prefill.append(request)
 
+            self._resume_requests(to_resume, result)
             self._prefill_requests(to_prefill, result)
 
             if to_decode:
@@ -155,11 +167,164 @@ class InferenceEngine:
         finally:
             self._trace_step = None
 
+    # --- preemption (recompute) ---------------------------------------------------------
+    #
+    # Trigger points: the two places a running request needs the allocator to hand out a
+    # *new* physical block. Decode appends one token per step (a new block only when the
+    # current one fills); a prefill chunk caches up to ``chunk_size`` new positions. Before
+    # either forward we ensure the free pool can cover that growth, preempting victims until
+    # it can. Reserving here — at the engine boundary, before the model touches the cache —
+    # keeps recovery clean: no forward runs half-done, so a preempted-then-resumed request
+    # rebuilds from a pristine state and stays token-exact.
+
+    def _blocks_to_grow(self, request: Request, new_tokens: int) -> int:
+        """How many *new* physical blocks ``request`` must pull to cache ``new_tokens`` more."""
+        table = request.block_table
+        current = table.num_blocks if table is not None else 0
+        length = table.length if table is not None else 0
+        needed = -(-(length + new_tokens) // self.scheduler.block_size)  # ceil division
+        return max(0, needed - current)
+
+    def _ensure_pool_room(self, request: Request, new_tokens: int) -> None:
+        """Free enough blocks for ``request`` to grow by ``new_tokens``, preempting LIFO victims.
+
+        Forward-progress invariant: a request fits in the empty pool alone (admission rejects
+        any that does not), so once every *other* running request is preempted ``request`` can
+        always grow — the loop cannot spin forever. ``request`` is the block-needer and is passed
+        as ``exclude`` so it never evicts itself; we stop once the free pool covers the growth.
+        """
+        need = self._blocks_to_grow(request, new_tokens)
+        while self.cache.allocator.num_free < need:
+            victim = self.scheduler.preemption_victim(exclude=request)
+            if victim is None:
+                raise OutOfBlocksError(
+                    f"request {request.request_id!r} needs {need} block(s) to grow but the "
+                    f"pool has {self.cache.allocator.num_free} free and no other request to "
+                    "preempt — the forward-progress invariant was violated"
+                )
+            self._preempt(victim)
+
+    def _preempt(self, victim: Request) -> None:
+        """Evict ``victim`` by recompute: free its KV honestly, keep its tokens, requeue it."""
+        freed_blocks = victim.block_table.num_blocks if victim.block_table is not None else 0
+        if victim.block_table is not None:
+            victim.block_table.free()  # fires honest block_freed at the allocator boundary
+        victim.reset_for_recompute()
+        self.scheduler.requeue(victim)
+        self._emit_trace(
+            "request_preempted",
+            request_id=victim.request_id,
+            preempt_reason="kv_pressure",
+            block_count=freed_blocks,
+            generated_tokens=len(victim.generated),
+            pool_used=self.cache.allocator.num_used,
+            pool_free=self.cache.allocator.num_free,
+        )
+
+    def _resume_requests(self, requests: list[Request], result: StepResult) -> None:
+        """Rebuild each preempted request's KV by recompute before it decodes again.
+
+        Recompute, not swap: the request kept its generated tokens through preemption, so a
+        fresh prefill over ``recompute_prompt_ids`` reconstructs exactly the KV state it was
+        evicted in. No token is sampled — the request already owns its generated ids — so on the
+        next step it decodes its next token, identical to the uninterrupted run.
+        """
+        running = {id(request) for request in self.scheduler.running}
+        for request in requests:
+            # A queued resume can be preempted again while making room for an earlier one;
+            # skip it here and let the next step pick it up once it is re-admitted.
+            if id(request) not in running:
+                continue
+            self._recompute_prefill(request)
+            self._emit_trace(
+                "request_resumed",
+                request_id=request.request_id,
+                prompt_tokens=len(request.prompt_ids),
+                generated_tokens=len(request.generated),
+                cached_tokens=request.prompt_cached_tokens,
+                pool_used=self.cache.allocator.num_used,
+                pool_free=self.cache.allocator.num_free,
+            )
+
+    def _recompute_prefill(self, request: Request) -> None:
+        """Re-prefill the request's pre-feed sequence into a fresh table, sampling nothing.
+
+        The sequence is ``prompt + generated[:-1]`` (see ``Request.recompute_prompt_ids``): the
+        last generated token is *not* written here, it is re-fed by the resuming decode at its
+        original position. Walks the sequence in the same bounded chunks as a normal prefill (so
+        a long resume shares the loop and can itself be re-preempted between chunks), rebuilding
+        KV at the original absolute positions. The final logits are discarded — the request's
+        generated tokens already determine what it decodes next.
+        """
+        sequence = request.recompute_prompt_ids
+        if request.block_table is None:
+            request.block_table = self.cache.new_request()
+            request.block_table.owner = request.request_id
+
+        total = len(sequence)
+        chunk_size = self.prefill_chunk_size or total
+        while request.prompt_cached_tokens < total:
+            start = request.prompt_cached_tokens
+            step = min(chunk_size, total - start)
+            self._ensure_pool_room(request, step)
+            self._emit_trace(
+                "prefill_chunk_started",
+                request_id=request.request_id,
+                start_pos=start,
+                end_pos=start + step,
+                total_prompt_tokens=total,
+            )
+            with self._record_time("prefill"):
+                self._write_recompute_chunk(request, sequence, start, step)
+            request.prompt_cached_tokens = start + step
+            self._emit_trace(
+                "prefill_chunk_progress",
+                request_id=request.request_id,
+                start_pos=start,
+                end_pos=start + step,
+                cached_tokens=request.prompt_cached_tokens,
+                total_prompt_tokens=total,
+                completed=request.prompt_cached_tokens == total,
+            )
+        request.prefilled = True
+
+    def _write_recompute_chunk(
+        self, request: Request, sequence: list[int], start: int, count: int
+    ) -> None:
+        """Write KV for ``sequence[start:start+count]`` via the model's cached prefill path."""
+        if start == 0 and count == len(sequence):
+            self.model.prefill(sequence, self.cache, request.block_table)
+            return
+        prefill_chunk = getattr(self.model, "prefill_chunk", None)
+        if prefill_chunk is None:
+            raise TypeError(
+                f"{type(self.model).__name__} must implement prefill_chunk() "
+                "to resume a preempted request in chunks"
+            )
+        prefill_chunk(
+            sequence,
+            self.cache,
+            request.block_table,
+            start_pos=start,
+            chunk_size=count,
+        )
+
+    def _reserved_blocks(self, request: Request) -> int:
+        """Blocks the admit event reports reserved — footprint under preemption, else worst case."""
+        if self.preemption:
+            return blocks_for_footprint(request, self.scheduler.block_size)
+        return max_blocks_for(request, self.scheduler.block_size)
+
     def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
         """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
         handled: set[str] = set()
+        running = {id(request) for request in self.scheduler.running}
         for request in requests:
             if request.request_id in handled:
+                continue
+            # A request can be preempted out of the running set while we make pool room for an
+            # earlier one this step; skip it, it will re-prefill once re-admitted.
+            if self.preemption and id(request) not in running:
                 continue
             if request.prefix_group_id is None:
                 self._prefill_one(request, result)
@@ -224,6 +389,10 @@ class InferenceEngine:
 
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
+        if self.preemption:
+            requests = self._make_decode_room(requests)
+            if not requests:
+                return
         if self.speculative is None:
             self._decode_normal(requests, result)
             return
@@ -260,6 +429,32 @@ class InferenceEngine:
             [token for token in tokens.reshape(-1)],
             token_source="decode",
         )
+
+    def _make_decode_room(self, requests: list[Request]) -> list[Request]:
+        """Ensure the whole decode batch can grow by one token; preempt LIFO victims if not.
+
+        ``decode_many`` allocates for every surviving member in one call, so room must cover the
+        batch's *total* growth, not one request at a time. Each decode step appends exactly one
+        token (at most one new block per request). A victim is the most-recently-admitted running
+        request and may itself be in this batch — preempting it drops it from the step and lowers
+        the demand. We preempt until the free pool covers the survivors' combined growth.
+
+        Forward progress holds: the block-needers are the batch members, and preempting strictly
+        shrinks the batch, so the demand reaches zero before victims run out.
+        """
+        survivors = [r for r in requests if r.prefilled and r.block_table is not None]
+        while True:
+            survivors = [r for r in survivors if r.prefilled and r.block_table is not None]
+            demand = sum(self._blocks_to_grow(r, 1) for r in survivors)
+            if demand <= self.cache.allocator.num_free:
+                return survivors
+            victim = self.scheduler.preemption_victim(exclude=None)
+            if victim is None:
+                raise OutOfBlocksError(
+                    "decode batch needs more blocks than the pool can free — the "
+                    "forward-progress invariant was violated"
+                )
+            self._preempt(victim)
 
     def _draft_for(self, request: Request) -> list[int]:
         """Return a draft only when there is room for draft tokens plus verifier recovery."""
@@ -350,6 +545,10 @@ class InferenceEngine:
         chunk_size = self.prefill_chunk_size or len(request.prompt_ids)
         chunk_size = min(chunk_size, remaining)
         end_pos = start_pos + chunk_size
+        if self.preemption:
+            # A fresh prompt's prefill can also exhaust the pool — preempt LIFO victims so the
+            # chunk's blocks are available before the model touches the cache.
+            self._ensure_pool_room(request, new_tokens=chunk_size)
         result.prefill_chunks[request.request_id] = (start_pos, end_pos)
         self._emit_trace(
             "prefill_chunk_started",

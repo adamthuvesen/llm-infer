@@ -68,6 +68,32 @@ class Request:
         """How many more tokens may be emitted before the max-new-token cap."""
         return self.max_new_tokens - len(self._generated_tokens)
 
+    @property
+    def recompute_prompt_ids(self) -> list[int]:
+        """The sequence a resume re-prefills: prompt plus every generated token but the last.
+
+        At preemption the request's KV covered ``prompt + generated`` and its *next* decode was
+        about to feed ``generated[-1]`` to produce the following token. Recompute must rebuild
+        exactly that pre-feed state — KV for ``prompt + generated[:-1]`` — so the resuming decode
+        re-feeds ``generated[-1]`` at its original position and continues identically. Writing the
+        last generated token into the cache here instead would double it and shift every later
+        position, breaking token-exactness.
+        """
+        return self.prompt_ids + self.generated[:-1]
+
+    def reset_for_recompute(self) -> None:
+        """Drop cached-KV state for preemption, keeping generated tokens for later recompute.
+
+        Frees nothing itself (the engine frees the block table at the allocator boundary so
+        the trace stays honest); it only clears the request's view of its cache so a fresh
+        prefill over :attr:`recompute_prompt_ids` rebuilds it from scratch on resume.
+        """
+        if self.finished:
+            raise ValueError(f"cannot preempt finished request {self.request_id!r}")
+        self.block_table = None
+        self.prompt_cached_tokens = 0
+        self.prefilled = False
+
     def record(self, token_id: int | torch.Tensor, *, is_eos: bool | None = None) -> None:
         """Append a sampled token and apply the stop rule (EOS or length cap)."""
         if self.finished:
