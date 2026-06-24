@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { appendEventRowContent } from "./event_row.js";
+import { buildTheaterLayout, validateTheaterLayout } from "./theater_layout.js";
 import { buildTraceModel, parseJsonlTrace } from "./trace_loader.js";
 
 test("loads the committed schema-v2 fixture into a renderable model", async () => {
@@ -27,6 +28,15 @@ test("loads the committed schema-v2 fixture into a renderable model", async () =
   assert.ok(model.batchSignals.length > 0);
   assert.ok(model.throughputSignals.length > 0);
   assert.ok(model.pressureSamples.some((sample) => sample.reservedBlocks > 0));
+});
+
+test("theater layout keeps headline, cursor marker, ticks, and lanes separated", () => {
+  const layout = buildTheaterLayout(4);
+
+  assert.equal(validateTheaterLayout(layout), true);
+  assert.ok(layout.header.subheadY < layout.cursorCy - 8);
+  assert.ok(layout.cursorLabelY < layout.laneTop);
+  assert.ok(layout.tickY < layout.laneTop);
 });
 
 test("keeps speculative-style multi-token decode bursts on one request lane", () => {

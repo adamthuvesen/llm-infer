@@ -1,4 +1,5 @@
 import { appendEventRowContent } from "./event_row.js";
+import { buildTheaterLayout } from "./theater_layout.js";
 import { buildTraceModel, eventLabel, parseJsonlTrace } from "./trace_loader.js";
 
 const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v2.jsonl";
@@ -138,41 +139,40 @@ function render() {
 }
 
 function renderTheater() {
-  const width = 1180;
-  const height = 650;
-  const left = 180;
-  const timelineRight = 850;
-  const laneTop = 112;
-  const laneHeight = 78;
-  const signalTop = 486;
+  const layout = buildTheaterLayout(state.model.requestList.length);
   const current = currentEvent();
   const pressure = currentPressure();
-  const cursorX = xForStep(current.step, left, timelineRight);
-  resetSvg(els.theaterSvg, width, height);
+  const cursorX = xForStep(current.step, layout.left, layout.timelineRight);
+  resetSvg(els.theaterSvg, layout.width, layout.height);
   defs(els.theaterSvg);
 
-  rect(els.theaterSvg, 18, 20, width - 36, height - 40, "stage-backdrop");
-  text(els.theaterSvg, 34, 54, "KV CACHE THEATER", "svg-kicker");
-  text(els.theaterSvg, 34, 82, eventHeadline(current), "svg-headline");
-  text(els.theaterSvg, 34, 106, eventEffect(current), "svg-subhead");
+  rect(els.theaterSvg, 18, 20, layout.width - 36, layout.height - 40, "stage-backdrop");
+  text(els.theaterSvg, 34, layout.header.kickerY, "KV CACHE THEATER", "svg-kicker");
+  text(els.theaterSvg, 34, layout.header.headlineY, eventHeadline(current), "svg-headline");
+  text(els.theaterSvg, 34, layout.header.subheadY, eventEffect(current), "svg-subhead");
   schedulerLoop(els.theaterSvg, 925, 66, current);
   memoryWall(els.theaterSvg, 910, 150, pressure);
 
   for (let step = 0; step <= state.model.maxStep; step += 1) {
-    const x = xForStep(step, left, timelineRight);
-    line(els.theaterSvg, x, laneTop - 34, x, signalTop + 122, "stage-grid");
-    text(els.theaterSvg, x, laneTop - 45, String(step), "tick-label", "middle");
+    const x = xForStep(step, layout.left, layout.timelineRight);
+    line(els.theaterSvg, x, layout.cursorLineTop, x, layout.signalTop + 122, "stage-grid");
+    text(els.theaterSvg, x, layout.tickY, String(step), "tick-label", "middle");
   }
 
-  line(els.theaterSvg, cursorX, laneTop - 54, cursorX, signalTop + 128, "cursor-line");
-  circle(els.theaterSvg, cursorX, laneTop - 24, 8, "cursor-pulse");
-  text(els.theaterSvg, cursorX + 14, laneTop - 18, "now", "cursor-label");
+  line(els.theaterSvg, cursorX, layout.cursorLineTop, cursorX, layout.signalTop + 128, "cursor-line");
+  circle(els.theaterSvg, cursorX, layout.cursorCy, 8, "cursor-pulse");
+  text(els.theaterSvg, cursorX + 14, layout.cursorLabelY, "now", "cursor-label");
 
   state.model.requestList.forEach((request, index) => {
-    renderRequestLane(request, index, { left, right: timelineRight, top: laneTop, laneHeight });
+    renderRequestLane(request, index, {
+      left: layout.left,
+      right: layout.timelineRight,
+      top: layout.laneTop,
+      laneHeight: layout.laneHeight,
+    });
   });
-  renderSignalRibbons({ left, right: timelineRight, top: signalTop });
-  renderEventComets(current, { left, right: timelineRight, top: 438 });
+  renderSignalRibbons({ left: layout.left, right: layout.timelineRight, top: layout.signalTop });
+  renderEventComets(current, { left: layout.left, right: layout.timelineRight, top: layout.signalTop - 48 });
 }
 
 function schedulerLoop(svg, cx, cy, event) {
