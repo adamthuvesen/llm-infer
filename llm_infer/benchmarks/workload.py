@@ -113,7 +113,7 @@ def build_workload(
         for i in range(num_requests)
     )
     source = (
-        f"{fixture_path.name}: {len(cases)} rlvr-sql cot prompts cycled to "
+        f"{fixture_path.name}: {len(cases)} llm-rlvr-sql cot prompts cycled to "
         f"{num_requests} requests (prefix caching off → replication is fair)"
     )
     return Workload(
@@ -135,7 +135,7 @@ def build_rollout_workload(
     num_generations: int | None = None,
     max_completion_length: int | None = None,
 ) -> Workload:
-    """Replay one frozen rlvr-sql GRPO rollout batch from the committed fixture.
+    """Replay one frozen llm-rlvr-sql GRPO rollout batch from the committed fixture.
 
     Expands the ``num_prompts`` frozen prompts into ``num_prompts × num_generations``
     completions (one ``BenchRequest`` each, ``p{i}-g{j}``) — the actual GRPO rollout shape.
@@ -173,7 +173,7 @@ def build_rollout_workload(
         seed=rollout["sampling_seed"],
     )
     source = (
-        f"{fixture_path.name}: rlvr-sql GRPO rollout (anchor {rollout['anchor']}), "
+        f"{fixture_path.name}: llm-rlvr-sql GRPO rollout (anchor {rollout['anchor']}), "
         f"{n_prompts} Spider-dev prompts × G={g} = {len(requests)} completions, "
         f"temp={sampling.temperature} top_p={sampling.top_p} seed={sampling.seed}, "
         f"base {fixture['model']['id']}@{fixture['model']['revision'][:8]} + merged grpo-s0"

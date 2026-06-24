@@ -11,11 +11,11 @@ change to `scripts/generate_goldens.py` and the oracle.
 
 A golden case is a single text-to-SQL request plus its frozen HF greedy answer:
 
-1. A **schema** (`tests/correctness/cases.py`), in the rlvr-sql `DatabaseSchema`
+1. A **schema** (`tests/correctness/cases.py`), in the llm-rlvr-sql `DatabaseSchema`
    shape — tables, columns, primary keys, foreign keys.
 2. A **question**.
-3. The **prompt token ids** — the rlvr-sql `cot` chat messages
-   (`tests/correctness/prompt.py`, a byte-exact copy of rlvr-sql's builder) rendered
+3. The **prompt token ids** — the llm-rlvr-sql `cot` chat messages
+   (`tests/correctness/prompt.py`, a byte-exact copy of llm-rlvr-sql's builder) rendered
    through the pinned Instruct tokenizer's chat template with
    `add_generation_prompt=True`.
 4. The **continuation token ids** — HF greedy decode of that prompt.
@@ -34,7 +34,7 @@ One JSON file per (model, prompt-style): `tests/correctness/goldens/<name>.json`
   "environment": { "transformers": "<ver>", "torch": "<ver>", "dtype": "float32" },
   "decoding":    { "do_sample": false, "temperature": 0, "max_new_tokens": 40,
                    "eos_token_ids": [151643, 151645], "hf_method": "full_recompute_greedy" },
-  "prompt_builder": { "source": "rlvr-sql eval/prompt.py build_messages(style='cot'), exemplars=()",
+  "prompt_builder": { "source": "llm-rlvr-sql eval/prompt.py build_messages(style='cot'), exemplars=()",
                       "replica": "tests/correctness/prompt.py", "style": "cot", "few_shot_k": 0 },
   "cases": [
     { "case_id": "...", "db_id": "...", "question": "...",
@@ -116,7 +116,7 @@ divergences** — so no bf16-style tie waiver is needed at all in Phase A.
 For each committed case, the llm-infer single-request greedy decode through the
 `torch_naive` reference backend produces token ids **identical** to HF full-recompute
 greedy on the pinned Instruct model, under the pinned dtype and decoding config, using
-the exact rlvr-sql `cot` prompt. That is the trusted reference every future backend
+the exact llm-rlvr-sql `cot` prompt. That is the trusted reference every future backend
 (paged, flash, …) must reproduce.
 
 ## The flash-attn backend and the tie-tolerance bar (Phase C)

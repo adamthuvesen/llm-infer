@@ -9,8 +9,8 @@ honest engine**: something to learn from and to read.
 The methodology is the differentiator, not a tok/s number. Every backend is proven **exact
 against HuggingFace greedy decoding before it reports a single tok/s**; every speed claim is
 measured and config-pinned; vLLM is the named ceiling, never the thing we beat. Throughput is
-benchmarked on real workloads — including one frozen rlvr-sql GRPO rollout — rather than a
-synthetic microbench. (Serving rlvr-sql rollouts is a fun applied benchmark, not the point.)
+benchmarked on real workloads — including one frozen llm-rlvr-sql GRPO rollout — rather than a
+synthetic microbench. (Serving llm-rlvr-sql rollouts is a fun applied benchmark, not the point.)
 
 ## Status — v1/v1.5 complete, v2 speed pass complete (measured ceiling)
 
@@ -20,7 +20,7 @@ synthetic microbench. (Serving rlvr-sql rollouts is a fun applied benchmark, not
 | **B** systems milestone | paged KV allocator + continuous scheduler, two-request vertical slice | ✅ |
 | **C** speed | `flash_attn_paged` behind the `AttentionBackend` adapter, gated by the oracle | ✅ |
 | **D** evidence | batch-correctness suite + three-way benchmark ([`docs/benchmark.md`](docs/benchmark.md)) | ✅ |
-| **E** differentiator | one frozen rlvr-sql rollout-timing comparison ([`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md)) | ✅ |
+| **E** differentiator | one frozen llm-rlvr-sql rollout-timing comparison ([`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md)) | ✅ |
 | **v2** speed pass | profiling, no-sync cleanup, packed KV reads/writes, read-plan reuse | ✅ 365.8 tok/s, ceiling named |
 | **prefix caching** | refcounted KV-block sharing for G=4 rollout siblings | ✅ 411.5 tok/s, 3026-token path preserved |
 | **chunked prefill** | bounded prompt chunks interleaved with active decode work | ✅ |
@@ -29,7 +29,7 @@ synthetic microbench. (Serving rlvr-sql rollouts is a fun applied benchmark, not
 | **request preemption** | recompute eviction under KV pressure (LIFO victim), resumed token-for-token | ✅ opt-in, forced-preemption oracle |
 
 The engine itself is the goal — a small, legible paged inference engine to learn from and show.
-Speed and the rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**:
+Speed and the llm-rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**:
 block-lifecycle trace hooks → request preemption/eviction (done) → serving depth (streaming + an
 OpenAI-compatible endpoint) → sampling completeness → an architecture writeup, with quantization
 as a later speed lever.
@@ -61,7 +61,7 @@ run 2026-06-21). `llm_infer` beats the naive HF floor by **2.37×** (98.3 vs 41.
 the only engine besides vLLM whose every divergence from fp32 truth is a traced numerical tie.
 vLLM (4323.6 tok/s) is the ceiling, ~44× ahead.
 
-**Phase E — the real rlvr-sql rollout** (32-completion GRPO batch from rlvr-sql's own prompt
+**Phase E — the real llm-rlvr-sql rollout** (32-completion GRPO batch from llm-rlvr-sql's own prompt
 builders, merged `grpo-s0` LoRA → bf16, A100-80GB):
 
 | system | tok/s | $/1k rollouts | vs floor |
@@ -75,7 +75,7 @@ step) is what earns the win over naive sequential HF. The ~33× gap to vLLM is t
 v1's legibility (vLLM has CUDA graphs, a custom in-place paged kernel, a mature scheduler) —
 named in [`docs/keeping-the-gpu-busy.md`](docs/keeping-the-gpu-busy.md), not hidden.
 
-**v2 speed pass — complete, with a measured ceiling** (same frozen rlvr-sql rollout,
+**v2 speed pass — complete, with a measured ceiling** (same frozen llm-rlvr-sql rollout,
 A100-80GB PCIe, run 2026-06-21, pinned `bench-results/rollout-rollout-20260621T164905.json`):
 `llm_infer` reaches **365.8 tok/s** and **$0.18 / 1k rollouts** after profiling/no-sync
 cleanup, packed KV reads, vectorized KV writes, and read-plan reuse — about **5.55×** over the
@@ -111,7 +111,7 @@ legibility**. Speed is a side-quest with its own track, last.
 **Done**
 
 1. **v1 / v1.5 — correct minimal engine + applied benchmark.** HF oracle, paged KV, continuous
-   batching, three-way benchmark, and the frozen rlvr-sql rollout proof + writeup.
+   batching, three-way benchmark, and the frozen llm-rlvr-sql rollout proof + writeup.
 2. **v2 — speed pass (complete, ceiling named).** 365.8 tok/s / 5.55× over baseline; cheap
    KV-materialization wins harvested, ceiling measured. The decode-graph / static-bucket idea
    was built and **rejected** (a measured dead-end — slower, and it shifted the sampled token
