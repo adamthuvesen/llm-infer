@@ -7,10 +7,14 @@ const KNOWN_EVENTS = new Set([
   "decode_step",
   "block_allocated",
   "block_freed",
+  "request_preempted",
+  "request_resumed",
   "request_finished",
   "batch_size_changed",
   "tokens_per_second_sampled",
 ]);
+
+const KNOWN_PREEMPT_REASONS = new Set(["kv_pressure"]);
 
 const KNOWN_TOKEN_SOURCES = new Set(["prefill", "decode", "speculative"]);
 
@@ -75,6 +79,8 @@ export function buildTraceModel(events) {
         chunks: [],
         decodes: [],
         blockEvents: [],
+        preempts: [],
+        resumes: [],
         finish: null,
       });
     }
@@ -182,6 +188,36 @@ export function buildTraceModel(events) {
       // Prefer the allocator's own post-change totals; fall back to the running sum.
       poolUsed = event.pool_used ?? Math.max(0, poolUsed + signed);
       poolFree = event.pool_free ?? poolFree;
+    }
+
+    if (event.event === "request_preempted") {
+      const request = ensureRequest(event.request_id);
+      request.preempts.push({
+        sequence: event.sequence,
+        step: event.step,
+        reason: event.preempt_reason ?? "kv_pressure",
+        freedBlocks: event.block_count ?? 0,
+        generatedTokens: event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0,
+        poolUsed: event.pool_used ?? null,
+        poolFree: event.pool_free ?? null,
+      });
+      // Evicted: its KV is dropped (the matching block_freed already returned the blocks to the
+      // pool), so it no longer occupies the wall, but it keeps its generated tokens for recompute.
+      cachedTokens.set(event.request_id, 0);
+      active.delete(event.request_id);
+    }
+
+    if (event.event === "request_resumed") {
+      const request = ensureRequest(event.request_id);
+      request.resumes.push({
+        sequence: event.sequence,
+        step: event.step,
+        cachedTokens: event.cached_tokens ?? 0,
+        generatedTokens: event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0,
+      });
+      // Re-admitted and rebuilding by recompute — back on the wall as its prefill replays.
+      cachedTokens.set(event.request_id, event.cached_tokens ?? 0);
+      active.add(event.request_id);
     }
 
     if (event.event === "request_finished") {
@@ -295,6 +331,9 @@ function validateEvent(event, lineNumber) {
   }
   if (event.token_source !== undefined && !KNOWN_TOKEN_SOURCES.has(event.token_source)) {
     throw new Error(`Line ${lineNumber} has unknown token_source ${JSON.stringify(event.token_source)}.`);
+  }
+  if (event.preempt_reason !== undefined && !KNOWN_PREEMPT_REASONS.has(event.preempt_reason)) {
+    throw new Error(`Line ${lineNumber} has unknown preempt_reason ${JSON.stringify(event.preempt_reason)}.`);
   }
   if (event.event === "block_allocated" || event.event === "block_freed") {
     validateBlockEvent(event, lineNumber);

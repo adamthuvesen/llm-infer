@@ -218,10 +218,16 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Request preemption / eviction** — when the KV budget is exhausted, preempt a running request
-  (recompute or swap to host) and resume it later, instead of only admitting when it fits. The
-  canonical scheduling technique the engine still lacks; it also shows vividly in the visualizer
-  once the lifecycle hooks exist.
+- **Request preemption / eviction** *(done)* — opt-in (`InferenceEngine(preemption=True)`).
+  Admission over-commits the pool on each request's current footprint instead of reserving its
+  worst case; when a running request then needs a block the pool cannot give, the engine evicts
+  the most-recently-admitted request (LIFO — it has decoded the fewest tokens, so recompute waste
+  is minimal), frees its KV honestly, keeps its generated tokens, and resumes it later by
+  recomputing prompt-plus-generated. Forward progress is guaranteed because admission already
+  rejects any request that cannot fit the empty pool alone. A forced-preemption oracle pins
+  token-for-token identity with the uninterrupted run; the visualizer renders the eviction and
+  recompute resume, and the bundled fixture shows one. Default behavior (preemption off) is the
+  unchanged strict-reservation scheduler.
 - **Serving depth** — streaming token output, an OpenAI-compatible endpoint, metrics, and a load
   generator, so the engine is drivable as a real server rather than only through the frozen
   harness. The release-defining piece — it turns the engine from a harness into something you

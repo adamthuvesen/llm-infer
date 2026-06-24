@@ -63,6 +63,43 @@ test("models block lifecycle honestly: no free-before-alloc, pool stays valid", 
   assert.equal(live.size, 0, "every block returned to the pool");
 });
 
+test("models preemption and resume on the affected request's lane", async () => {
+  const text = await readFile(new URL("../docs/assets/kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const events = parseJsonlTrace(text);
+  const model = buildTraceModel(events);
+
+  const preemptEvents = events.filter((event) => event.event === "request_preempted");
+  const resumeEvents = events.filter((event) => event.event === "request_resumed");
+  assert.ok(preemptEvents.length > 0, "fixture must contain a preemption");
+  assert.ok(resumeEvents.length > 0, "fixture must contain a resume");
+
+  // The preempted request's lane carries the eviction and the later resume.
+  const preemptedId = preemptEvents[0].request_id;
+  const lane = model.requestList.find((request) => request.requestId === preemptedId);
+  assert.ok(lane.preempts.length > 0, "preempted lane must record the eviction");
+  assert.ok(lane.resumes.length > 0, "preempted lane must record the resume");
+  assert.equal(lane.preempts[0].reason, "kv_pressure");
+  assert.ok(lane.preempts[0].freedBlocks >= 1);
+
+  // It still finishes with all its tokens — preemption never drops output.
+  assert.deepEqual(
+    lane.decodes.flatMap((decode) => decode.tokenIds),
+    lane.finish.tokenIds,
+  );
+});
+
+test("validates the request_preempted reason", () => {
+  const bad = JSON.stringify({
+    event: "request_preempted",
+    schema_version: 3,
+    sequence: 1,
+    step: 0,
+    request_id: "x",
+    preempt_reason: "swapped-to-disk",
+  });
+  assert.throws(() => parseJsonlTrace(bad), /unknown preempt_reason/);
+});
+
 test("theater layout keeps headline, cursor marker, ticks, and lanes separated", () => {
   const layout = buildTheaterLayout(4);
 

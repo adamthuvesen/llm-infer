@@ -26,10 +26,11 @@ synthetic microbench. (Serving rlvr-sql rollouts is a fun applied benchmark, not
 | **chunked prefill** | bounded prompt chunks interleaved with active decode work | ✅ |
 | **speculative decoding v1** | prompt-lookup n-gram draft + greedy verifier, no second model | ✅ technique/correctness evidence, no speed claim |
 | **KV trace visualizer** | static local KV-cache-theater viewer fed by real schema-v3 engine traces, incl. block lifecycle | ✅ |
+| **request preemption** | recompute eviction under KV pressure (LIFO victim), resumed token-for-token | ✅ opt-in, forced-preemption oracle |
 
 The engine itself is the goal — a small, legible paged inference engine to learn from and show.
 Speed and the rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**:
-block-lifecycle trace hooks → request preemption/eviction → serving depth (streaming + an
+block-lifecycle trace hooks → request preemption/eviction (done) → serving depth (streaming + an
 OpenAI-compatible endpoint) → sampling completeness → an architecture writeup, with quantization
 as a later speed lever.
 The decode-graph / static-bucket idea was built and rejected (a measured dead-end — see
@@ -135,12 +136,15 @@ legibility**. Speed is a side-quest with its own track, last.
 7. **Block-lifecycle trace hooks.** `block_allocated` / `block_freed` are emitted from an
    observer on `BlockAllocator` — the physical free-pool boundary — so they stay honest for
    refcounted prefix sharing and copy-on-write. The prerequisite for the preemption demo below.
+8. **Request preemption / eviction.** Opt-in (`InferenceEngine(preemption=True)`): admission
+   over-commits the pool on current footprint, and when a running request needs a block the pool
+   cannot give, the engine evicts the most-recently-admitted request (LIFO) — freeing its KV,
+   keeping its tokens — then resumes it by recomputing prompt-plus-generated. A forced-preemption
+   oracle pins that the resumed request is token-for-token identical to the uninterrupted run; the
+   visualizer renders the eviction + recompute resume, and the bundled demo shows one.
 
 **Primary forward track — finish the engine's technique set (dependency order)**
 
-8. **Request preemption / eviction.** When the KV budget is exhausted, preempt a running request
-   (recompute or swap to host) and resume it later, instead of only admitting when it fits. The
-   canonical scheduling technique the engine still lacks — and it shows vividly in the visualizer.
 9. **Serving depth.** Streaming token output → an OpenAI-compatible endpoint → metrics → a load
    generator, so the engine is drivable as a real server, not only through the frozen harness.
    The release-defining piece — it turns the engine from a harness into something you can `curl`.
