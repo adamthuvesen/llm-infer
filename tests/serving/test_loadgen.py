@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import pytest
 
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
@@ -70,6 +71,22 @@ def test_loadgen_streaming_reports_nonzero_throughput() -> None:
     assert "throughput" in table
     assert "delta/s" in table
     assert "tok/s" not in table
+
+
+def test_loadgen_rejects_nonpositive_concurrency() -> None:
+    """concurrency < 1 would build a zero-permit semaphore that hangs every task — reject it."""
+    with pytest.raises(ValueError, match="concurrency"):
+        asyncio.run(
+            run_load(
+                None,  # rejected before the client is touched
+                model="m",
+                prompt="p",
+                max_tokens=4,
+                concurrency=0,
+                num_requests=4,
+                stream=True,
+            )
+        )
 
 
 def test_loadgen_blocking_reports_nonzero_throughput() -> None:

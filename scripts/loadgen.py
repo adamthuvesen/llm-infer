@@ -130,6 +130,11 @@ async def run_load(
     streams, which is what makes continuous batching visible. The returned wall-clock is the span
     from the first request launched to the last one finished — the basis for total throughput.
     """
+    if concurrency < 1:
+        # A zero-permit semaphore would block every task forever; reject it loudly.
+        raise ValueError(f"concurrency must be >= 1; got {concurrency}")
+    if num_requests < 1:
+        raise ValueError(f"num_requests must be >= 1; got {num_requests}")
     payload = _chat_payload(model, prompt, max_tokens, stream)
     run_one = _run_streaming if stream else _run_blocking
     semaphore = asyncio.Semaphore(concurrency)
@@ -245,6 +250,9 @@ def main() -> None:
         "--no-stream", action="store_true", help="use a single blocking call per request"
     )
     args = parser.parse_args()
+    for name in ("concurrency", "num_requests", "max_tokens"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be >= 1; got {getattr(args, name)}")
     raise SystemExit(asyncio.run(_main(args)))
 
 
