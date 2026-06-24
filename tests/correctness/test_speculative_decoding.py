@@ -250,6 +250,39 @@ def test_rejected_draft_falls_back_to_normal_next_token() -> None:
     assert model.decode_tokens_calls == 1
 
 
+def test_speculative_rejection_frees_rejected_draft_blocks() -> None:
+    """A partly-rejected draft's reserved blocks return to the pool, not retained until finish.
+
+    Verification reserves blocks for ``last_token + draft``; only the accepted prefix plus one
+    recovery token are kept and ``length`` rolls back. The rejected tail's freshly-allocated
+    blocks must be freed (trimmed), or the cache leaks pages across speculative steps. We step a
+    rejection-prone run and assert the table never holds more blocks than its length needs.
+    """
+    prompt = [1, 2, 3, 1, 2]
+    script = [3, 8, 9, 8, 9, 8, 9]  # the [1,2,3]-lookup draft mismatches 8/9 → repeated rejection
+    block_size = 2  # small blocks so a rejected draft's reserve crosses a boundary (a real leak)
+    model = ScriptedToyModel({tuple(prompt): script})
+    engine = InferenceEngine(
+        model,
+        block_size=block_size,
+        num_blocks=32,
+        speculative=SpeculativeDecodingConfig(max_draft_tokens=2, max_ngram_size=3),
+    )
+    req = Request("r", prompt, len(script), frozenset({63}))
+    engine.add_request(req)
+
+    while engine.scheduler.has_work():
+        engine.step()
+        if req.block_table is not None and not req.finished:
+            expected = -(-req.block_table.length // block_size)  # ceil(length / block_size)
+            assert len(req.block_table.blocks) == expected, (
+                f"retained {len(req.block_table.blocks) - expected} rejected draft block(s)"
+            )
+
+    assert model.decode_tokens_calls >= 1  # speculation actually ran
+    assert req.generated == script  # and stayed token-exact
+
+
 def test_no_draft_uses_normal_decode_path() -> None:
     prompt = [10, 11, 12]
     script = [13, 14, 15]

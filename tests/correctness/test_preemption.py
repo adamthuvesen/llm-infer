@@ -246,7 +246,9 @@ def test_finishers_under_pressure_do_not_crash_and_stay_exact() -> None:
 
     assert any(e.event == "request_preempted" for e in recorder.events), "scenario must preempt"
     tight = {request.request_id: request.generated for request in tracked}
-    roomy = _run(model, requests, num_blocks=32, preemption=False, block_size=2, prefill_chunk_size=1)
+    roomy = _run(
+        model, requests, num_blocks=32, preemption=False, block_size=2, prefill_chunk_size=1
+    )
     for _, _, request_id in requests:
         assert tight[request_id] == roomy[request_id], f"{request_id}: output diverged"
 

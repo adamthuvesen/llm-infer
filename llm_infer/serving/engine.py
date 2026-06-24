@@ -516,14 +516,30 @@ class InferenceEngine:
             )
         return tokens
 
+    def _decode_budget(self, request: Request) -> int:
+        """Worst-case tokens this request may append in one decode step — for room reservation.
+
+        A speculative-eligible (greedy) request verifies ``last_token`` plus up to
+        ``max_draft_tokens`` in one forward and reserves blocks for all of them, so room must
+        cover the whole draft or the verify can OOM mid-step; the bound mirrors ``_draft_for``
+        (capped by the request's remaining tokens). Every other request appends exactly one token.
+        """
+        if self.speculative is not None and self._params_for(request).is_greedy:
+            max_draft = min(
+                self.speculative.config.max_draft_tokens, max(0, request.remaining_tokens - 1)
+            )
+            return 1 + max_draft
+        return 1
+
     def _make_decode_room(self, requests: list[Request]) -> list[Request]:
-        """Ensure the whole decode batch can grow by one token; preempt LIFO victims if not.
+        """Ensure the whole decode batch can grow by its per-request budget; preempt LIFO if not.
 
         ``decode_many`` allocates for every surviving member in one call, so room must cover the
-        batch's *total* growth, not one request at a time. Each decode step appends exactly one
-        token (at most one new block per request). A victim is the most-recently-admitted running
-        request and may itself be in this batch — preempting it drops it from the step and lowers
-        the demand. We preempt until the free pool covers the survivors' combined growth.
+        batch's *total* growth, not one request at a time. A normal request appends one token (at
+        most one new block); a speculative one may append its whole draft, so each is reserved for
+        ``_decode_budget`` tokens. A victim is the most-recently-admitted running request and may
+        itself be in this batch — preempting it drops it from the step and lowers the demand. We
+        preempt until the free pool covers the survivors' combined growth.
 
         Forward progress holds: the block-needers are the batch members, and preempting strictly
         shrinks the batch, so the demand reaches zero before victims run out.
@@ -531,7 +547,7 @@ class InferenceEngine:
         survivors = [r for r in requests if r.prefilled and r.block_table is not None]
         while True:
             survivors = [r for r in survivors if r.prefilled and r.block_table is not None]
-            demand = sum(self._blocks_to_grow(r, 1) for r in survivors)
+            demand = sum(self._blocks_to_grow(r, self._decode_budget(r)) for r in survivors)
             if demand <= self.cache.allocator.num_free:
                 return survivors
             victim = self.scheduler.preemption_victim(exclude=None)
@@ -603,6 +619,11 @@ class InferenceEngine:
                 break
             self._record(request, token, self._is_eos(token, request), result)
         self._trace_decode_step([request], emitted, token_source="speculative")
+        # Verification reserved blocks for the whole draft; a partly-rejected draft rolled the
+        # length back, so return the now-unused trailing blocks to the pool (a finisher's table is
+        # freed wholesale by _release_finished_in, so only trim a still-running request).
+        if not request.finished:
+            request.block_table.trim_to_length()
         self._release_finished_in([request])
 
     def _accepted_prefix_length(

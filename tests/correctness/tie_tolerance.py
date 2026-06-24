@@ -130,7 +130,8 @@ def compare_under_tie_tolerance(
                 f"step {step}: fast backend chose {fast}, whose reference logit is "
                 f"{fast_below:.6g} below the reference max (golden {golden} is {golden_below:.6g} "
                 f"below); tolerance {tolerance:g} — NOT a tie, a real divergence "
-                f"(fast_logit={fast_logit:.6g}, golden_logit={golden_logit:.6g}, top2_gap={gap:.6g})"
+                f"(fast_logit={fast_logit:.6g}, golden_logit={golden_logit:.6g}, "
+                f"top2_gap={gap:.6g})"
             ),
         )
     return TieToleranceResult(

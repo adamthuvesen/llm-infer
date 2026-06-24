@@ -73,6 +73,20 @@ class BlockTable:
         """Flat slot indices for ``count`` consecutive positions starting at ``start``."""
         return [self.physical_slot(pos) for pos in range(start, start + count)]
 
+    def trim_to_length(self) -> None:
+        """Free trailing blocks no longer needed to hold ``length`` tokens, after a rollback.
+
+        Speculative verification reserves blocks for ``last_token + draft``, but only the accepted
+        prefix plus one recovery token are kept and ``length`` rolls back. The now-unused trailing
+        blocks — freshly allocated this step, so private (refcount 1) — return to the pool here
+        instead of being retained until the request finishes.
+        """
+        needed = -(-self.length // self.block_size)  # ceil division
+        if needed < len(self.blocks):
+            extra = self.blocks[needed:]
+            self.blocks = self.blocks[:needed]
+            self.allocator.free(extra, owner=self.owner)
+
     def free(self) -> None:
         """Return all blocks to the allocator and reset to empty."""
         if self.blocks:
