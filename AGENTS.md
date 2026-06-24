@@ -1,7 +1,7 @@
 # AGENTS.md — llm-infer
 
 A minimal, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**,
-built to be benchmarked as an rlvr-sql GRPO rollout backend. Full scope and build
+built to be benchmarked as an llm-rlvr-sql GRPO rollout backend. Full scope and build
 order live in [`docs/scoping.md`](docs/scoping.md). Read it before proposing work.
 
 ## Core doctrine: the correctness oracle comes first
@@ -53,7 +53,7 @@ near-vanish. See `docs/fixture-format.md`.
 ## Scope firewall — NOT in Phase A
 
 No paged KV-cache, no scheduler/continuous batching, no flash-attn or any fast
-kernel, no batch-correctness suite, no benchmarks, no vLLM comparison, no rlvr-sql
+kernel, no batch-correctness suite, no benchmarks, no vLLM comparison, no llm-rlvr-sql
 rollout hook, no LoRA, no quantization, no server/streaming, no multi-GPU. If a
 change touches these, it belongs to a later phase.
 

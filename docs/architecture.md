@@ -7,7 +7,7 @@ and which flows actually exist in code.
 
 **What this repo does.** [`README.md`](../README.md) and [`docs/scoping.md`](scoping.md) define
 llm-infer as a minimal, honest **paged LLM inference engine** for one pinned model:
-`Qwen/Qwen2.5-Coder-3B-Instruct`. It is built to be measured as an **rlvr-sql GRPO rollout
+`Qwen/Qwen2.5-Coder-3B-Instruct`. It is built to be measured as an **llm-rlvr-sql GRPO rollout
 backend** — i.e., the GPU path that generates training rollouts for reinforcement learning on
 text-to-SQL, not a general-purpose chat server.
 
@@ -35,7 +35,7 @@ don't see evidence for a packaged CLI.
 | **Transformers (HuggingFace)** | Load weights + config only | Weights come from HF; forward is ours so the oracle tests *our* engine |
 | **flash-attn** (CUDA only) | Fast attention kernel | Phase C speed swap behind [`AttentionBackend`](../llm_infer/kernels/base.py); optional, GPU-only |
 | **pytest** | Correctness oracle gate | Local CPU gate in [`tests/correctness/`](../tests/correctness/) |
-| **Modal** | Remote A100 runs | flash-attn oracle, 3-way benchmark, rlvr-sql rollout timing ([`scripts/modal_*.py`](../scripts/)) |
+| **Modal** | Remote A100 runs | flash-attn oracle, 3-way benchmark, llm-rlvr-sql rollout timing ([`scripts/modal_*.py`](../scripts/)) |
 | **uv** | Dependency management | [`pyproject.toml`](../pyproject.toml), Python 3.11+ |
 
 **Design doctrine (the thing that shapes everything).** Correctness comes first: every
@@ -143,7 +143,7 @@ code.
   allocated prompt blocks by refcount. Reservation, allocation, and sharing must stay
   consistent ([`scheduler.py`](../llm_infer/scheduler/scheduler.py),
   [`block_table.py`](../llm_infer/kv_cache/block_table.py)).
-- rlvr-sql prompts are a **verbatim copy** in [`tests/correctness/prompt.py`](../tests/correctness/prompt.py),
+- llm-rlvr-sql prompts are a **verbatim copy** in [`tests/correctness/prompt.py`](../tests/correctness/prompt.py),
   not an import — goldens freeze on exact bytes.
 
 ---
@@ -268,7 +268,7 @@ Validates `FlashAttnPagedAttention` on A100 with tie-tolerance for bf16 numerica
 3. **Adjudicate tokens** against fp32 reference (exact or traced tie).
 4. Only correct systems get tok/s; print pinned config table ([`docs/benchmark.md`](benchmark.md)).
 
-### Flow E — Phase E rlvr-sql rollout timing (Modal)
+### Flow E — Phase E llm-rlvr-sql rollout timing (Modal)
 
 [`scripts/modal_rollout.py`](../scripts/modal_rollout.py):
 
@@ -393,7 +393,7 @@ flowchart TB
     PhaseB["Phase B: PagedKVCache + Scheduler + InferenceEngine"]
     PhaseC["Phase C: flash_attn_paged backend swap"]
     PhaseD["Phase D: benchmarks vs HF + vLLM"]
-    PhaseE["Phase E: rlvr-sql rollout timing + sampled Sampler"]
+    PhaseE["Phase E: llm-rlvr-sql rollout timing + sampled Sampler"]
 
     PhaseA --> PhaseB
     PhaseB --> PhaseC
@@ -438,7 +438,7 @@ calling HF ([`docs/fixture-format.md`](fixture-format.md)).
 **Honesty bar / tie tolerance.** bf16 flash path may diverge on genuine logit ties; acceptable
 only if traced to equal-within-tolerance logits — never "close enough."
 
-**rlvr-sql / GRPO.** rlvr-sql is the parent RL text-to-SQL project; GRPO (Group Relative
+**llm-rlvr-sql / GRPO.** llm-rlvr-sql is the parent RL text-to-SQL project; GRPO (Group Relative
 Policy Optimization) needs many sampled completions per prompt. Phase E measures this rollout
 pattern ([`docs/keeping-the-gpu-busy.md`](keeping-the-gpu-busy.md)).
 
@@ -472,7 +472,7 @@ from chunk ranges rather than assuming one prefill event per request.
 | 7 | [`tests/correctness/test_paged_decode.py`](../tests/correctness/test_paged_decode.py) | What correctness properties must hold? |
 | 8 | [`llm_infer/benchmarks/runners.py`](../llm_infer/benchmarks/runners.py) | How is llm-infer wired for benchmarking vs HF/vLLM? |
 | 9 | [`docs/fixture-format.md`](fixture-format.md) | How are goldens structured and regenerated? |
-| 10 | [`scripts/modal_rollout.py`](../scripts/modal_rollout.py) | How does Phase E connect to rlvr-sql economics? |
+| 10 | [`scripts/modal_rollout.py`](../scripts/modal_rollout.py) | How does Phase E connect to llm-rlvr-sql economics? |
 
 ---
 
@@ -498,7 +498,7 @@ delegates only the attention matmul to swappable backends (`torch_naive` for tru
 `flash-attn` for speed). An `InferenceEngine` step loop admits requests, prefills new ones,
 fuses decode for all running requests via `decode_many`, samples tokens, and frees finished
 blocks. Correctness is enforced by pytest oracles against committed HF greedy goldens before
-any throughput claim; Modal scripts benchmark against naive HF and vLLM and measure rlvr-sql
+any throughput claim; Modal scripts benchmark against naive HF and vLLM and measure llm-rlvr-sql
 GRPO rollout economics.
 
 ### The 5 things to understand first

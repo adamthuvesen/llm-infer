@@ -1,6 +1,6 @@
 """The pinned model identity. Do not substitute the base (non-Instruct) variant.
 
-rlvr-sql runs the **Instruct** model and its chat template; the plain `-3B` model is
+llm-rlvr-sql runs the **Instruct** model and its chat template; the plain `-3B` model is
 a different network and would invalidate the oracle.
 """
 

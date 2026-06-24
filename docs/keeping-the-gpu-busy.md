@@ -1,10 +1,10 @@
-# Keeping the GPU busy — the rlvr-sql rollout-timing hook (Phase E)
+# Keeping the GPU busy — the llm-rlvr-sql rollout-timing hook (Phase E)
 
-This is the differentiator: the one number that makes `llm-infer` an *rlvr-sql rollout
+This is the differentiator: the one number that makes `llm-infer` an *llm-rlvr-sql rollout
 backend* rather than a generic vLLM clone. Phase D proved the engine decodes a synthetic
 workload correctly and beats naive HF (`docs/benchmark.md`). Phase E points it at the
-**real** thing it exists to serve — one frozen rlvr-sql GRPO rollout batch — and times it
-against vLLM (rlvr-sql's current rollout backend, the ceiling) and naive HF (the floor).
+**real** thing it exists to serve — one frozen llm-rlvr-sql GRPO rollout batch — and times it
+against vLLM (llm-rlvr-sql's current rollout backend, the ceiling) and naive HF (the floor).
 
 The framing is honest about scope: v1 is a small, legible, *correct* paged engine. vLLM is a
 mature system with CUDA graphs, a real scheduler, and a custom paged-attention kernel. The
@@ -12,7 +12,7 @@ gap is the cost of v1's legibility, and it is named below, not hidden.
 
 ## The workload — a real rollout batch, not a microbench
 
-One GRPO rollout batch from rlvr-sql's own `GrpoHyperparams`, anchored to **`grpo-s0`** (the
+One GRPO rollout batch from llm-rlvr-sql's own `GrpoHyperparams`, anchored to **`grpo-s0`** (the
 shipped main result):
 
 | knob | value | source |
@@ -25,19 +25,19 @@ shipped main result):
 | top_p | 1.0 | `top_p=1.0` (a no-op nucleus, supported honestly) |
 | sampling seed | 0 | `GrpoHyperparams.seed` |
 
-The prompts are **byte-identical to rlvr-sql's eval path**: built through its own
+The prompts are **byte-identical to llm-rlvr-sql's eval path**: built through its own
 `build_messages(style="cot")` + `serialize_schema()` (the CoT system prompt + deterministic
 `CREATE TABLE` blocks), then tokenized with the pinned Qwen2.5-Coder-3B-Instruct chat
 template (`add_generation_prompt=True`). Eight Spider-dev questions are picked by a pinned
 seed and **frozen as a committed fixture**
 (`tests/fixtures/rollout_grpo_s0_spider_dev.json`), so the run reproduces exactly with no
-rlvr-sql import and no re-tokenization drift. The chosen dev rows span six distinct schemas
+llm-rlvr-sql import and no re-tokenization drift. The chosen dev rows span six distinct schemas
 (`pets_1`, `student_transcripts_tracking`, `tvshow`, `world_1`, `orchestra`, `dog_kennels`),
 251–868 prompt tokens each.
 
 ## The served model — merged grpo-s0, bf16
 
-rlvr-sql ships its policy as a **rank-32 PEFT LoRA adapter** over
+llm-rlvr-sql ships its policy as a **rank-32 PEFT LoRA adapter** over
 `Qwen/Qwen2.5-Coder-3B-Instruct` (pinned revision `488639f1`). The engine stays LoRA-free:
 `scripts/merge_adapter.py` folds `grpo/grpo-s0` into the base with PEFT `merge_and_unload`
 and writes the **merged bf16** weights to a Modal volume, served identically to llm-infer
@@ -45,7 +45,7 @@ and vLLM (same weights → fair timing). The adapter's `base_model_name_or_path`
 against the pin before merging — a wrong base would silently corrupt every number.
 
 Why bf16: it is Qwen2.5's **native** dtype (the model is trained and shipped in bf16, and
-rlvr-sql's GRPO run was bf16), it is the dtype the engine's greedy oracle already validates,
+llm-rlvr-sql's GRPO run was bf16), it is the dtype the engine's greedy oracle already validates,
 and it is the dtype Phase D uses — so all three systems and the engine run **one uniform
 precision**, with no mixed fp16/bf16 path to reason about. All three produce coherent SQL
 (sampled completions reason in `<think>…</think>` then emit a ` ```sql ` query), confirmed on
@@ -55,7 +55,7 @@ a smoke before the timed run.
 
 | row | what it is | role |
 | --- | --- | --- |
-| `vllm` | vLLM offline generate, prefix caching off, flags pinned, bf16 merged weights. | **The ceiling** — rlvr-sql's *current* rollout backend. Never the thing we beat. |
+| `vllm` | vLLM offline generate, prefix caching off, flags pinned, bf16 merged weights. | **The ceiling** — llm-rlvr-sql's *current* rollout backend. Never the thing we beat. |
 | `llm_infer` | this engine: flash backend, bf16, all 32 completions in one paged cache, fused batched decode (`decode_many`), seeded sampler. | The engine under test. |
 | `hf_sequential` | HF `generate()` once per completion, sequentially, sampling. | **The floor** — the naive thing written first. |
 
@@ -90,7 +90,7 @@ a smoke before the timed run.
 
 ## Result
 
-Run `2026-06-21`. Served weights: `Qwen/Qwen2.5-Coder-3B-Instruct` @ `488639f1` + rlvr-sql
+Run `2026-06-21`. Served weights: `Qwen/Qwen2.5-Coder-3B-Instruct` @ `488639f1` + llm-rlvr-sql
 `grpo-s0` (rank-32 LoRA), merged **bf16**. Workload: 32 completions (8 Spider-dev prompts ×
 G=4), ≤1024 tokens, temperature 1.0, top_p 1.0, seed 0; 1 warmup + 2 measured iterations,
 median wall-clock.
@@ -109,7 +109,7 @@ per completion on average, far short of the 1024 cap.)
 
 **The engine beats the naive floor on the real rollout.** `llm_infer` (65.9 tok/s) decodes
 the GRPO rollout batch **1.67× faster** than naive sequential HF (39.4 tok/s) and at **1.9×
-lower $/1k** ($1.00 vs $1.85) — the same win as Phase D's stop #4, now on rlvr-sql's actual
+lower $/1k** ($1.00 vs $1.85) — the same win as Phase D's stop #4, now on llm-rlvr-sql's actual
 workload rather than the synthetic one. The fused batched decode (`decode_many`) is what earns
 it: all 32 completions advance in one forward per step instead of one-at-a-time generate.
 
@@ -130,9 +130,9 @@ on the **same** PCIe instance, so the 1.67× engine-vs-floor win is apples-to-ap
 row is the uncatchable ceiling reported for context, and the ~33× gap dwarfs the few-percent
 PCIe↔SXM4 difference either way.
 
-What this buys the claim: rlvr-sql's GRPO loop spends most of its wall-clock in rollout
+What this buys the claim: llm-rlvr-sql's GRPO loop spends most of its wall-clock in rollout
 generation. This is the hook that connects `llm_infer`'s throughput to that loop's economics —
-$/1k rollouts at a pinned GPU price, on a frozen, reproducible batch built from rlvr-sql's own
+$/1k rollouts at a pinned GPU price, on a frozen, reproducible batch built from llm-rlvr-sql's own
 prompt builders and anchored to the shipped `grpo-s0` checkpoint.
 
 ### Prefix caching update
@@ -166,11 +166,11 @@ when a sibling first appends generated tokens.
   engine/HF on **NVIDIA A100 80GB PCIe** (300 W), vLLM on **NVIDIA A100-SXM4-80GB** (400 W)
   — Modal-assigned, captured in the result JSON.
 - **Served model:** base `Qwen/Qwen2.5-Coder-3B-Instruct` @ `488639f1ff808d1d3d0ba301aef8c11461451ec5`
-  merged with rlvr-sql `grpo/grpo-s0` (PEFT LoRA, rank 32, α 64, all-linear), `merge_and_unload`,
+  merged with llm-rlvr-sql `grpo/grpo-s0` (PEFT LoRA, rank 32, α 64, all-linear), `merge_and_unload`,
   saved **bf16**.
 - **Workload:** `tests/fixtures/rollout_grpo_s0_spider_dev.json` — Spider dev (HF `xlangai/spider`
   @ `0c350918`), dev indices `[82, 530, 621, 788, 829, 861, 976, 995]` (selection seed 0), built
-  through rlvr-sql `build_messages(cot)` + `serialize_schema`; 8 prompts × G=4 = 32 completions,
+  through llm-rlvr-sql `build_messages(cot)` + `serialize_schema`; 8 prompts × G=4 = 32 completions,
   `max_completion_length=1024`, EOS `{151643, 151645}`.
 - **Sampling:** temperature 1.0, top_p 1.0, seed 0 — every system re-seeds per measured iteration.
 - **Timing:** 1 warmup + 2 measured iterations, median wall-clock, CUDA sync at each boundary.
@@ -190,7 +190,7 @@ when a sibling first appends generated tokens.
 # one-time: merge the grpo-s0 adapter into the base, write bf16 weights to the Modal volume
 modal run scripts/merge_adapter.py
 
-# (re)build the frozen 8-prompt fixture from rlvr-sql's builders (local, no GPU)
+# (re)build the frozen 8-prompt fixture from llm-rlvr-sql's builders (local, no GPU)
 uv run --with datasets --with pydantic python scripts/build_rollout_fixture.py
 
 # cheap wiring + bf16-sanity check (2 completions, 64 tokens)
