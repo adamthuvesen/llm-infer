@@ -215,7 +215,7 @@ Implemented by [`TraceRecorder`](../llm_infer/tracing.py) and
 
 Schema version **3** event names:
 
-`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · block_allocated · block_freed · request_finished · batch_size_changed · tokens_per_second_sampled`
+`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · block_allocated · block_freed · request_preempted · request_resumed · request_finished · batch_size_changed · tokens_per_second_sampled`
 
 Prefill events are chunk-scoped. A long prompt emits one started/progress pair per cached
 chunk, using `start_pos`, `end_pos`, `cached_tokens`, `total_prompt_tokens`, and `completed`
