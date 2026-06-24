@@ -142,12 +142,16 @@ legibility**. Speed is a side-quest with its own track, last.
    keeping its tokens — then resumes it by recomputing prompt-plus-generated. A forced-preemption
    oracle pins that the resumed request is token-for-token identical to the uninterrupted run; the
    visualizer renders the eviction + recompute resume, and the bundled demo shows one.
+9. **Serving depth.** Streaming token output → an OpenAI-compatible HTTP server
+   (`/v1/chat/completions`, `/v1/completions`, a stateless `/v1/responses` subset) → a hand-rolled
+   Prometheus `/metrics` endpoint read from real engine state (request/token/preemption counters,
+   live KV-pool and queue gauges, TTFT + latency histograms) → a concurrent `httpx` load generator
+   (`scripts/loadgen.py`). The engine is now drivable as a real server — `curl` it, point the
+   OpenAI SDK at it, scrape its metrics, and load-test it — not only through the frozen harness.
+   See [Serving](#serving).
 
 **Primary forward track — finish the engine's technique set (dependency order)**
 
-9. **Serving depth.** Streaming token output → an OpenAI-compatible endpoint → metrics → a load
-   generator, so the engine is drivable as a real server, not only through the frozen harness.
-   The release-defining piece — it turns the engine from a harness into something you can `curl`.
 10. **Sampling completeness.** top-k, repetition/frequency penalties, and stop-strings, rounding
    out the decode surface beyond greedy / temperature / top-p.
 11. **Expand *Keeping the GPU Busy*.** Narrate the architecture and the honest dead-ends (the v2
@@ -174,6 +178,140 @@ The flash-attn backend is the one GPU-only path; its oracle runs on the target G
 (`scripts/generate_goldens.py`) loads the 3B model in fp32 on CPU.
 
 See [`AGENTS.md`](AGENTS.md) for the working agreement and the honesty bar.
+
+## Serving
+
+The engine runs behind an OpenAI-compatible HTTP server (optional `serving` extra), so it is
+`curl`-able like OpenAI and continuous batching shows under concurrent load — many clients
+stream off one background `step()` loop. It speaks **Chat Completions** (`/v1/chat/completions`,
+the primary surface) and **Completions** (`/v1/completions`), plus a stateless **Responses**
+subset (`/v1/responses`, text generation only). Streaming and non-streaming both supported;
+unsupported features (tools, logprobs, `n>1`, server-side state) return an honest 4xx.
+
+### Start the server
+
+```bash
+uv sync --extra serving
+python -m llm_infer.serve            # loads the pinned Qwen, serves on 127.0.0.1:8000
+# --host / --port / --device / --block-size / --num-blocks to tune it
+```
+
+### Chat completions — `curl`
+
+Non-streaming returns one JSON body with `usage`:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "messages": [{"role": "user", "content": "Write a haiku about paged attention."}],
+    "max_tokens": 64
+  }'
+```
+
+Streaming emits OpenAI SSE chunks (`data:` deltas, terminated by `data: [DONE]`):
+
+```bash
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "messages": [{"role": "user", "content": "Stream me a limerick about KV cache."}],
+    "max_tokens": 64,
+    "stream": true
+  }'
+```
+
+### Responses API — `curl`
+
+The stateless text-generation subset of `/v1/responses` (a bare string is continued raw;
+add `instructions` to route through the chat template):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "input": "Explain a block allocator in one sentence.",
+    "max_output_tokens": 64
+  }'
+```
+
+### Point the official OpenAI SDK at it
+
+It is wire-compatible, so the stock `openai` client works with `base_url` flipped (the API
+key is unused — this server does no auth):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="not-needed")
+
+stream = client.chat.completions.create(
+    model="Qwen/Qwen2.5-Coder-3B-Instruct",
+    messages=[{"role": "user", "content": "Write a haiku about paged attention."}],
+    max_tokens=64,
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+### Metrics — `GET /metrics`
+
+A hand-rolled Prometheus exposition (no `prometheus_client` dependency), read from real
+server/engine state — counters for requests, completions by finish reason, generated tokens,
+and preemptions; live gauges for running/waiting requests and the KV-cache block pool
+(used / free / total / utilization); and TTFT + end-to-end latency histograms.
+
+```bash
+curl -s http://127.0.0.1:8000/metrics
+```
+
+```text
+# HELP llm_infer_generated_tokens_total Output tokens generated across all requests.
+# TYPE llm_infer_generated_tokens_total counter
+llm_infer_generated_tokens_total 192
+# HELP llm_infer_kv_blocks_used Physical KV-cache blocks currently allocated.
+# TYPE llm_infer_kv_blocks_used gauge
+llm_infer_kv_blocks_used 23
+# HELP llm_infer_ttft_seconds Time from request arrival to its first generated token.
+# TYPE llm_infer_ttft_seconds histogram
+llm_infer_ttft_seconds_bucket{le="0.25"} 14
+...
+```
+
+### Load generator
+
+`scripts/loadgen.py` fires N concurrent requests at a running server's OpenAI endpoint
+(async `httpx`, streaming by default) and reports per-request and aggregate tokens/s, TTFT
+(p50/p99), end-to-end latency (p50/p99), total throughput, and an error count — the numbers
+that make continuous batching visible under load.
+
+```bash
+uv run python scripts/loadgen.py \
+  --base-url http://127.0.0.1:8000 \
+  --model Qwen/Qwen2.5-Coder-3B-Instruct \
+  --concurrency 16 --num-requests 64 --max-tokens 64 \
+  --prompt "Write a short haiku about paged attention."
+```
+
+```text
+llm-infer load generator
+------------------------------------------------
+requests (ok/total)       64/64
+errors                    0
+concurrency               16 (streaming)
+wall-clock                ...
+output tokens             ...
+throughput                ... tok/s
+per-request tok/s (mean)  ...
+TTFT p50 / p99            ... ms
+latency p50 / p99         ... s
+```
+
+Add `--no-stream` to measure single blocking calls (then TTFT equals total latency).
 
 ## KV Trace Visualizer
 
