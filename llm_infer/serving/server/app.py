@@ -6,15 +6,14 @@ CPU model and production wires the real Qwen through the same code. The handlers
 tokens off the one background batching loop, detokenize incrementally, and shape the result
 as OpenAI responses. No decoding logic lives here — token ids come straight from the engine.
 
-The engine runs one fixed sampler (greedy by default). Per-request ``temperature``/``top_p``
-that disagree with it are rejected rather than silently ignored: this server does not vary
-sampling per request, and pretending otherwise would be a lie.
+Sampling is **per request**: each request's ``temperature``/``top_p``/``top_k``/penalties/
+``seed`` are mapped to :class:`SamplingParams` and carried on its engine request, so concurrent
+clients each decode under their own params off the one shared batching loop.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,7 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from llm_infer.serving.sampler import Sampler
+from llm_infer.serving.sampler import SamplingParams
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
 from llm_infer.serving.server.metrics import ServerMetrics
@@ -46,7 +45,7 @@ from llm_infer.serving.server.protocol import (
     ResponseOutputText,
     ResponsesRequest,
     ResponseUsage,
-    SamplingParams,
+    SamplingRequestBody,
     Usage,
 )
 
@@ -59,16 +58,14 @@ def create_app(
     tokenizer: object,
     model_id: str,
     eos_token_ids: frozenset[int],
-    sampler: Sampler | None = None,
     metrics: ServerMetrics | None = None,
 ) -> FastAPI:
-    """Build the serving app around an injected engine, tokenizer, sampler, and metrics.
+    """Build the serving app around an injected engine, tokenizer, and metrics.
 
     ``metrics`` should be the same :class:`ServerMetrics` the ``async_engine`` was built with,
     so ``/metrics`` renders the instruments those request/token choke points feed and the live
     gauges already bound to the engine. When omitted, ``/metrics`` reports an empty registry.
     """
-    sampler = sampler or Sampler()
     metrics = metrics or ServerMetrics()
 
     @asynccontextmanager
@@ -97,7 +94,7 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest):
         _reject_unsupported(request)
-        _check_sampling(request, sampler)
+        _check_sampling(request)
         prompt_ids = _apply_chat_template(tokenizer, request.messages)
         return await _serve(
             request_kind="chat",
@@ -105,11 +102,12 @@ def create_app(
             max_new_tokens=request.max_tokens,
             stream=request.stream,
             model=request.model,
+            sampling=_sampling_params(request),
         )
 
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest):
-        _check_sampling(request, sampler)
+        _check_sampling(request)
         if isinstance(request.prompt, list):
             raise HTTPException(400, "batched 'prompt' (list) is not supported; send one string")
         prompt_ids = tokenizer.encode(request.prompt)
@@ -121,12 +119,13 @@ def create_app(
             max_new_tokens=request.max_tokens,
             stream=request.stream,
             model=request.model,
+            sampling=_sampling_params(request),
         )
 
     @app.post("/v1/responses")
     async def responses(request: ResponsesRequest):
         _reject_responses_unsupported(request)
-        _check_responses_sampling(request, sampler)
+        _check_responses_sampling(request)
         prompt_ids = _responses_prompt_ids(tokenizer, request)
         request_id = async_engine.next_request_id()
         created = int(time.time())
@@ -136,6 +135,7 @@ def create_app(
             prompt_ids=prompt_ids,
             max_new_tokens=request.max_output_tokens,
             eos_token_ids=eos_token_ids,
+            sampling=_sampling_params(request),
         )
         if request.stream:
             sse = _stream_responses_sse(
@@ -157,7 +157,13 @@ def create_app(
         )
 
     async def _serve(
-        *, request_kind: str, prompt_ids: list[int], max_new_tokens: int, stream: bool, model: str
+        *,
+        request_kind: str,
+        prompt_ids: list[int],
+        max_new_tokens: int,
+        stream: bool,
+        model: str,
+        sampling: SamplingParams,
     ):
         request_id = async_engine.next_request_id()
         created = int(time.time())
@@ -167,6 +173,7 @@ def create_app(
             prompt_ids=prompt_ids,
             max_new_tokens=max_new_tokens,
             eos_token_ids=eos_token_ids,
+            sampling=sampling,
         )
         if stream:
             sse = _stream_sse(
@@ -429,12 +436,11 @@ def _reject_unsupported(request: ChatCompletionRequest) -> None:
         raise HTTPException(422, "tools / function-calling are not supported")
 
 
-def _check_sampling(request: SamplingParams, sampler: Sampler) -> None:
-    """Reject anything we cannot honor, and any sampling that disagrees with the engine.
+def _check_sampling(request: SamplingRequestBody) -> None:
+    """Reject the surface this engine cannot produce (``n > 1``, ``logprobs``, ``stop``).
 
-    The engine runs one fixed sampler for the whole server. We accept ``temperature`` and
-    ``top_p`` only when they match it, rather than silently decoding differently from what
-    the caller asked.
+    Temperature/top-p/top-k/penalties/seed are honored per request — see :func:`_sampling_params`
+    — so they are not checked against any server-wide sampler.
     """
     if request.n != 1:
         raise HTTPException(422, "'n' > 1 is not supported; this server returns a single choice")
@@ -442,27 +448,25 @@ def _check_sampling(request: SamplingParams, sampler: Sampler) -> None:
         raise HTTPException(422, "'logprobs' is not supported")
     if request.stop is not None:
         raise HTTPException(422, _STOP_UNSUPPORTED)
-    _check_fixed_sampling(request.temperature, request.top_p, sampler)
 
 
-def _check_fixed_sampling(temperature: float, top_p: float, sampler: Sampler) -> None:
-    """The engine runs one fixed sampler; reject sampling params that disagree with it.
+def _sampling_params(request: SamplingRequestBody | ResponsesRequest) -> SamplingParams:
+    """Map the request body's OpenAI sampling fields to per-request :class:`SamplingParams`.
 
-    We accept ``temperature``/``top_p`` only when they match the server's configured sampler,
-    rather than silently decoding differently from what the caller asked for.
+    Out-of-range values raise in ``SamplingParams.__post_init__``; we surface that as a 400
+    rather than letting it become a 500, so a malformed request fails loudly and clearly.
     """
-    if not math.isclose(temperature, sampler.temperature):
-        raise HTTPException(
-            400,
-            f"this server decodes at temperature={sampler.temperature}; "
-            f"requested temperature={temperature} cannot be honored",
+    try:
+        return SamplingParams(
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            presence_penalty=request.presence_penalty,
+            frequency_penalty=request.frequency_penalty,
+            seed=request.seed,
         )
-    if not math.isclose(top_p, sampler.top_p):
-        raise HTTPException(
-            400,
-            f"this server decodes at top_p={sampler.top_p}; "
-            f"requested top_p={top_p} cannot be honored",
-        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _responses_prompt_ids(tokenizer: object, request: ResponsesRequest) -> list[int]:
@@ -513,7 +517,6 @@ def _reject_responses_unsupported(request: ResponsesRequest) -> None:
         raise HTTPException(422, "'n' > 1 is not supported; this server returns a single response")
 
 
-def _check_responses_sampling(request: ResponsesRequest, sampler: Sampler) -> None:
+def _check_responses_sampling(request: ResponsesRequest) -> None:
     if request.stop is not None:
         raise HTTPException(422, _STOP_UNSUPPORTED)
-    _check_fixed_sampling(request.temperature, request.top_p, sampler)

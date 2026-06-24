@@ -490,8 +490,8 @@ def test_responses_streaming_matches_non_streaming() -> None:
         {"model": "tiny-qwen", "input": "hi", "store": True},
         {"model": "tiny-qwen", "input": "hi", "background": True},
         {"model": "tiny-qwen", "input": "hi", "n": 2},
-        {"model": "tiny-qwen", "input": "hi", "temperature": 0.9},
-        {"model": "tiny-qwen", "input": "hi", "frequency_penalty": 0.1},
+        {"model": "tiny-qwen", "input": "hi", "stop": ["\n"]},  # 10b scope — still rejected
+        {"model": "tiny-qwen", "input": "hi", "temperature": -1.0},  # out of range -> 400
     ],
 )
 def test_responses_unsupported_fields_rejected(payload: dict) -> None:
@@ -500,6 +500,29 @@ def test_responses_unsupported_fields_rejected(payload: dict) -> None:
         async with app.router.lifespan_context(app), _client(app) as client:
             resp = await client.post("/v1/responses", json=payload)
             assert 400 <= resp.status_code < 500
+
+    _run(go())
+
+
+def test_responses_per_request_sampling_is_honored() -> None:
+    """The Responses endpoint now serves per-request temperature/seed without a 400."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "tiny-qwen",
+                    "input": "sample me",
+                    "max_output_tokens": 5,
+                    "temperature": 0.9,
+                    "frequency_penalty": 0.1,
+                    "seed": 2,
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["output_tokens"] == 5
 
     _run(go())
 
@@ -517,10 +540,15 @@ def _chat(**extra) -> dict:
         (_chat(n=2), 422),
         # logprobs: not produced.
         (_chat(logprobs=True), 422),
-        # unknown field: extra=forbid -> 422 from validation.
-        (_chat(frequency_penalty=0.5), 422),
-        # temperature the fixed greedy sampler cannot honor.
-        (_chat(temperature=0.7), 400),
+        # stop sequences: out of scope (mission 10b) — still rejected.
+        (_chat(stop=["\n"]), 422),
+        # genuinely unknown field: extra=forbid -> 422 from validation.
+        (_chat(logit_bias={"1": 1.0}), 422),
+        # out-of-range sampling: mapped to SamplingParams, which rejects loudly as 400.
+        (_chat(temperature=-1.0), 400),
+        (_chat(top_p=2.0), 400),
+        (_chat(top_k=-3), 400),
+        (_chat(presence_penalty=5.0), 400),
     ],
 )
 def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
@@ -529,5 +557,62 @@ def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
         async with app.router.lifespan_context(app), _client(app) as client:
             resp = await client.post("/v1/chat/completions", json=payload)
             assert resp.status_code == status
+
+    _run(go())
+
+
+def test_per_request_temperature_is_honored_no_400() -> None:
+    """A non-greedy request is now served (no fixed-sampler 400) and returns a completion."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json=_chat(temperature=0.8, top_p=0.9, top_k=10, seed=1, max_tokens=5),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["completion_tokens"] == 5
+
+    _run(go())
+
+
+def test_concurrent_requests_use_their_own_sampling() -> None:
+    """Two concurrent clients with different temperatures are each served their own sampling.
+
+    A greedy request run concurrently with a sampled one must match the same greedy request run
+    alone — proof the sampled batchmate did not perturb it — while the sampled request still
+    returns a valid completion. This is the per-request-sampling replacement for the old 400.
+    """
+
+    async def content(client, **sampling) -> str:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json=_chat(max_tokens=6, stream=True, **sampling),
+        ) as resp:
+            assert resp.status_code == 200
+            raw = ""
+            async for piece in resp.aiter_text():
+                raw += piece
+        return "".join(
+            c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
+        )
+
+    async def go() -> None:
+        # Greedy alone, as the reference.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            greedy_alone = await content(client)
+
+        # Greedy + a hot sampled request concurrently on one shared engine.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            greedy_batched, sampled = await asyncio.gather(
+                content(client),
+                content(client, temperature=1.5, seed=5),
+            )
+        assert greedy_batched == greedy_alone
+        assert isinstance(sampled, str)
 
     _run(go())

@@ -14,7 +14,6 @@ import torch
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving.engine import InferenceEngine
-from llm_infer.serving.sampler import Sampler
 from llm_infer.serving.server import AsyncInferenceEngine, ServerMetrics, create_app
 
 # A 64-token page and a few hundred pages comfortably hold a handful of concurrent
@@ -37,10 +36,9 @@ def build_qwen_app(
     model = QwenModel.load(dtype=dtype, device=device)
     eos_token_ids = _eos_token_ids(tokenizer)
 
-    sampler = Sampler()  # greedy — the proven path; swap to a seeded sampler for sampled serving
-    engine = InferenceEngine(
-        model, block_size=block_size, num_blocks=num_blocks, device=device, sampler=sampler
-    )
+    # Sampling is per request: each client's temperature/top-p/top-k/penalties/seed are mapped
+    # to SamplingParams on its Request, so concurrent clients each decode under their own params.
+    engine = InferenceEngine(model, block_size=block_size, num_blocks=num_blocks, device=device)
     metrics = ServerMetrics()
     async_engine = AsyncInferenceEngine(engine, metrics=metrics)
     return create_app(
@@ -48,7 +46,6 @@ def build_qwen_app(
         tokenizer=tokenizer,
         model_id=MODEL_ID,
         eos_token_ids=eos_token_ids,
-        sampler=sampler,
         metrics=metrics,
     )
 

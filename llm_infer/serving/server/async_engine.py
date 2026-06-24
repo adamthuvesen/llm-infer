@@ -32,6 +32,7 @@ import torch
 
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
+from llm_infer.serving.sampler import GREEDY, SamplingParams
 from llm_infer.serving.server.metrics import ServerMetrics
 
 
@@ -127,12 +128,14 @@ class AsyncInferenceEngine:
         prompt_ids: list[int],
         max_new_tokens: int,
         eos_token_ids: frozenset[int],
+        sampling: SamplingParams = GREEDY,
     ) -> AsyncIterator[TokenStreamItem]:
         """Yield generated tokens for one request until it finishes or the caller cancels.
 
-        Submits the request to the loop, then drains its asyncio queue. If the consumer is
-        cancelled (client disconnect), the ``finally`` aborts the request so the loop stops
-        decoding it and frees its KV — no orphaned work keeps running.
+        Submits the request to the loop (carrying its per-request ``sampling``), then drains its
+        asyncio queue. If the consumer is cancelled (client disconnect), the ``finally`` aborts
+        the request so the loop stops decoding it and frees its KV — no orphaned work keeps
+        running.
         """
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[TokenStreamItem | None] = asyncio.Queue()
@@ -148,6 +151,7 @@ class AsyncInferenceEngine:
             prompt_ids=list(prompt_ids),
             max_new_tokens=max_new_tokens,
             eos_token_ids=eos_token_ids,
+            sampling=sampling,
         )
         with self._lock:
             self._submissions.append((request, stream))
