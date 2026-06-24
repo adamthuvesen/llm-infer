@@ -8,11 +8,14 @@ steps to become decode-ready, letting already-running requests keep decoding bet
 chunks. Finished requests are freed at the end of the step (the decode-step boundary),
 which returns their blocks and budget so a queued request can be admitted next step.
 
-Token selection is pluggable through a :class:`~llm_infer.serving.sampler.Sampler`; it
-defaults to greedy (temperature 0 — the proven oracle path) and the rlvr-sql rollout passes
-a seeded temperature/top-p sampler. There is still no streaming or OpenAI-compatible serving
-surface. Under greedy, each request runs through the same cached path, so batching two
-requests gives token-for-token the same result as running each alone.
+Token selection is **per request**: the fused decode forward stays shared (one
+``decode_many`` over the whole batch), but each row of the resulting logits is sampled
+under its own request's :class:`~llm_infer.serving.sampler.SamplingParams`, against that
+request's own generated history, drawn from that request's own seeded generator. Greedy
+requests (the default — temperature 0, the proven oracle path) take the vectorized argmax
+fast-path. Because each request's draw depends only on its own seed and decode steps, a
+sampled request produces the identical sequence run alone or batched with others, and a
+greedy request stays token-for-token the proven greedy path.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from llm_infer.scheduler.scheduler import (
     max_blocks_for,
 )
 from llm_infer.serving.request import Request
-from llm_infer.serving.sampler import Sampler
+from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
 from llm_infer.tracing import FinishReason, TokenSource, TraceEvent, TraceEventName, TraceRecorder
 
@@ -58,7 +61,7 @@ class InferenceEngine:
         block_size: int,
         num_blocks: int,
         device: str = "cpu",
-        sampler: Sampler | None = None,
+        default_sampling: SamplingParams | None = None,
         profiler: TimingProfiler | None = None,
         prefill_chunk_size: int | None = None,
         speculative: SpeculativeDecodingConfig | None = None,
@@ -80,11 +83,10 @@ class InferenceEngine:
         )
         self.preemption = preemption
         self.scheduler = Scheduler(num_blocks, block_size, preemption=preemption)
-        # Default to greedy (temperature 0) — token-for-token the proven oracle path. The
-        # rollout passes Sampler(temperature=1.0, top_p=1.0, seed=...) for sampled decoding.
-        self.sampler = sampler or Sampler()
-        if speculative is not None and not self.sampler.is_greedy:
-            raise ValueError("speculative decoding v1 supports only greedy sampling")
+        # The fallback sampling for a request that carries no params of its own. Defaults to
+        # greedy (temperature 0 — token-for-token the proven oracle path); the rollout/benchmark
+        # path passes one seeded temperature/top-p SamplingParams that every request inherits.
+        self.default_sampling = default_sampling or GREEDY
         self.profiler = profiler
         self.model.profiler = profiler
         self.prefill_chunk_size = prefill_chunk_size
@@ -181,10 +183,8 @@ class InferenceEngine:
             if to_decode:
                 self._decode_requests(to_decode, result)
 
-            for request in [r for r in self.scheduler.running if r.finished]:
-                self._trace_request_finished(request)
-                request.block_table.free()
-                self.scheduler.release(request)
+            # Finishers are freed inside each prefill/decode op (see _release_finished_in), so by
+            # here the running set already excludes them; nothing left to sweep.
             self._trace_batch_size_changed()
             self._trace_throughput_sample(result)
 
@@ -203,12 +203,17 @@ class InferenceEngine:
     # rebuilds from a pristine state and stays token-exact.
 
     def _blocks_to_grow(self, request: Request, new_tokens: int) -> int:
-        """How many *new* physical blocks ``request`` must pull to cache ``new_tokens`` more."""
+        """How many *new* physical blocks ``request`` must pull to cache ``new_tokens`` more.
+
+        Delegates to the cache's dry-run cost so the count includes copy-on-write: a request
+        whose last block is a prefix-shared partial block copies it private on append, which
+        pulls a block the bare capacity-growth math misses (and would otherwise OOM mid-write).
+        """
         table = request.block_table
-        current = table.num_blocks if table is not None else 0
-        length = table.length if table is not None else 0
-        needed = -(-(length + new_tokens) // self.scheduler.block_size)  # ceil division
-        return max(0, needed - current)
+        if table is None:
+            # Fresh request: no blocks yet and nothing shared, so just capacity growth from empty.
+            return -(-new_tokens // self.scheduler.block_size)  # ceil division
+        return self.cache.append_cost(table, new_tokens)
 
     def _ensure_pool_room(self, request: Request, new_tokens: int) -> None:
         """Free enough blocks for ``request`` to grow by ``new_tokens``, preempting LIFO victims.
@@ -247,6 +252,17 @@ class InferenceEngine:
             pool_free=self.cache.allocator.num_free,
         )
 
+    def _is_running(self, request: Request) -> bool:
+        """Whether ``request`` is in the running set *right now*, tested by identity.
+
+        Prefilling or resuming an earlier request can preempt a later candidate via
+        ``_ensure_pool_room``, moving it to ``waiting`` partway through the loop. Both loops
+        therefore re-check membership live rather than against a set snapshotted once before the
+        loop: a stale snapshot would let an already-evicted request be prefilled while it sits in
+        ``waiting``, double-allocating its KV and breaking forward progress.
+        """
+        return any(candidate is request for candidate in self.scheduler.running)
+
     def _resume_requests(self, requests: list[Request], result: StepResult) -> None:
         """Rebuild each preempted request's KV by recompute before it decodes again.
 
@@ -255,11 +271,11 @@ class InferenceEngine:
         evicted in. No token is sampled — the request already owns its generated ids — so on the
         next step it decodes its next token, identical to the uninterrupted run.
         """
-        running = {id(request) for request in self.scheduler.running}
         for request in requests:
-            # A queued resume can be preempted again while making room for an earlier one;
-            # skip it here and let the next step pick it up once it is re-admitted.
-            if id(request) not in running:
+            # A queued resume can be preempted again while making room for an earlier one this
+            # step; check membership live (see _is_running) so a request evicted mid-loop is
+            # skipped and re-picked once it is re-admitted, never resumed out of the waiting queue.
+            if not self._is_running(request):
                 continue
             self._recompute_prefill(request)
             self._emit_trace(
@@ -344,13 +360,13 @@ class InferenceEngine:
     def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
         """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
         handled: set[str] = set()
-        running = {id(request) for request in self.scheduler.running}
         for request in requests:
             if request.request_id in handled:
                 continue
             # A request can be preempted out of the running set while we make pool room for an
-            # earlier one this step; skip it, it will re-prefill once re-admitted.
-            if self.preemption and id(request) not in running:
+            # earlier one this step; check membership live (see _is_running) so it is skipped and
+            # re-prefills once re-admitted, never prefilled while sitting in the waiting queue.
+            if self.preemption and not self._is_running(request):
                 continue
             if request.prefix_group_id is None:
                 self._prefill_one(request, result)
@@ -361,6 +377,7 @@ class InferenceEngine:
                 candidate
                 for candidate in requests
                 if candidate.prefix_group_id == request.prefix_group_id
+                and (not self.preemption or self._is_running(candidate))
             ]
             if len(group) == 1:
                 self._prefill_one(request, result)
@@ -375,9 +392,10 @@ class InferenceEngine:
             return
         request.prefilled = True
         with self._record_time("sampling"):
-            token = self.sampler.sample(logits)
+            token = self._sample_one(logits, request)
         self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
         self._trace_decode_step([request], [token], token_source="prefill")
+        self._release_finished_in([request])
 
     def _prefill_shared_group(self, requests: list[Request], result: StepResult) -> None:
         prompt_ids = requests[0].prompt_ids
@@ -396,9 +414,16 @@ class InferenceEngine:
         if logits is None:
             return
 
+        # Leader prefill can preempt a sibling to make pool room (under preemption): that sibling
+        # is now reset and back in the waiting queue. Re-filter the group to the still-running
+        # members before forking/sampling — forking onto a preempted sibling would resurrect it
+        # out of the waiting queue with a live block table and a sampled token. It re-prefills
+        # next step instead. The leader is never its own victim, so it always survives.
+        members = [leader, *(r for r in requests if r is not leader and self._is_running(r))]
+
         leader.prefilled = True
         leader.prompt_cached_tokens = len(prompt_ids)
-        for request in requests:
+        for request in members:
             if request is leader:
                 continue
             request.block_table = self.cache.fork_request(leader.block_table)
@@ -407,11 +432,12 @@ class InferenceEngine:
             request.prefilled = True
 
         with self._record_time("sampling"):
-            tokens = [self.sampler.sample(logits) for _ in requests]
-        eos_flags = self._eos_flags(torch.stack(tokens), requests)
-        for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
+            tokens = [self._sample_one(logits, request) for request in members]
+        eos_flags = self._eos_flags(torch.stack(tokens), members)
+        for request, token, is_eos in zip(members, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
-        self._trace_decode_step(requests, tokens, token_source="prefill")
+        self._trace_decode_step(members, tokens, token_source="prefill")
+        self._release_finished_in(members)
 
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
@@ -435,7 +461,7 @@ class InferenceEngine:
             self._decode_normal(fallback, result)
 
     def _decode_normal(self, requests: list[Request], result: StepResult) -> None:
-        """The original one-token batched decode path."""
+        """The original one-token batched decode path: shared forward, per-row sampling."""
         last_tokens = torch.stack([request.last_token_tensor for request in requests]).to(
             self.model.device
         )
@@ -446,24 +472,74 @@ class InferenceEngine:
                 last_tokens,
             )
         with self._record_time("sampling"):
-            tokens = self.sampler.sample_many(logits)
-        eos_flags = self._eos_flags(tokens, requests)
+            tokens = self._sample_rows(logits, requests)
+        eos_flags = self._eos_flags(torch.stack(tokens), requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
-        self._trace_decode_step(
-            requests,
-            [token for token in tokens.reshape(-1)],
-            token_source="decode",
+        self._trace_decode_step(requests, list(tokens), token_source="decode")
+        self._release_finished_in(requests)
+
+    def _params_for(self, request: Request) -> SamplingParams:
+        """The request's own sampling params, or the engine default when it set none."""
+        return request.sampling if request.sampling is not GREEDY else self.default_sampling
+
+    def _sample_one(self, logits: torch.Tensor, request: Request) -> torch.Tensor:
+        """Sample one token from a 1-D ``(vocab,)`` row under this request (prefill path)."""
+        return sample_row(
+            logits, self._params_for(request), request.generated, request.generator(logits.device)
         )
 
+    def _sample_rows(self, logits: torch.Tensor, requests: list[Request]) -> list[torch.Tensor]:
+        """Sample one token per row of ``(B, vocab)`` logits, each under its own request.
+
+        Greedy rows take the vectorized argmax (no RNG); the rest are sampled per row under that
+        request's params, against its own generated history, from its own seeded generator — so a
+        request's draw is independent of its batchmates. Returns scalar long tensors on device.
+        """
+        if logits.ndim != 2:
+            raise ValueError(f"expected 2-D logits, got shape {tuple(logits.shape)}")
+        params = [self._params_for(request) for request in requests]
+        tokens: list[torch.Tensor] = [None] * len(requests)  # type: ignore[list-item]
+
+        greedy_rows = [i for i, p in enumerate(params) if p.is_greedy]
+        if greedy_rows:
+            index = torch.tensor(greedy_rows, device=logits.device)
+            argmax = torch.argmax(logits.index_select(0, index), dim=-1)
+            for position, token in zip(greedy_rows, argmax, strict=True):
+                tokens[position] = token
+
+        for i, (request, p) in enumerate(zip(requests, params, strict=True)):
+            if p.is_greedy:
+                continue
+            tokens[i] = sample_row(
+                logits[i], p, request.generated, request.generator(logits.device)
+            )
+        return tokens
+
+    def _decode_budget(self, request: Request) -> int:
+        """Worst-case tokens this request may append in one decode step — for room reservation.
+
+        A speculative-eligible (greedy) request verifies ``last_token`` plus up to
+        ``max_draft_tokens`` in one forward and reserves blocks for all of them, so room must
+        cover the whole draft or the verify can OOM mid-step; the bound mirrors ``_draft_for``
+        (capped by the request's remaining tokens). Every other request appends exactly one token.
+        """
+        if self.speculative is not None and self._params_for(request).is_greedy:
+            max_draft = min(
+                self.speculative.config.max_draft_tokens, max(0, request.remaining_tokens - 1)
+            )
+            return 1 + max_draft
+        return 1
+
     def _make_decode_room(self, requests: list[Request]) -> list[Request]:
-        """Ensure the whole decode batch can grow by one token; preempt LIFO victims if not.
+        """Ensure the whole decode batch can grow by its per-request budget; preempt LIFO if not.
 
         ``decode_many`` allocates for every surviving member in one call, so room must cover the
-        batch's *total* growth, not one request at a time. Each decode step appends exactly one
-        token (at most one new block per request). A victim is the most-recently-admitted running
-        request and may itself be in this batch — preempting it drops it from the step and lowers
-        the demand. We preempt until the free pool covers the survivors' combined growth.
+        batch's *total* growth, not one request at a time. A normal request appends one token (at
+        most one new block); a speculative one may append its whole draft, so each is reserved for
+        ``_decode_budget`` tokens. A victim is the most-recently-admitted running request and may
+        itself be in this batch — preempting it drops it from the step and lowers the demand. We
+        preempt until the free pool covers the survivors' combined growth.
 
         Forward progress holds: the block-needers are the batch members, and preempting strictly
         shrinks the batch, so the demand reaches zero before victims run out.
@@ -471,7 +547,7 @@ class InferenceEngine:
         survivors = [r for r in requests if r.prefilled and r.block_table is not None]
         while True:
             survivors = [r for r in survivors if r.prefilled and r.block_table is not None]
-            demand = sum(self._blocks_to_grow(r, 1) for r in survivors)
+            demand = sum(self._blocks_to_grow(r, self._decode_budget(r)) for r in survivors)
             if demand <= self.cache.allocator.num_free:
                 return survivors
             victim = self.scheduler.preemption_victim(exclude=None)
@@ -483,8 +559,14 @@ class InferenceEngine:
             self._preempt(victim)
 
     def _draft_for(self, request: Request) -> list[int]:
-        """Return a draft only when there is room for draft tokens plus verifier recovery."""
-        if self.speculative is None:
+        """Return a draft only when there is room for draft tokens plus verifier recovery.
+
+        Speculative decoding verifies with a greedy (argmax) verifier, so only a greedy request
+        is eligible: a sampled request falls through to the normal per-row sampling path, which
+        keeps its draw seeded and independent. The guard is per request, not engine-wide, so a
+        greedy request can still speculate while a sampled one in the same batch does not.
+        """
+        if self.speculative is None or not self._params_for(request).is_greedy:
             return []
         max_draft_tokens = request.remaining_tokens - 1
         if max_draft_tokens < 1:
@@ -537,6 +619,12 @@ class InferenceEngine:
                 break
             self._record(request, token, self._is_eos(token, request), result)
         self._trace_decode_step([request], emitted, token_source="speculative")
+        # Verification reserved blocks for the whole draft; a partly-rejected draft rolled the
+        # length back, so return the now-unused trailing blocks to the pool (a finisher's table is
+        # freed wholesale by _release_finished_in, so only trim a still-running request).
+        if not request.finished:
+            request.block_table.trim_to_length()
+        self._release_finished_in([request])
 
     def _accepted_prefix_length(
         self, verifier_tokens: torch.Tensor, draft_tokens: torch.Tensor
@@ -623,6 +711,23 @@ class InferenceEngine:
         result.tokens.setdefault(request.request_id, []).append(token)
         if request.finished and request.request_id not in result.finished:
             result.finished.append(request.request_id)
+
+    def _release_finished_in(self, requests: list[Request]) -> None:
+        """Free and release any of ``requests`` that just finished, promptly.
+
+        Called at the end of each prefill/decode op — after its ``decode_step`` trace, so the
+        finish events stay ordered after the token that produced them. Releasing here rather than
+        at a single end-of-step sweep returns a finisher's KV before the *next* prefill/decode
+        this step needs room, and takes it out of the running set so it can never be selected as a
+        preemption victim (recompute refuses a finished request). Resume samples nothing and never
+        finishes, so prefill and decode together cover every finish source.
+        """
+        for request in requests:
+            if request.finished and self._is_running(request):
+                self._trace_request_finished(request)
+                if request.block_table is not None:
+                    request.block_table.free()
+                self.scheduler.release(request)
 
     def run(self) -> dict[str, list[int]]:
         """Step until the queue and running set drain; return each request's generated ids."""

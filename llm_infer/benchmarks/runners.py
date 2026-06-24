@@ -36,7 +36,7 @@ import torch
 from llm_infer.benchmarks.workload import Workload
 from llm_infer.model.qwen import QwenModel
 from llm_infer.profiling import TimingProfiler
-from llm_infer.serving import InferenceEngine, Request, Sampler
+from llm_infer.serving import GREEDY, InferenceEngine, Request, SamplingParams
 
 BLOCK_SIZE = 128
 
@@ -111,9 +111,12 @@ def run_llm_infer(
 ) -> RunResult:
     """This engine, flash backend, all requests in one paged cache under the batching loop.
 
-    Greedy by default; under ``workload.sampling`` each ``decode_once`` builds a fresh seeded
-    :class:`Sampler`, so every measured iteration reproduces identical tokens (the seed is
-    re-applied per iteration) — the median wall-clock measures equal work, not RNG drift.
+    Greedy by default; under ``workload.sampling`` each request carries its OWN SamplingParams
+    with a seed derived from the pinned base seed plus the request's index, so the ``G``
+    completions of a prompt are independent draws (a real GRPO group needs diverse rollouts, not
+    ``G`` identical ones), while every iteration still reproduces the same tokens (the same
+    derived seeds) — the median wall-clock measures equal work, not RNG drift. A shared seed
+    would seed every request's generator identically and collapse the group to one completion.
     """
     sampling = workload.sampling
     profiles: list[dict[str, object]] = []
@@ -122,10 +125,19 @@ def run_llm_infer(
         len(prompt) for prompts in _prompt_groups(workload).values() for prompt in prompts
     )
 
-    def make_sampler() -> Sampler | None:
+    def request_sampling(index: int) -> SamplingParams:
+        """This request's sampling: greedy when the workload is greedy, else its own seed.
+
+        The seed is ``base_seed + index`` so each request in the expanded ``prompts × G`` list
+        draws independently yet reproducibly. ``request.generator()`` seeds from the request's
+        own params, so the per-request seed (not a shared engine default) is what actually drives
+        each draw — that is the bug this closes.
+        """
         if sampling is None:
-            return None
-        return Sampler(temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed)
+            return GREEDY
+        return SamplingParams(
+            temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed + index
+        )
 
     def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
         engine = InferenceEngine(
@@ -133,10 +145,9 @@ def run_llm_infer(
             block_size=BLOCK_SIZE,
             num_blocks=num_blocks,
             device=device,
-            sampler=make_sampler(),
             profiler=profiler,
         )
-        for req in workload.requests:
+        for index, req in enumerate(workload.requests):
             engine.add_request(
                 Request(
                     req.request_id,
@@ -144,6 +155,7 @@ def run_llm_infer(
                     workload.max_new_tokens,
                     workload.eos_token_ids,
                     prefix_group_id=req.case_id if enable_prefix_caching else None,
+                    sampling=request_sampling(index),
                 )
             )
         outputs = engine.run()
@@ -203,8 +215,9 @@ def run_hf_sequential(
     """Naive baseline (the floor): HF ``generate()`` once per request, sequentially.
 
     Greedy by default; under ``workload.sampling`` it samples with the pinned temperature/
-    top-p and re-seeds (``set_seed``) at the start of every ``decode_once`` so each measured
-    iteration reproduces identical tokens.
+    top-p and re-seeds (``set_seed``) with a **per-completion seed** (base_seed + index) before
+    each request, so the G completions of a prompt are independent draws (not G identical copies)
+    yet every iteration reproduces the same tokens. Same per-completion policy as llm_infer/vLLM.
     """
     eos = sorted(workload.eos_token_ids)
     sampling = workload.sampling
@@ -222,10 +235,10 @@ def run_hf_sequential(
     def decode_once() -> dict[str, list[int]]:
         if sampling is not None:
             from transformers import set_seed
-
-            set_seed(sampling.seed)
         outputs: dict[str, list[int]] = {}
-        for req in workload.requests:
+        for index, req in enumerate(workload.requests):
+            if sampling is not None:
+                set_seed(sampling.seed + index)  # per-completion seed → independent G draws
             input_ids = torch.tensor([req.prompt_ids], device=device)
             gen = hf_model.generate(input_ids, **gen_kwargs)
             outputs[req.request_id] = gen[0, input_ids.shape[1] :].tolist()
@@ -324,11 +337,15 @@ def run_vllm(
         max_model_len=max_model_len,
         tensor_parallel_size=1,
     )
-    # Greedy (Phase D) → temperature 0. Rollout → the pinned temperature/top-p, seeded for
-    # a reproducible per-iteration token set. n=1 because the G=4 replication is already in
-    # the workload (32 independent completions), so every system decodes identical request set.
+    # Greedy (Phase D) → temperature 0, one shared deterministic params. Rollout → the pinned
+    # temperature/top-p with a **per-completion seed** (base_seed + index): a *list* of params,
+    # one per prompt, so the G completions of a prompt are independent draws, not G identical
+    # copies under a single shared seed. n=1 because the G replication is already expanded into
+    # the workload's request list. This matches the llm_infer/HF per-completion seed policy;
+    # tokens still differ across systems (different RNGs) — only WITHIN a system are the G
+    # completions independent and reproducible.
     if sampling is None:
-        params = SamplingParams(
+        request_params: SamplingParams | list[SamplingParams] = SamplingParams(
             temperature=0.0,
             max_tokens=workload.max_new_tokens,
             n=1,
@@ -336,20 +353,23 @@ def run_vllm(
             ignore_eos=False,
         )
     else:
-        params = SamplingParams(
-            temperature=sampling.temperature,
-            top_p=sampling.top_p,
-            seed=sampling.seed,
-            max_tokens=workload.max_new_tokens,
-            n=1,
-            stop_token_ids=sorted(workload.eos_token_ids),
-            ignore_eos=False,
-        )
+        request_params = [
+            SamplingParams(
+                temperature=sampling.temperature,
+                top_p=sampling.top_p,
+                seed=sampling.seed + index,
+                max_tokens=workload.max_new_tokens,
+                n=1,
+                stop_token_ids=sorted(workload.eos_token_ids),
+                ignore_eos=False,
+            )
+            for index in range(len(workload.requests))
+        ]
     prompts = [{"prompt_token_ids": list(req.prompt_ids)} for req in workload.requests]
     ids_by_index = [req.request_id for req in workload.requests]
 
     def decode_once() -> dict[str, list[int]]:
-        results = llm.generate(prompts, params, use_tqdm=False)
+        results = llm.generate(prompts, request_params, use_tqdm=False)
         # Coerce to plain Python ints: vLLM token_ids can be tensor/array scalars, which pickle
         # with a torch ref and fail to deserialize in the (torch-less) local `modal run` env.
         return {

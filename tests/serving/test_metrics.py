@@ -101,6 +101,43 @@ def test_metrics_reflect_real_traffic() -> None:
     asyncio.run(go())
 
 
+def test_stop_truncated_request_is_counted_completed() -> None:
+    """A stop-truncated request is counted as completed (finish_reason=stop), not dropped.
+
+    The async engine aborts the stream the moment the handler detects a stop, so it never sees
+    that request reach a ``finish_reason`` — its completion is recorded by the handler instead.
+    Without that, a stop-truncated request would be served but vanish from the completed counter
+    and the latency histogram, under-reporting successful traffic.
+    """
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            body = {
+                "model": "tiny-qwen",
+                "messages": [{"role": "user", "content": "hello there"}],
+                "max_tokens": 6,
+            }
+            first = await client.post("/v1/chat/completions", json=body)
+            assert first.status_code == 200
+            text = first.json()["choices"][0]["message"]["content"]
+            assert len(text) >= 3  # need a substring to stop on, with output preceding it
+
+            # A substring of the deterministic greedy output, so the stop is guaranteed to fire.
+            second = await client.post("/v1/chat/completions", json={**body, "stop": text[1:3]})
+            assert second.status_code == 200
+            assert second.json()["choices"][0]["finish_reason"] == "stop"
+
+            samples = _parse_metrics((await client.get("/metrics")).text)
+            assert samples["llm_infer_requests_total"] == 2
+            assert samples['llm_infer_requests_completed_total{finish_reason="length"}'] == 1
+            assert samples['llm_infer_requests_completed_total{finish_reason="stop"}'] == 1
+            # Both completions observed end-to-end latency — the stop one via the handler.
+            assert samples["llm_infer_request_latency_seconds_count"] == 2
+
+    asyncio.run(go())
+
+
 def test_histogram_buckets_are_cumulative() -> None:
     """A histogram's bucket counts are cumulative and the +Inf bucket equals the total count."""
     hist = Histogram("h_seconds", "help", buckets=(0.1, 1.0, 10.0))

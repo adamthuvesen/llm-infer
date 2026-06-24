@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import pytest
 
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
@@ -59,19 +60,41 @@ def test_loadgen_streaming_reports_nonzero_throughput() -> None:
     assert summary["requests"] == 6
     assert summary["ok"] == 6
     assert summary["errors"] == 0
-    # Six requests × six tokens each (greedy length cap, tiny model never emits EOS here).
-    assert summary["total_output_tokens"] == 36
-    assert summary["throughput_tok_s"] > 0
-    assert summary["per_request_tok_s_mean"] > 0
+    # Six requests × six deltas each. The tiny tokenizer decodes one token per delta, so deltas
+    # equal tokens here — but the loadgen still labels the streaming unit as deltas, not tokens.
+    assert summary["total_output"] == 36
+    assert summary["throughput_per_s"] > 0
+    assert summary["per_request_per_s_mean"] > 0
     assert summary["latency_p50"] > 0
-    # The summary table renders without error.
+    # The streaming table labels the unit as deltas, never tokens.
     table = format_summary(summary, concurrency=2, stream=True)
     assert "throughput" in table
+    assert "delta/s" in table
+    assert "tok/s" not in table
+
+
+def test_loadgen_rejects_nonpositive_concurrency() -> None:
+    """concurrency < 1 would build a zero-permit semaphore that hangs every task — reject it."""
+    with pytest.raises(ValueError, match="concurrency"):
+        asyncio.run(
+            run_load(
+                None,  # rejected before the client is touched
+                model="m",
+                prompt="p",
+                max_tokens=4,
+                concurrency=0,
+                num_requests=4,
+                stream=True,
+            )
+        )
 
 
 def test_loadgen_blocking_reports_nonzero_throughput() -> None:
     summary = _drive(stream=False)
     assert summary["ok"] == 6
     assert summary["errors"] == 0
-    assert summary["total_output_tokens"] == 36
-    assert summary["throughput_tok_s"] > 0
+    # Blocking reads true completion tokens from usage; the table labels them tok/s.
+    assert summary["total_output"] == 36
+    assert summary["throughput_per_s"] > 0
+    table = format_summary(summary, concurrency=2, stream=False)
+    assert "tok/s" in table

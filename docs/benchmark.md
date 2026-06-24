@@ -33,18 +33,20 @@ its throughput from the batched forward rather than from a tight loop.
 - **Workload** (`llm_infer/benchmarks/workload.py`): the committed golden `prompt_ids` —
   byte-identical to the correctness oracle — cycled up to `num_requests`. Replication is
   fair because vLLM **prefix caching is pinned off**: every system recomputes every prefill.
-- **Agreement vs fp32 truth (transparency, not suppression).** The reference is the **fp32
+- **Agreement vs fp32 truth (the throughput gate).** The reference is the **fp32
   full-recompute oracle truth** (Phase A) — *not* bf16 HF `generate`, which itself diverges
   from truth at real margins (the documented step-32 case), so using it as the reference
   wrongly fails any backend that is *more* faithful to fp32. Truth is computed by running each
   unique prompt through the engine on the fp32 model (cached fp32 == full-recompute, Phase B).
   Each system's bf16 output is compared to truth under a **bf16-sized tolerance (~0.1**, not
   the fp32 1e-3: bf16 noise at these logit magnitudes is ~0.05–0.1). The result reports each
-  system's agreement profile — exact / genuine-tie / non-tie divergence — as a transparency
-  annotation. All systems decode the **same token count** (equal work) and are valid greedy
-  decoders (each's correctness established by its own oracle: `llm_infer` by the Phase A/B/C
-  suite), so **tok/s is reported for every system**; a genuinely broken backend would surface
-  as a gross early divergence in the profile.
+  system's agreement profile — exact / genuine-tie / non-tie divergence. Per the project
+  doctrine (*validate before you brag*), this profile is the **throughput gate, not a mere
+  annotation**: a system whose bf16 output diverges from truth beyond genuine ties **reports no
+  tok/s and no speedup** — only its token count and wall-clock, which stay as measured facts.
+  Throughput is reported solely for systems that agree with truth, so a broken backend can never
+  post a speed number; its divergence shows in the agreement column (`report.throughput_rows`
+  enforces this via `agrees_with_truth`).
 - **Timing**: `warmup` un-measured iterations (CUDA graphs / allocator settle), then `iters`
   measured iterations with a CUDA sync at each boundary. Greedy is deterministic, so tokens
   are identical across iterations and only wall-clock varies. Throughput = total scored

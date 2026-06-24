@@ -41,9 +41,7 @@ def normalize_at_eos(token_ids: Iterable[int], eos_token_ids: frozenset[int]) ->
     return out
 
 
-def total_output_tokens(
-    outputs: dict[str, list[int]], eos_token_ids: frozenset[int]
-) -> int:
+def total_output_tokens(outputs: dict[str, list[int]], eos_token_ids: frozenset[int]) -> int:
     """Sum of the scored continuation lengths over all requests."""
     return sum(len(normalize_at_eos(ids, eos_token_ids)) for ids in outputs.values())
 
@@ -56,11 +54,13 @@ def throughput_rows(
     """One table row per system: median wall-clock, total tokens, tok/s, speedup vs baseline.
 
     ``results`` is a list of ``{"system", "outputs", "per_iter_seconds", "agrees_with_truth"}``.
-    Every system decodes the *same* token count (equal work), so tok/s is reported for all —
-    they are all valid greedy decoders (each's correctness established by its own oracle).
-    ``agrees_with_truth`` is a transparency annotation (does the bf16 output match fp32
-    full-recompute truth except at genuine ties), not a tok/s suppressor; a genuinely broken
-    backend shows up as a gross divergence in the agreement profile.
+    Honesty doctrine (``docs/scoping.md``: *"a backend that fails the oracle reports no tok/s"*):
+    a system whose ``agrees_with_truth`` is explicitly ``False`` — its bf16 output diverged from
+    the fp32 full-recompute truth beyond genuine ties — gets ``tokens_per_second`` and
+    ``speedup_vs_baseline`` of ``None``, so a wrong backend can never post a speed number. Its
+    token count and wall-clock stay (they are measured facts), and the agreement column shows the
+    divergence. ``agrees_with_truth`` of ``None`` means not oracle-checked here (e.g. the
+    reference baseline, which is the truth) and is reported normally.
     """
     eos = frozenset(eos_token_ids)
     rows: list[dict] = []
@@ -70,6 +70,9 @@ def throughput_rows(
         median_s = statistics.median(per_iter) if per_iter else float("nan")
         tokens = total_output_tokens(r["outputs"], eos)
         tps = (tokens / median_s) if median_s and median_s > 0 else None
+        # A backend that fails the oracle reports no throughput (and so no speedup).
+        if r.get("agrees_with_truth") is False:
+            tps = None
         if r["system"] == baseline_system and tps is not None:
             baseline_tps = tps
         rows.append(

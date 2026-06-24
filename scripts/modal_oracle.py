@@ -88,8 +88,9 @@ def smoke() -> str:
     print(f"device: {torch.cuda.get_device_name(0)}; flash-attn imported OK")
 
     fixture = json.loads(
-        (Path(REMOTE_ROOT) / "tests/correctness/goldens/qwen2_5_coder_3b_instruct_cot.json")
-        .read_text(encoding="utf-8")
+        (
+            Path(REMOTE_ROOT) / "tests/correctness/goldens/qwen2_5_coder_3b_instruct_cot.json"
+        ).read_text(encoding="utf-8")
     )
     case = fixture["cases"][0]
     eos = frozenset(fixture["decoding"]["eos_token_ids"])

@@ -17,6 +17,14 @@ Cancellation is cooperative: a disconnected client sets the stream's abort flag;
 sees it at the next step boundary, finishes the engine request cleanly, and frees its KV.
 The loop is the *only* thread that touches the engine, so there are no locks on engine
 state — just the two queue boundaries.
+
+Slow-consumer policy (deliberate, not an oversight): the per-request queue is unbounded, but a
+request emits at most ``max_new_tokens`` tokens before it finishes, so its queue is bounded by
+that — there is no unbounded growth. A consumer that reads slowly does **not** throttle the
+engine; the loop runs the request to completion and the tokens wait in the queue. A consumer
+that goes away entirely is the cancellation path above (its KV is freed promptly). True
+cross-thread backpressure — pausing decode for a live-but-slow reader — is out of scope for this
+engine; the bound above keeps memory finite without it.
 """
 
 from __future__ import annotations
@@ -30,8 +38,10 @@ from dataclasses import dataclass, field
 
 import torch
 
+from llm_infer.scheduler.scheduler import blocks_for_length
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
+from llm_infer.serving.sampler import GREEDY, SamplingParams
 from llm_infer.serving.server.metrics import ServerMetrics
 
 
@@ -53,6 +63,9 @@ class _Stream:
     max_new_tokens: int
     aborted: bool = False
     eos_token_ids: frozenset[int] = field(default_factory=frozenset)
+    # Set when the engine refuses this submission on the background thread; the consumer
+    # re-raises it so the failure surfaces loudly instead of hanging on an empty stream.
+    error: Exception | None = None
 
 
 class AsyncInferenceEngine:
@@ -80,6 +93,9 @@ class AsyncInferenceEngine:
         self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
         self._ids = itertools.count()
+        # Set if the engine step loop dies: the engine is then unhealthy, every active stream is
+        # failed, and new submissions are rejected fast instead of hanging forever on the queue.
+        self._fatal: BaseException | None = None
         if metrics is not None:
             self._bind_gauges(metrics)
 
@@ -99,6 +115,22 @@ class AsyncInferenceEngine:
     def next_request_id(self) -> str:
         """A process-unique request id; the engine rejects duplicates loudly."""
         return f"req-{next(self._ids)}"
+
+    def assert_admissible(self, *, prompt_len: int, max_new_tokens: int) -> None:
+        """Reject a request too large for the pool *before* it reaches the engine thread.
+
+        The scheduler enforces the same worst-case-fits bound in ``add()``, but that runs on the
+        background loop where a raise would kill the engine for every client. Checking the request
+        shape here lets the handler return a clean 4xx and keeps the one loop alive. Raises
+        ``ValueError`` (the handler maps it to a 400) when even an empty pool could not hold it.
+        """
+        scheduler = self._engine.scheduler
+        need = blocks_for_length(prompt_len + max_new_tokens - 1, scheduler.block_size)
+        if need > scheduler.num_blocks:
+            raise ValueError(
+                f"request needs up to {need} KV blocks but the pool holds {scheduler.num_blocks}; "
+                "reduce the prompt length or max_tokens"
+            )
 
     def _bind_gauges(self, metrics: ServerMetrics) -> None:
         """Point the live-read gauges at real engine/scheduler/allocator state.
@@ -127,12 +159,14 @@ class AsyncInferenceEngine:
         prompt_ids: list[int],
         max_new_tokens: int,
         eos_token_ids: frozenset[int],
+        sampling: SamplingParams = GREEDY,
     ) -> AsyncIterator[TokenStreamItem]:
         """Yield generated tokens for one request until it finishes or the caller cancels.
 
-        Submits the request to the loop, then drains its asyncio queue. If the consumer is
-        cancelled (client disconnect), the ``finally`` aborts the request so the loop stops
-        decoding it and frees its KV — no orphaned work keeps running.
+        Submits the request to the loop (carrying its per-request ``sampling``), then drains its
+        asyncio queue. If the consumer is cancelled (client disconnect), the ``finally`` aborts
+        the request so the loop stops decoding it and frees its KV — no orphaned work keeps
+        running.
         """
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[TokenStreamItem | None] = asyncio.Queue()
@@ -148,8 +182,11 @@ class AsyncInferenceEngine:
             prompt_ids=list(prompt_ids),
             max_new_tokens=max_new_tokens,
             eos_token_ids=eos_token_ids,
+            sampling=sampling,
         )
         with self._lock:
+            if self._fatal is not None:
+                raise RuntimeError("inference engine is no longer running") from self._fatal
             self._submissions.append((request, stream))
         self._wake.set()
 
@@ -160,7 +197,9 @@ class AsyncInferenceEngine:
         try:
             while True:
                 item = await queue.get()
-                if item is None:  # loop signalled end-of-stream
+                if item is None:  # loop signalled end-of-stream (or refused the submission)
+                    if stream.error is not None:
+                        raise stream.error
                     return
                 if self._metrics is not None:
                     self._metrics.generated_tokens_total.inc()
@@ -180,24 +219,56 @@ class AsyncInferenceEngine:
     # --- background thread: the only place that touches the engine ---------------------
 
     def _run_loop(self) -> None:
-        while not self._shutdown.is_set():
-            self._drain_submissions()
-            self._apply_aborts()
-            if not self._engine.scheduler.has_work():
-                # Nothing to do: block until a submission or abort wakes us, cheap and idle-quiet.
-                self._wake.wait(timeout=self._idle_sleep_s)
-                self._wake.clear()
-                continue
-            result = self._engine.step()
-            self._dispatch(result)
+        try:
+            while not self._shutdown.is_set():
+                self._drain_submissions()
+                self._apply_aborts()
+                if not self._engine.scheduler.has_work():
+                    # Nothing to do: block until a submission or abort wakes us, idle-quiet.
+                    self._wake.wait(timeout=self._idle_sleep_s)
+                    self._wake.clear()
+                    continue
+                result = self._engine.step()
+                self._dispatch(result)
+        except BaseException as exc:  # noqa: BLE001 — contain a dead loop, never hang clients
+            self._fail_all(exc)
+
+    def _fail_all(self, exc: BaseException) -> None:
+        """The step loop died: mark the engine unhealthy and fail everyone instead of hanging.
+
+        Every in-flight stream is closed carrying ``exc`` (its consumer re-raises it), every
+        queued-but-undrained submission is failed the same way, and ``_fatal`` is set so later
+        submissions are rejected fast in :meth:`stream`. Runs on the (now-exiting) loop thread,
+        the only one that touches ``_streams``; ``_submissions``/``_fatal`` are shared with handler
+        threads, so those are touched under the lock.
+        """
+        for stream in list(self._streams.values()):
+            stream.error = exc
+            self._enqueue(stream, None)
+        self._streams.clear()
+        with self._lock:
+            self._fatal = exc
+            pending = self._submissions
+            self._submissions = []
+        for _, stream in pending:
+            stream.error = exc
+            self._enqueue(stream, None)
 
     def _drain_submissions(self) -> None:
         with self._lock:
             pending = self._submissions
             self._submissions = []
         for request, stream in pending:
+            try:
+                self._engine.add_request(request)
+            except Exception as exc:  # noqa: BLE001 — a bad submission must not kill the loop
+                # Preflight (assert_admissible) already rejects the common oversized case with a
+                # clean 4xx, so reaching here means an unexpected engine rejection. Fail just this
+                # stream — the consumer re-raises ``error`` — and keep serving every other client.
+                stream.error = exc
+                self._enqueue(stream, None)
+                continue
             self._streams[request.request_id] = stream
-            self._engine.add_request(request)
 
     def _apply_aborts(self) -> None:
         """Drop streams whose consumer disconnected, freeing their engine state.

@@ -9,7 +9,7 @@ from llm_infer.serving import (
     InferenceEngine,
     PromptLookupDraft,
     Request,
-    Sampler,
+    SamplingParams,
     SpeculativeDecodingConfig,
 )
 
@@ -170,10 +170,12 @@ class NoSpecVerifierToyModel:
         positions = [table.length for table in tables]
         for table in tables:
             table.reserve(1)
-        key = torch.stack([
-            torch.tensor([[float(pos), float(token)]], dtype=torch.float32)
-            for pos, token in zip(positions, tokens.tolist(), strict=True)
-        ])
+        key = torch.stack(
+            [
+                torch.tensor([[float(pos), float(token)]], dtype=torch.float32)
+                for pos, token in zip(positions, tokens.tolist(), strict=True)
+            ]
+        )
         cache.write_many(tables, layer=0, positions=positions, key=key, value=key + 20.0)
         for table, pos in zip(tables, positions, strict=True):
             table.length = pos + 1
@@ -248,6 +250,39 @@ def test_rejected_draft_falls_back_to_normal_next_token() -> None:
     assert model.decode_tokens_calls == 1
 
 
+def test_speculative_rejection_frees_rejected_draft_blocks() -> None:
+    """A partly-rejected draft's reserved blocks return to the pool, not retained until finish.
+
+    Verification reserves blocks for ``last_token + draft``; only the accepted prefix plus one
+    recovery token are kept and ``length`` rolls back. The rejected tail's freshly-allocated
+    blocks must be freed (trimmed), or the cache leaks pages across speculative steps. We step a
+    rejection-prone run and assert the table never holds more blocks than its length needs.
+    """
+    prompt = [1, 2, 3, 1, 2]
+    script = [3, 8, 9, 8, 9, 8, 9]  # the [1,2,3]-lookup draft mismatches 8/9 → repeated rejection
+    block_size = 2  # small blocks so a rejected draft's reserve crosses a boundary (a real leak)
+    model = ScriptedToyModel({tuple(prompt): script})
+    engine = InferenceEngine(
+        model,
+        block_size=block_size,
+        num_blocks=32,
+        speculative=SpeculativeDecodingConfig(max_draft_tokens=2, max_ngram_size=3),
+    )
+    req = Request("r", prompt, len(script), frozenset({63}))
+    engine.add_request(req)
+
+    while engine.scheduler.has_work():
+        engine.step()
+        if req.block_table is not None and not req.finished:
+            expected = -(-req.block_table.length // block_size)  # ceil(length / block_size)
+            assert len(req.block_table.blocks) == expected, (
+                f"retained {len(req.block_table.blocks) - expected} rejected draft block(s)"
+            )
+
+    assert model.decode_tokens_calls >= 1  # speculation actually ran
+    assert req.generated == script  # and stayed token-exact
+
+
 def test_no_draft_uses_normal_decode_path() -> None:
     prompt = [10, 11, 12]
     script = [13, 14, 15]
@@ -269,21 +304,52 @@ def test_eos_in_accepted_draft_stops_before_extra_verifier_token() -> None:
     assert model.decode_tokens_calls == 1
 
 
-def test_speculative_decoding_rejects_sampled_sampler() -> None:
-    model = ScriptedToyModel({(1, 2, 1): [2, 1]})
+def test_sampled_request_skips_the_speculative_path() -> None:
+    """A non-greedy request never takes the greedy-verifier speculative path; it samples per-row.
 
-    try:
-        InferenceEngine(
-            model,
-            block_size=4,
-            num_blocks=4,
-            sampler=Sampler(temperature=1.0),
-            speculative=SpeculativeDecodingConfig(),
-        )
-    except ValueError as exc:
-        assert "supports only greedy" in str(exc)
-    else:
-        raise AssertionError("sampled speculative decoding should be rejected")
+    The guard is per request, not engine-wide: with speculation enabled and the engine default
+    sampling (temperature > 0), the verifier (`decode_tokens`) is never called. The toy logits are
+    one-hot, so the sampled draw still follows the script — output equals the greedy baseline.
+    """
+    prompt = [1, 2, 3, 1, 2]
+    script = [3, 1, 2, 9]
+    baseline, _ = _run(prompt=prompt, script=script, speculative=False)
+
+    model = ScriptedToyModel({tuple(prompt): script})
+    engine = InferenceEngine(
+        model,
+        block_size=4,
+        num_blocks=8,
+        default_sampling=SamplingParams(temperature=1.0),
+        speculative=SpeculativeDecodingConfig(max_draft_tokens=2, max_ngram_size=3),
+    )
+    engine.add_request(Request("r", prompt, len(script), frozenset({63})))
+    output = engine.run()["r"]
+
+    assert output == baseline == script
+    assert model.decode_tokens_calls == 0
+
+
+def test_greedy_request_still_speculates_under_a_sampled_default() -> None:
+    """An explicitly-greedy request still takes the speculative path even if the default samples."""
+    prompt = [1, 2, 3, 1, 2]
+    script = [3, 1, 2, 9]
+
+    model = ScriptedToyModel({tuple(prompt): script})
+    engine = InferenceEngine(
+        model,
+        block_size=4,
+        num_blocks=8,
+        default_sampling=SamplingParams(temperature=1.0),
+        speculative=SpeculativeDecodingConfig(max_draft_tokens=2, max_ngram_size=3),
+    )
+    engine.add_request(
+        Request("r", prompt, len(script), frozenset({63}), sampling=SamplingParams(temperature=0.0))
+    )
+    output = engine.run()["r"]
+
+    assert output == script
+    assert model.decode_tokens_calls == 1
 
 
 def test_default_chunked_prefix_caching_does_not_call_speculative_verifier() -> None:

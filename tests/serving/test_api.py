@@ -44,16 +44,20 @@ class TinyTokenizer:
 
     def apply_chat_template(
         self, messages: list[dict], add_generation_prompt: bool = True, tokenize: bool = True
-    ) -> list[int]:
+    ) -> dict[str, list[int]]:
+        # Mirror a real HF tokenizer: tokenize=True yields a BatchEncoding-shaped mapping
+        # ({"input_ids": [...]}), NOT a bare list — so the server must read input_ids rather
+        # than iterate the mapping (which would yield its string keys). This pins that contract.
         text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         if add_generation_prompt:
             text += "\nassistant:"
-        return self.encode(text)
+        ids = self.encode(text)
+        return {"input_ids": ids, "attention_mask": [1] * len(ids)}
 
 
-def _build_app():
+def _build_app(*, block_size: int = 8, num_blocks: int = 64):
     model = _tiny_qwen()
-    engine = InferenceEngine(model, block_size=8, num_blocks=64)
+    engine = InferenceEngine(model, block_size=block_size, num_blocks=num_blocks)
     async_engine = AsyncInferenceEngine(engine)
     return create_app(
         async_engine=async_engine,
@@ -70,6 +74,54 @@ def _client(app) -> httpx.AsyncClient:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_engine_step_failure_fails_streams_instead_of_hanging() -> None:
+    """If the background step loop dies, in-flight streams fail and new ones are rejected fast.
+
+    Without a fatal boundary the loop thread would die silently and every consumer would block
+    forever on its queue. The loop now contains the failure: active streams re-raise the engine
+    error, and later submissions are rejected immediately instead of hanging.
+    """
+
+    async def go() -> None:
+        engine = InferenceEngine(_tiny_qwen(), block_size=8, num_blocks=64)
+
+        def boom():
+            raise RuntimeError("engine exploded")
+
+        engine.step = boom  # the loop dies on its first real step
+        async_engine = AsyncInferenceEngine(engine)
+        async_engine.start()
+        try:
+            stream = async_engine.stream(
+                request_id="r0",
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=5,
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            with pytest.raises(RuntimeError, match="engine exploded"):
+                async for _ in stream:
+                    pass
+
+            # The loop is dead: a new submission is rejected fast, not left to hang.
+            for _ in range(200):
+                if async_engine._fatal is not None:
+                    break
+                await asyncio.sleep(0.01)
+            later = async_engine.stream(
+                request_id="r1",
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=5,
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            with pytest.raises(RuntimeError, match="no longer running"):
+                async for _ in later:
+                    pass
+        finally:
+            async_engine.stop()
+
+    _run(go())
 
 
 def test_cancellation_aborts_engine_request() -> None:
@@ -490,8 +542,7 @@ def test_responses_streaming_matches_non_streaming() -> None:
         {"model": "tiny-qwen", "input": "hi", "store": True},
         {"model": "tiny-qwen", "input": "hi", "background": True},
         {"model": "tiny-qwen", "input": "hi", "n": 2},
-        {"model": "tiny-qwen", "input": "hi", "temperature": 0.9},
-        {"model": "tiny-qwen", "input": "hi", "frequency_penalty": 0.1},
+        {"model": "tiny-qwen", "input": "hi", "temperature": -1.0},  # out of range -> 400
     ],
 )
 def test_responses_unsupported_fields_rejected(payload: dict) -> None:
@@ -500,6 +551,29 @@ def test_responses_unsupported_fields_rejected(payload: dict) -> None:
         async with app.router.lifespan_context(app), _client(app) as client:
             resp = await client.post("/v1/responses", json=payload)
             assert 400 <= resp.status_code < 500
+
+    _run(go())
+
+
+def test_responses_per_request_sampling_is_honored() -> None:
+    """The Responses endpoint now serves per-request temperature/seed without a 400."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "tiny-qwen",
+                    "input": "sample me",
+                    "max_output_tokens": 5,
+                    "temperature": 0.9,
+                    "frequency_penalty": 0.1,
+                    "seed": 2,
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["output_tokens"] == 5
 
     _run(go())
 
@@ -517,10 +591,13 @@ def _chat(**extra) -> dict:
         (_chat(n=2), 422),
         # logprobs: not produced.
         (_chat(logprobs=True), 422),
-        # unknown field: extra=forbid -> 422 from validation.
-        (_chat(frequency_penalty=0.5), 422),
-        # temperature the fixed greedy sampler cannot honor.
-        (_chat(temperature=0.7), 400),
+        # genuinely unknown field: extra=forbid -> 422 from validation.
+        (_chat(logit_bias={"1": 1.0}), 422),
+        # out-of-range sampling: mapped to SamplingParams, which rejects loudly as 400.
+        (_chat(temperature=-1.0), 400),
+        (_chat(top_p=2.0), 400),
+        (_chat(top_k=-3), 400),
+        (_chat(presence_penalty=5.0), 400),
     ],
 )
 def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
@@ -529,5 +606,122 @@ def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
         async with app.router.lifespan_context(app), _client(app) as client:
             resp = await client.post("/v1/chat/completions", json=payload)
             assert resp.status_code == status
+
+    _run(go())
+
+
+def test_per_request_temperature_is_honored_no_400() -> None:
+    """A non-greedy request is now served (no fixed-sampler 400) and returns a completion."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json=_chat(temperature=0.8, top_p=0.9, top_k=10, seed=1, max_tokens=5),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["completion_tokens"] == 5
+
+    _run(go())
+
+
+def test_concurrent_requests_use_their_own_sampling() -> None:
+    """Two concurrent clients with different temperatures are each served their own sampling.
+
+    A greedy request run concurrently with a sampled one must match the same greedy request run
+    alone — proof the sampled batchmate did not perturb it — while the sampled request still
+    returns a valid completion. This is the per-request-sampling replacement for the old 400.
+    """
+
+    async def content(client, **sampling) -> str:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json=_chat(max_tokens=6, stream=True, **sampling),
+        ) as resp:
+            assert resp.status_code == 200
+            raw = ""
+            async for piece in resp.aiter_text():
+                raw += piece
+        return "".join(
+            c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
+        )
+
+    async def go() -> None:
+        # Greedy alone, as the reference.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            greedy_alone = await content(client)
+
+        # Greedy + a hot sampled request concurrently on one shared engine.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            greedy_batched, sampled = await asyncio.gather(
+                content(client),
+                content(client, temperature=1.5, seed=5),
+            )
+        assert greedy_batched == greedy_alone
+        assert isinstance(sampled, str)
+
+    _run(go())
+
+
+def test_oversized_request_is_rejected_and_engine_survives() -> None:
+    """A request too large for the KV pool returns a clean 400 and never kills the engine loop.
+
+    Regression: before the preflight, an oversized prompt raised inside the background engine
+    thread (the scheduler's worst-case-fits rejection), killing the one loop and hanging every
+    client. Now the handler rejects it with a 400, and a normal request on the same app is still
+    served — proof the loop stayed alive.
+    """
+
+    async def go() -> None:
+        # Pool holds 2 blocks of 8 → at most 16 cached positions; ask for far more than that.
+        app = _build_app(block_size=8, num_blocks=2)
+        async with app.router.lifespan_context(app), _client(app) as client:
+            oversized = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 1000},
+            )
+            assert oversized.status_code == 400
+            assert "block" in oversized.json()["detail"].lower()
+
+            # The engine loop is still alive: a request that fits the pool is served normally.
+            ok = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 4},
+            )
+            assert ok.status_code == 200
+            assert ok.json()["usage"]["completion_tokens"] == 4
+
+    _run(go())
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        (
+            "/v1/chat/completions",
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 3},
+        ),
+        ("/v1/completions", {"model": "gpt-4o", "prompt": "hi", "max_tokens": 3}),
+        ("/v1/responses", {"model": "gpt-4o", "input": "hi", "max_output_tokens": 3}),
+    ],
+)
+def test_unknown_model_is_404_not_a_silent_substitution(path: str, body: dict) -> None:
+    """A model id this server does not serve is a 404 — never a 200 echoing a model we did not run.
+
+    Regression: the handlers used to copy ``request.model`` into the response, so a request for
+    ``gpt-4o`` returned 200 while tiny-Qwen actually served it. The server now validates against
+    the one served id and reports what truly ran.
+    """
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(path, json=body)
+            assert resp.status_code == 404, f"{path} accepted an unknown model"
+            assert "gpt-4o" in resp.json()["detail"]
 
     _run(go())

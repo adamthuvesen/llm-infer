@@ -52,6 +52,25 @@ def test_release_frees_budget_for_the_next_request() -> None:
     assert admitted == ["c"]  # a's freed budget lets c in
 
 
+def test_preemption_victim_skips_finished_requests() -> None:
+    """A finished request is never a preemption victim — evicting it would discard a completed
+    output and raise (recompute refuses a finished request)."""
+    sched = Scheduler(num_blocks=8, block_size=4, preemption=True)
+    reqs = {rid: _request(rid) for rid in ("a", "b", "c")}
+    for req in reqs.values():
+        sched.add(req)
+    sched.admit(free_blocks=8)  # a, b, c all running, admitted in that order
+    assert [r.request_id for r in sched.running] == ["a", "b", "c"]
+
+    # The LIFO victim would be the newest-admitted (c); mark it finished — it must be skipped.
+    reqs["c"].finished = True
+    assert sched.preemption_victim() is reqs["b"]
+
+    # With b also finished and a excluded as the block-needer, there is no eligible victim.
+    reqs["b"].finished = True
+    assert sched.preemption_victim(exclude=reqs["a"]) is None
+
+
 def test_admission_is_head_of_line() -> None:
     """A big request at the front blocks smaller ones behind it (FIFO, no reordering)."""
     sched = Scheduler(num_blocks=2, block_size=4)

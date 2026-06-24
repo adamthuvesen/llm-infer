@@ -46,7 +46,18 @@ export function parseJsonlTrace(text) {
     sequences.add(event.sequence);
   }
 
-  return [...events].sort((a, b) => a.sequence - b.sequence);
+  const sorted = [...events].sort((a, b) => a.sequence - b.sequence);
+  // Playback assumes contiguous sequence ids — the recorder emits a monotonic per-event counter
+  // with no skips. A gap means the trace lost a line, so the timeline would silently misrepresent
+  // the run (missing steps, wrong durations); reject it rather than render a false story.
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (sorted[index].sequence !== sorted[index - 1].sequence + 1) {
+      throw new Error(
+        `Sequence gap between ${sorted[index - 1].sequence} and ${sorted[index].sequence}; ids must be contiguous.`,
+      );
+    }
+  }
+  return sorted;
 }
 
 export function buildTraceModel(events) {
@@ -337,6 +348,26 @@ function validateEvent(event, lineNumber) {
   }
   if (event.event === "block_allocated" || event.event === "block_freed") {
     validateBlockEvent(event, lineNumber);
+  }
+  if (event.event === "decode_step") {
+    validateDecodeStep(event, lineNumber);
+  }
+}
+
+function validateDecodeStep(event, lineNumber) {
+  if (!Array.isArray(event.request_ids) || event.request_ids.length === 0) {
+    throw new Error(`Line ${lineNumber} decode_step must have a non-empty request_ids array.`);
+  }
+  if (!Array.isArray(event.token_ids) || event.token_ids.some((id) => !Number.isInteger(id))) {
+    throw new Error(`Line ${lineNumber} decode_step token_ids must be an array of integers.`);
+  }
+  // A multi-request fused decode emits exactly one token per request; a single request may emit
+  // several (a speculative burst). Either way the arrays must line up, or the per-request token
+  // distribution (distributeDecode) would silently mis-assign tokens.
+  if (event.request_ids.length > 1 && event.token_ids.length !== event.request_ids.length) {
+    throw new Error(
+      `Line ${lineNumber} decode_step with ${event.request_ids.length} requests must carry one token_id per request.`,
+    );
   }
 }
 

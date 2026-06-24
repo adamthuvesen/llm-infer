@@ -28,10 +28,7 @@ DEFAULT_FIXTURE = (
     / "qwen2_5_coder_3b_instruct_cot.json"
 )
 ROLLOUT_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "tests"
-    / "fixtures"
-    / "rollout_grpo_s0_spider_dev.json"
+    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "rollout_grpo_s0_spider_dev.json"
 )
 
 

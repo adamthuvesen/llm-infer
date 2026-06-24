@@ -3,9 +3,16 @@
 A load generator, not a benchmark harness: it points async ``httpx`` at a live server's
 OpenAI-compatible ``/v1/chat/completions`` endpoint, fires ``--concurrency`` requests at a
 time until ``--num-requests`` have run, and reports the numbers a serving demo needs —
-per-request and aggregate tokens/s, TTFT (p50/p99), end-to-end latency (p50/p99), total
+per-request and aggregate output rate, TTFT (p50/p99), end-to-end latency (p50/p99), total
 throughput, and an error count. Streaming is the default (so TTFT is the time to the first
 SSE delta); ``--no-stream`` measures a single blocking call where TTFT equals total latency.
+
+Output rate is measured honestly per mode: blocking reads true completion tokens from the
+response ``usage`` block, while streaming counts **content deltas** (one per SSE chunk). A delta
+equals one token only for a tokenizer that decodes one token per step; against a real tokenizer
+a delta can carry several characters or be held back, so the streaming rate is reported in
+deltas/s, not tokens/s. (The server emits no streaming ``usage``, so the client cannot recover
+true token counts from an SSE stream without it.)
 
 This talks to the server over HTTP exactly as any OpenAI client would; it does not import the
 engine. Start a server first (``python -m llm_infer.serve``) and point ``--base-url`` at it, or
@@ -32,11 +39,17 @@ import httpx
 
 @dataclass
 class RequestResult:
-    """One completed request's measured timings, or its error."""
+    """One completed request's measured timings, plus its output size.
+
+    ``output_count`` is true completion tokens in blocking mode (from the response ``usage``) but
+    **content deltas** in streaming mode — see the module docstring. Aggregation keeps them in
+    this one field; the summary labels the unit per mode so nothing is reported as tokens that
+    is not.
+    """
 
     ttft_s: float | None
     latency_s: float
-    output_tokens: int
+    output_count: int
     error: str | None = None
 
     @property
@@ -44,10 +57,11 @@ class RequestResult:
         return self.error is None
 
     @property
-    def tokens_per_second(self) -> float | None:
+    def output_per_second(self) -> float | None:
+        """Output units per second for this request (tokens blocking, deltas streaming)."""
         if not self.ok or self.latency_s <= 0:
             return None
-        return self.output_tokens / self.latency_s
+        return self.output_count / self.latency_s
 
 
 def _chat_payload(model: str, prompt: str, max_tokens: int, stream: bool) -> dict:
@@ -60,10 +74,14 @@ def _chat_payload(model: str, prompt: str, max_tokens: int, stream: bool) -> dic
 
 
 async def _run_streaming(client: httpx.AsyncClient, payload: dict) -> RequestResult:
-    """One streaming request: TTFT is the first content delta, tokens counted from deltas."""
+    """One streaming request: TTFT is the first content delta; output measured as content deltas.
+
+    A delta is one SSE chunk of decodable text, not necessarily one token (see module docstring),
+    so the count is reported as deltas, not tokens.
+    """
     start = time.perf_counter()
     ttft: float | None = None
-    output_tokens = 0
+    deltas = 0
     async with client.stream("POST", "/v1/chat/completions", json=payload) as resp:
         if resp.status_code != 200:
             body = (await resp.aread()).decode("utf-8", "replace")[:200]
@@ -80,20 +98,20 @@ async def _run_streaming(client: httpx.AsyncClient, payload: dict) -> RequestRes
             if delta.get("content"):
                 if ttft is None:
                     ttft = time.perf_counter() - start
-                output_tokens += 1
-    return RequestResult(ttft, time.perf_counter() - start, output_tokens)
+                deltas += 1
+    return RequestResult(ttft, time.perf_counter() - start, deltas)
 
 
 async def _run_blocking(client: httpx.AsyncClient, payload: dict) -> RequestResult:
-    """One non-streaming request: TTFT equals total latency, tokens from the usage block."""
+    """One non-streaming request: TTFT equals total latency, true tokens from the usage block."""
     start = time.perf_counter()
     resp = await client.post("/v1/chat/completions", json=payload)
     latency = time.perf_counter() - start
     if resp.status_code != 200:
         return RequestResult(None, latency, 0, error=f"HTTP {resp.status_code}: {resp.text[:200]}")
     body = resp.json()
-    output_tokens = body.get("usage", {}).get("completion_tokens", 0)
-    return RequestResult(latency, latency, output_tokens)
+    completion_tokens = body.get("usage", {}).get("completion_tokens", 0)
+    return RequestResult(latency, latency, completion_tokens)
 
 
 async def run_load(
@@ -112,6 +130,11 @@ async def run_load(
     streams, which is what makes continuous batching visible. The returned wall-clock is the span
     from the first request launched to the last one finished — the basis for total throughput.
     """
+    if concurrency < 1:
+        # A zero-permit semaphore would block every task forever; reject it loudly.
+        raise ValueError(f"concurrency must be >= 1; got {concurrency}")
+    if num_requests < 1:
+        raise ValueError(f"num_requests must be >= 1; got {num_requests}")
     payload = _chat_payload(model, prompt, max_tokens, stream)
     run_one = _run_streaming if stream else _run_blocking
     semaphore = asyncio.Semaphore(concurrency)
@@ -139,39 +162,50 @@ def _percentile(values: list[float], pct: float) -> float:
 
 
 def summarize(results: list[RequestResult], wall_s: float) -> dict[str, object]:
-    """Aggregate per-request timings into the headline serving numbers."""
+    """Aggregate per-request timings into the headline serving numbers.
+
+    ``total_output`` and the rates are in the per-mode output unit (true tokens when blocking,
+    content deltas when streaming); :func:`format_summary` labels which.
+    """
     ok = [r for r in results if r.ok]
     errors = len(results) - len(ok)
-    total_tokens = sum(r.output_tokens for r in ok)
+    total_output = sum(r.output_count for r in ok)
     ttfts = [r.ttft_s for r in ok if r.ttft_s is not None]
     latencies = [r.latency_s for r in ok]
-    per_req_tps = [tps for r in ok if (tps := r.tokens_per_second) is not None]
+    per_req_rates = [rate for r in ok if (rate := r.output_per_second) is not None]
     return {
         "requests": len(results),
         "ok": len(ok),
         "errors": errors,
         "wall_s": wall_s,
-        "total_output_tokens": total_tokens,
-        "throughput_tok_s": (total_tokens / wall_s) if wall_s > 0 else float("nan"),
+        "total_output": total_output,
+        "throughput_per_s": (total_output / wall_s) if wall_s > 0 else float("nan"),
         "ttft_p50": _percentile(ttfts, 50) if ttfts else float("nan"),
         "ttft_p99": _percentile(ttfts, 99) if ttfts else float("nan"),
         "latency_p50": _percentile(latencies, 50) if latencies else float("nan"),
         "latency_p99": _percentile(latencies, 99) if latencies else float("nan"),
-        "per_request_tok_s_mean": statistics.fmean(per_req_tps) if per_req_tps else float("nan"),
+        "per_request_per_s_mean": (
+            statistics.fmean(per_req_rates) if per_req_rates else float("nan")
+        ),
     }
 
 
 def format_summary(summary: dict[str, object], *, concurrency: int, stream: bool) -> str:
-    """A clean fixed-width summary table for the terminal."""
+    """A clean fixed-width summary table for the terminal.
+
+    The output unit is labeled per mode — ``tok`` (true tokens from ``usage``) when blocking,
+    ``delta`` (SSE content deltas) when streaming — so streaming numbers are never called tokens.
+    """
     mode = "streaming" if stream else "blocking"
+    unit = "delta" if stream else "tok"
     rows = [
         ("requests (ok/total)", f"{summary['ok']}/{summary['requests']}"),
         ("errors", f"{summary['errors']}"),
         ("concurrency", f"{concurrency} ({mode})"),
         ("wall-clock", f"{summary['wall_s']:.3f} s"),
-        ("output tokens", f"{summary['total_output_tokens']}"),
-        ("throughput", f"{summary['throughput_tok_s']:.1f} tok/s"),
-        ("per-request tok/s (mean)", f"{summary['per_request_tok_s_mean']:.1f}"),
+        (f"output {unit}s", f"{summary['total_output']}"),
+        ("throughput", f"{summary['throughput_per_s']:.1f} {unit}/s"),
+        (f"per-request {unit}/s (mean)", f"{summary['per_request_per_s_mean']:.1f}"),
         (
             "TTFT p50 / p99",
             f"{summary['ttft_p50'] * 1000:.1f} / {summary['ttft_p99'] * 1000:.1f} ms",
@@ -216,6 +250,9 @@ def main() -> None:
         "--no-stream", action="store_true", help="use a single blocking call per request"
     )
     args = parser.parse_args()
+    for name in ("concurrency", "num_requests", "max_tokens"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be >= 1; got {getattr(args, name)}")
     raise SystemExit(asyncio.run(_main(args)))
 
 

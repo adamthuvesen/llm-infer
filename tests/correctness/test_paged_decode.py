@@ -61,9 +61,7 @@ def _run_single(
 
 
 def _first_divergence(ours: list[int], expected: list[int]) -> int | None:
-    return next(
-        (i for i, (a, b) in enumerate(zip(ours, expected, strict=False)) if a != b), None
-    )
+    return next((i for i, (a, b) in enumerate(zip(ours, expected, strict=False)) if a != b), None)
 
 
 @pytest.mark.slow

@@ -11,13 +11,16 @@ llm-infer as a minimal, honest **paged LLM inference engine** for one pinned mod
 backend** — i.e., the GPU path that generates training rollouts for reinforcement learning on
 text-to-SQL, not a general-purpose chat server.
 
-**Main runtime type.** This is a **Python library + test/benchmark harness**, not a
-long-running server. There is no HTTP API, no auth, and no database in this repo
-([`docs/scoping.md`](scoping.md) explicitly lists OpenAI-compatible serving as out of v1 scope).
-You drive inference by:
+**Main runtime type.** This is a **Python inference library + test/benchmark harness** with an
+**OpenAI-compatible HTTP server** layered on top
+([`llm_infer/serving/server/`](../llm_infer/serving/server/)). There is no auth and no database
+in this repo. You drive inference by:
 
 - importing `InferenceEngine` from [`llm_infer/serving/`](../llm_infer/serving/) in Python code
-  or tests, or
+  or tests,
+- running the server — `python -m llm_infer.serve` exposes `/v1/chat/completions`,
+  `/v1/completions`, `/v1/responses`, and `/metrics`
+  ([`llm_infer/serve.py`](../llm_infer/serve.py)), or
 - running **Modal GPU scripts** in [`scripts/`](../scripts/) (`modal_oracle.py`,
   `modal_benchmark.py`, `modal_rollout.py`).
 
@@ -212,7 +215,7 @@ Implemented by [`TraceRecorder`](../llm_infer/tracing.py) and
 
 Schema version **3** event names:
 
-`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · block_allocated · block_freed · request_finished · batch_size_changed · tokens_per_second_sampled`
+`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · block_allocated · block_freed · request_preempted · request_resumed · request_finished · batch_size_changed · tokens_per_second_sampled`
 
 Prefill events are chunk-scoped. A long prompt emits one started/progress pair per cached
 chunk, using `start_pos`, `end_pos`, `cached_tokens`, `total_prompt_tokens`, and `completed`
@@ -277,8 +280,9 @@ Validates `FlashAttnPagedAttention` on A100 with tie-tolerance for bf16 numerica
 4. Measure wall-clock, tok/s, $/1k rollouts vs vLLM ceiling and HF sequential floor.
 5. **No cross-system token equivalence** under sampling (different RNG) — timing only.
 
-**I don't see evidence for:** auth, database persistence, background job queues, app startup
-lifecycle, or HTTP request handling.
+**I don't see evidence for:** auth, database persistence, or background job queues. (HTTP
+request handling and app startup lifecycle now exist in
+[`llm_infer/serving/server/`](../llm_infer/serving/server/).)
 
 ---
 
@@ -475,7 +479,8 @@ from chunk ranges rather than assuming one prefill event per request.
 ## 7. Accuracy Rules (applied)
 
 - Every major claim above cites a file under `llm_infer/`, `tests/`, `docs/`, or `scripts/`.
-- **No HTTP server, auth, or database** — not in scope; no code found.
+- **OpenAI-compatible HTTP server** in [`llm_infer/serving/server/`](../llm_infer/serving/server/);
+  **no auth or database** — not in scope, no code found.
 - **No packaged CLI** — `pyproject.toml` has no scripts section.
 - **v1 complete (Phases A–E)** per [`README.md`](../README.md) status table.
 - Model pin: [`llm_infer/model/config.py`](../llm_infer/model/config.py) — Instruct variant only.
@@ -506,7 +511,8 @@ GRPO rollout economics.
    ([`engine.py`](../llm_infer/serving/engine.py)).
 4. **Two decode paths in `QwenModel`** — `logits` (Phase A truth) vs `prefill`/`decode_many`
    (Phase B+ cached) must agree ([`qwen.py`](../llm_infer/model/qwen.py)).
-5. **This is a library + harness, not a server** — entry is tests, imports, or Modal scripts.
+5. **A library + harness with an OpenAI-compatible server on top** — entry is tests, Python
+   imports, `python -m llm_infer.serve`, or Modal scripts.
 
 ### Questions to ask next if you want to go deeper
 

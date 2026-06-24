@@ -100,6 +100,40 @@ test("validates the request_preempted reason", () => {
   assert.throws(() => parseJsonlTrace(bad), /unknown preempt_reason/);
 });
 
+test("rejects a trace with a sequence gap (playback assumes contiguous ids)", () => {
+  const text = [
+    { event: "request_admitted", schema_version: 3, sequence: 1, step: 0, request_id: "r" },
+    { event: "decode_step", schema_version: 3, sequence: 3, step: 1, request_ids: ["r"], token_ids: [9] },
+  ]
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+  assert.throws(() => parseJsonlTrace(text), /Sequence gap/);
+});
+
+test("rejects a decode_step whose token_ids are not integers", () => {
+  const text = JSON.stringify({
+    event: "decode_step",
+    schema_version: 3,
+    sequence: 1,
+    step: 0,
+    request_ids: ["r"],
+    token_ids: ["nope"],
+  });
+  assert.throws(() => parseJsonlTrace(text), /token_ids must be an array of integers/);
+});
+
+test("rejects a multi-request decode_step that is not one token per request", () => {
+  const text = JSON.stringify({
+    event: "decode_step",
+    schema_version: 3,
+    sequence: 1,
+    step: 0,
+    request_ids: ["a", "b"],
+    token_ids: [9],
+  });
+  assert.throws(() => parseJsonlTrace(text), /one token_id per request/);
+});
+
 test("theater layout keeps headline, cursor marker, ticks, and lanes separated", () => {
   const layout = buildTheaterLayout(4);
 

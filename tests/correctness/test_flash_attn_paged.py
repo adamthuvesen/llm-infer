@@ -42,9 +42,7 @@ def flash_model() -> QwenModel:
     """The engine on the flash-attn backend, bf16 on CUDA — the fast path under test."""
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 
-    return QwenModel.load(
-        dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda"
-    )
+    return QwenModel.load(dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda")
 
 
 @pytest.fixture(scope="module")
@@ -58,6 +56,16 @@ def _run_flash(model: QwenModel, prompt_ids: list[int], max_new_tokens: int) -> 
     engine = InferenceEngine(model, block_size=128, num_blocks=8, device="cuda")
     engine.add_request(Request("only", list(prompt_ids), max_new_tokens, EOS))
     return engine.run()["only"]
+
+
+def _run_flash_batch(
+    model: QwenModel, cases: list[dict], max_new_tokens: int
+) -> dict[str, list[int]]:
+    """Greedy-generate several requests together through ONE paged engine (fused ragged decode)."""
+    engine = InferenceEngine(model, block_size=128, num_blocks=64, device="cuda")
+    for case in cases:
+        engine.add_request(Request(case["case_id"], list(case["prompt_ids"]), max_new_tokens, EOS))
+    return engine.run()
 
 
 @pytest.mark.slow
@@ -83,3 +91,29 @@ def test_flash_decode_matches_golden_under_tie_tolerance(
             f"golden_logit={d.golden_logit:.6g}"
         )
     assert result.ok, f"{case['case_id']}: {result.failure}"
+
+
+@pytest.mark.slow
+def test_flash_multi_request_ragged_decode_matches_golden(
+    flash_model: QwenModel, reference_model: QwenModel
+) -> None:
+    """Several different-length requests in ONE fused decode each match their golden under ties.
+
+    The single-request test exercises a uniform batch; the riskier path is the **packed varlen**
+    decode, where requests of different cached lengths are read from the paged cache together with
+    per-request offsets/cu_seqlens. A bug there (wrong cu_seqlens, a swapped row, a misindexed
+    block) flips tokens for one request while leaving others correct. We decode all golden cases
+    together (their differing prompt lengths make the batch ragged from the first step) and assert
+    each request's output still matches its own golden token-for-token, ties excepted.
+    """
+    outputs = _run_flash_batch(flash_model, CASES, MAX_NEW)
+    assert len(outputs) == len(CASES)
+    for case in CASES:
+        result = compare_under_tie_tolerance(
+            reference_model,
+            case["prompt_ids"],
+            outputs[case["case_id"]],
+            case["continuation_ids"],
+            tolerance=DEFAULT_TIE_TOLERANCE,
+        )
+        assert result.ok, f"{case['case_id']} (ragged batch): {result.failure}"
