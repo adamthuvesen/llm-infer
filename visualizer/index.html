@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KV Trace Theater</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="title-block">
+          <h1>KV Trace Theater</h1>
+          <p id="titleMeta">Loading schema-v2 trace...</p>
+        </div>
+        <div class="controls" aria-label="trace playback controls">
+          <label class="file-picker">
+            <input id="fileInput" type="file" accept=".jsonl,application/jsonl,text/plain" />
+            Load JSONL
+          </label>
+          <button id="playButton" type="button">Play</button>
+          <label class="speed-control">
+            <span>Speed</span>
+            <select id="speedSelect">
+              <option value="1000">0.5x</option>
+              <option value="650" selected>1x</option>
+              <option value="320">2x</option>
+              <option value="150">4x</option>
+            </select>
+          </label>
+        </div>
+      </header>
+
+      <section class="scrub-row" aria-label="trace scrubber">
+        <input id="scrubber" type="range" min="1" max="1" value="1" />
+        <output id="scrubberValue">event 1/1</output>
+        <span id="status" class="status">Booting viewer</span>
+      </section>
+
+      <section class="metrics-band" aria-label="current trace pressure">
+        <div class="meter">
+          <div class="meter-head">
+            <span>Logical cache footprint</span>
+            <strong id="pressureLogical">0 logical tokens</strong>
+          </div>
+          <div class="meter-track"><span id="pressureLogicalFill"></span></div>
+        </div>
+        <div class="meter">
+          <div class="meter-head">
+            <span>Scheduler reservation</span>
+            <strong id="pressureReserved">0 reserved blocks</strong>
+          </div>
+          <div class="meter-track"><span id="pressureReservedFill"></span></div>
+        </div>
+        <div class="live-count">
+          <span id="pressureActive">0 active requests</span>
+          <small>Block allocation/free events are not emitted yet.</small>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="stage-panel lanes-panel">
+          <div class="panel-heading">
+            <h2>Request Lanes</h2>
+            <p>Prefill chunks, decode emissions, finish points, and shared-prefix admissions.</p>
+          </div>
+          <div class="svg-scroll">
+            <svg id="laneSvg" role="img" aria-label="request trace lanes"></svg>
+          </div>
+        </div>
+
+        <aside class="stage-panel inspector-panel">
+          <div class="panel-heading">
+            <h2 id="inspectorTitle">Event</h2>
+            <p id="inspectorMeta">sequence · step</p>
+          </div>
+          <pre id="inspectorJson" class="json-view">{}</pre>
+        </aside>
+
+        <div class="stage-panel signals-panel">
+          <div class="panel-heading">
+            <h2>Loop Signals</h2>
+            <p>Batch size, waiting queue, tokens/sec, and reserved KV pressure over engine ticks.</p>
+          </div>
+          <div class="svg-scroll">
+            <svg id="signalSvg" role="img" aria-label="batch throughput and cache pressure signals"></svg>
+          </div>
+        </div>
+
+        <aside class="stage-panel event-panel">
+          <div class="panel-heading">
+            <h2>Event Stream</h2>
+            <p>Schema-v2 JSONL ordered by sequence.</p>
+          </div>
+          <div id="eventList" class="event-list" aria-label="trace events"></div>
+        </aside>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

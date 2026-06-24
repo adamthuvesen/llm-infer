@@ -18,6 +18,7 @@ requests gives token-for-token the same result as running each alone.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -57,6 +58,7 @@ class InferenceEngine:
         prefill_chunk_size: int | None = None,
         speculative: SpeculativeDecodingConfig | None = None,
         trace: TraceRecorder | None = None,
+        trace_clock: Callable[[], float] | None = None,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -81,10 +83,11 @@ class InferenceEngine:
         self.prefill_chunk_size = prefill_chunk_size
         self.speculative = PromptLookupDraft(speculative) if speculative is not None else None
         self.trace = trace
+        self._trace_clock = trace_clock or time.perf_counter
         self._step_index = 0
         self._trace_sequence = 0
         self._trace_step: int | None = None
-        self._trace_start_time = time.perf_counter()
+        self._trace_start_time = self._trace_clock()
         self._trace_total_tokens = 0
         self._last_traced_batch_size = 0
         self._requests: dict[str, Request] = {}
@@ -477,7 +480,7 @@ class InferenceEngine:
         if tokens_this_step == 0:
             return
         self._trace_total_tokens += tokens_this_step
-        elapsed = max(time.perf_counter() - self._trace_start_time, 1e-12)
+        elapsed = max(self._trace_clock() - self._trace_start_time, 1e-12)
         self._emit_trace(
             "tokens_per_second_sampled",
             tokens_emitted=tokens_this_step,

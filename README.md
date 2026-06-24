@@ -22,7 +22,7 @@ the ceiling, never the thing we beat; the gap to it is named, not hidden.
 | **prefix caching** | refcounted KV-block sharing for G=4 rollout siblings | ✅ 411.5 tok/s, 3026-token path preserved |
 | **chunked prefill** | bounded prompt chunks interleaved with active decode work | ✅ |
 | **speculative decoding v1** | prompt-lookup n-gram draft + greedy verifier, no second model | ✅ technique/correctness evidence, no speed claim |
-| **KV trace emitter MVP** | opt-in typed runtime trace recorder for real engine events | ✅ visualizer later |
+| **KV trace visualizer MVP** | static local KV-cache-theater viewer fed by real schema-v2 engine traces | ✅ |
 
 The engine itself is the goal — a small, legible paged inference engine. Speed and the
 rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**: KV-cache-theater
@@ -123,14 +123,16 @@ legibility**. Speed is a side-quest with its own track, last.
    falls back to the verifier's next token on mismatch or no draft. It is off by default and
    supports greedy decoding only; sampled rollouts keep the existing path. This is evidence
    that the draft/verify technique is wired correctly, not a claimed speed win.
-6. **KV-cache-theater trace emitter MVP.** `InferenceEngine(trace=...)` emits typed,
-   schema-versioned events from the real request path: request admission, prefill chunk start
-   and progress, decode steps, request finish, batch-size changes, and throughput samples.
+6. **KV-cache-theater trace visualizer MVP.** `InferenceEngine(trace=...)` emits typed,
+   schema-versioned events from the real request path, and
+   [`visualizer/`](visualizer/) renders those traces as local request lanes, prefill chunks,
+   decode emissions, batch/throughput signals, event inspection, playback, and honest
+   scheduler-reservation/cache-pressure views.
 
 **Primary forward track — engine technique-completeness + legibility**
 
-7. **KV-cache-theater visualizer.** Build the separate visualizer only from real engine traces;
-   add block lifecycle views after the cache exposes clean allocation/free hooks.
+7. **Block lifecycle trace hooks.** Add allocation/free views only after the cache exposes clean
+   request-aware block lifecycle hooks.
 8. **Serving depth.** Streaming, an OpenAI-compatible endpoint, metrics, and a load generator.
 9. **Expand *Keeping the GPU Busy*.** Narrate the architecture and the honest dead-ends.
 
@@ -155,6 +157,18 @@ The flash-attn backend is the one GPU-only path; its oracle runs on the target G
 (`scripts/generate_goldens.py`) loads the 3B model in fp32 on CPU.
 
 See [`AGENTS.md`](AGENTS.md) for the working agreement and the honesty bar.
+
+## KV Trace Visualizer
+
+```bash
+uv run python scripts/generate_kv_trace_fixture.py
+python -m http.server 8765
+```
+
+Open `http://localhost:8765/visualizer/` to inspect the committed schema-v2 fixture at
+[`docs/assets/kv_trace_schema_v2.jsonl`](docs/assets/kv_trace_schema_v2.jsonl), or load another
+JSONL trace in the browser. The fixture is generated through the real `InferenceEngine(trace=...)`
+path with a deterministic clock; the viewer does not invent block allocation/free events.
 
 ## Model pin
 

@@ -174,10 +174,12 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   accepting only the greedy-matching prefix and falling back safely. This is correctness and
   technique evidence only: it is off by default, greedy-only, uses no second model, and makes
   no speed claim.
-- **KV-cache-theater trace emitter MVP.** The engine now has an opt-in typed recorder for
-  schema-versioned runtime events emitted from the real `InferenceEngine` path: request
-  admission, prefill start/progress, decode steps, request finish, batch-size changes, and
-  throughput samples. The separate visualizer is intentionally not part of this slice.
+- **KV-cache-theater trace visualizer MVP.** The engine now has an opt-in typed recorder for
+  schema-versioned runtime events emitted from the real `InferenceEngine` path, plus a static
+  local visualizer in `visualizer/` that renders schema-v2 JSONL as request lanes, prefill
+  chunks, decode emissions, batch/throughput signals, event inspection, playback, and honest
+  scheduler-reservation/cache-pressure views. The committed fixture at
+  `docs/assets/kv_trace_schema_v2.jsonl` is generated through `InferenceEngine(trace=...)`.
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
@@ -202,9 +204,8 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **KV-cache-theater visualizer** — build a separate visualizer from the real engine traces.
-  Block allocation/free joins only after the cache has a clean lifecycle hook (see the *KV
-  Cache Theater* section above).
+- **Block allocation/free trace hooks** — extend KV-cache-theater only after the cache has a
+  clean request-aware lifecycle hook (see the *KV Cache Theater* section above).
 - **Serving depth** — streaming, an OpenAI-compatible endpoint, metrics, and a load generator,
   so the engine is drivable as a real server rather than only through the frozen harness. This
   is the final engine piece — it makes the engine drivable as a real server.
