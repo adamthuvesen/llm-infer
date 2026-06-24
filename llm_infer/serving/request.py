@@ -1,9 +1,16 @@
 """A single generation request and its mutable runtime state.
 
-Created by the caller with its prompt and stop config; the engine fills in the block
-table on admission and grows ``generated`` one token per step. Stop semantics mirror
-the Phase A ``greedy_decode`` exactly (EOS token included, capped at ``max_new_tokens``)
-so the cached/paged path reproduces the full-recompute reference token-for-token.
+Created by the caller with its prompt, stop config, and :class:`SamplingParams`; the engine
+fills in the block table on admission and grows ``generated`` one token per step. Stop
+semantics mirror the Phase A ``greedy_decode`` exactly (EOS token included, capped at
+``max_new_tokens``) so the cached/paged path reproduces the full-recompute reference
+token-for-token.
+
+The request also owns its sampling RNG: a single :class:`torch.Generator` seeded once with
+``sampling.seed`` and reused across the request's own decode steps via :meth:`generator`. A
+request's draw therefore depends only on its seed and its own decode history — never on which
+other requests share the batch — which is what makes a sampled request reproduce its tokens
+identically run alone or batched (batched == serial under sampling).
 """
 
 from __future__ import annotations
@@ -13,17 +20,19 @@ from dataclasses import dataclass, field
 import torch
 
 from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.serving.sampler import GREEDY, SamplingParams
 
 
 @dataclass
 class Request:
-    """One greedy generation request, carrying its own KV block table and output."""
+    """One generation request, carrying its sampling params, KV block table, and output."""
 
     request_id: str
     prompt_ids: list[int]
     max_new_tokens: int
     eos_token_ids: frozenset[int]
     prefix_group_id: str | None = None
+    sampling: SamplingParams = GREEDY
 
     block_table: BlockTable | None = None
     prompt_cached_tokens: int = 0
@@ -31,12 +40,31 @@ class Request:
     finished: bool = False
     _generated_tokens: list[torch.Tensor] = field(default_factory=list, init=False, repr=False)
     _generated_cache: list[int] | None = field(default_factory=list, init=False, repr=False)
+    _generator: torch.Generator | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.prompt_ids:
             raise ValueError("prompt_ids must be non-empty")
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be >= 1; got {self.max_new_tokens}")
+
+    def generator(self, device: torch.device) -> torch.Generator:
+        """This request's seeded RNG, created once on first sample on the logits' device.
+
+        Seeded with ``sampling.seed`` and never re-seeded, so successive draws form one stream
+        keyed only to this request's seed and its own decode steps. The device is fixed for an
+        engine instance; a later device change is a real bug (CPU/CUDA mix) and raises rather
+        than silently re-seeding mid-generation.
+        """
+        if self._generator is None:
+            self._generator = torch.Generator(device=device)
+            self._generator.manual_seed(self.sampling.seed)
+        elif self._generator.device != torch.device(device):
+            raise ValueError(
+                f"request {self.request_id!r} generator is on {self._generator.device}, "
+                f"got logits on {device}"
+            )
+        return self._generator
 
     @property
     def generated(self) -> list[int]:

@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from llm_infer.kv_cache import BlockTable, PagedKVCache
-from llm_infer.serving import InferenceEngine, Request, Sampler
+from llm_infer.serving import InferenceEngine, Request, SamplingParams
 
 GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
 FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -75,7 +75,7 @@ def _toy_run(*, prefix_group_id: str | None) -> tuple[dict[str, list[int]], int]
         model,
         block_size=4,
         num_blocks=32,
-        sampler=Sampler(temperature=1.0, top_p=1.0, seed=123),
+        default_sampling=SamplingParams(temperature=1.0, top_p=1.0, seed=123),
     )
     for idx in range(4):
         engine.add_request(

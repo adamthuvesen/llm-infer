@@ -36,7 +36,7 @@ import torch
 from llm_infer.benchmarks.workload import Workload
 from llm_infer.model.qwen import QwenModel
 from llm_infer.profiling import TimingProfiler
-from llm_infer.serving import InferenceEngine, Request, Sampler
+from llm_infer.serving import InferenceEngine, Request, SamplingParams
 
 BLOCK_SIZE = 128
 
@@ -111,9 +111,10 @@ def run_llm_infer(
 ) -> RunResult:
     """This engine, flash backend, all requests in one paged cache under the batching loop.
 
-    Greedy by default; under ``workload.sampling`` each ``decode_once`` builds a fresh seeded
-    :class:`Sampler`, so every measured iteration reproduces identical tokens (the seed is
-    re-applied per iteration) — the median wall-clock measures equal work, not RNG drift.
+    Greedy by default; under ``workload.sampling`` each ``decode_once`` builds a fresh engine
+    whose ``default_sampling`` carries the pinned temperature/top-p/seed, so every measured
+    iteration reproduces identical tokens (the seed is re-applied per iteration via a fresh
+    per-request generator) — the median wall-clock measures equal work, not RNG drift.
     """
     sampling = workload.sampling
     profiles: list[dict[str, object]] = []
@@ -122,10 +123,12 @@ def run_llm_infer(
         len(prompt) for prompts in _prompt_groups(workload).values() for prompt in prompts
     )
 
-    def make_sampler() -> Sampler | None:
+    def make_sampling() -> SamplingParams | None:
         if sampling is None:
             return None
-        return Sampler(temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed)
+        return SamplingParams(
+            temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed
+        )
 
     def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
         engine = InferenceEngine(
@@ -133,7 +136,7 @@ def run_llm_infer(
             block_size=BLOCK_SIZE,
             num_blocks=num_blocks,
             device=device,
-            sampler=make_sampler(),
+            default_sampling=make_sampling(),
             profiler=profiler,
         )
         for req in workload.requests:

@@ -8,11 +8,14 @@ steps to become decode-ready, letting already-running requests keep decoding bet
 chunks. Finished requests are freed at the end of the step (the decode-step boundary),
 which returns their blocks and budget so a queued request can be admitted next step.
 
-Token selection is pluggable through a :class:`~llm_infer.serving.sampler.Sampler`; it
-defaults to greedy (temperature 0 — the proven oracle path) and the rlvr-sql rollout passes
-a seeded temperature/top-p sampler. There is still no streaming or OpenAI-compatible serving
-surface. Under greedy, each request runs through the same cached path, so batching two
-requests gives token-for-token the same result as running each alone.
+Token selection is **per request**: the fused decode forward stays shared (one
+``decode_many`` over the whole batch), but each row of the resulting logits is sampled
+under its own request's :class:`~llm_infer.serving.sampler.SamplingParams`, against that
+request's own generated history, drawn from that request's own seeded generator. Greedy
+requests (the default — temperature 0, the proven oracle path) take the vectorized argmax
+fast-path. Because each request's draw depends only on its own seed and decode steps, a
+sampled request produces the identical sequence run alone or batched with others, and a
+greedy request stays token-for-token the proven greedy path.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from llm_infer.scheduler.scheduler import (
     max_blocks_for,
 )
 from llm_infer.serving.request import Request
-from llm_infer.serving.sampler import Sampler
+from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
 from llm_infer.tracing import FinishReason, TokenSource, TraceEvent, TraceEventName, TraceRecorder
 
@@ -58,7 +61,7 @@ class InferenceEngine:
         block_size: int,
         num_blocks: int,
         device: str = "cpu",
-        sampler: Sampler | None = None,
+        default_sampling: SamplingParams | None = None,
         profiler: TimingProfiler | None = None,
         prefill_chunk_size: int | None = None,
         speculative: SpeculativeDecodingConfig | None = None,
@@ -80,11 +83,10 @@ class InferenceEngine:
         )
         self.preemption = preemption
         self.scheduler = Scheduler(num_blocks, block_size, preemption=preemption)
-        # Default to greedy (temperature 0) — token-for-token the proven oracle path. The
-        # rollout passes Sampler(temperature=1.0, top_p=1.0, seed=...) for sampled decoding.
-        self.sampler = sampler or Sampler()
-        if speculative is not None and not self.sampler.is_greedy:
-            raise ValueError("speculative decoding v1 supports only greedy sampling")
+        # The fallback sampling for a request that carries no params of its own. Defaults to
+        # greedy (temperature 0 — token-for-token the proven oracle path); the rollout/benchmark
+        # path passes one seeded temperature/top-p SamplingParams that every request inherits.
+        self.default_sampling = default_sampling or GREEDY
         self.profiler = profiler
         self.model.profiler = profiler
         self.prefill_chunk_size = prefill_chunk_size
@@ -375,7 +377,7 @@ class InferenceEngine:
             return
         request.prefilled = True
         with self._record_time("sampling"):
-            token = self.sampler.sample(logits)
+            token = self._sample_one(logits, request)
         self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
         self._trace_decode_step([request], [token], token_source="prefill")
 
@@ -407,7 +409,7 @@ class InferenceEngine:
             request.prefilled = True
 
         with self._record_time("sampling"):
-            tokens = [self.sampler.sample(logits) for _ in requests]
+            tokens = [self._sample_one(logits, request) for request in requests]
         eos_flags = self._eos_flags(torch.stack(tokens), requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
@@ -435,7 +437,7 @@ class InferenceEngine:
             self._decode_normal(fallback, result)
 
     def _decode_normal(self, requests: list[Request], result: StepResult) -> None:
-        """The original one-token batched decode path."""
+        """The original one-token batched decode path: shared forward, per-row sampling."""
         last_tokens = torch.stack([request.last_token_tensor for request in requests]).to(
             self.model.device
         )
@@ -446,15 +448,48 @@ class InferenceEngine:
                 last_tokens,
             )
         with self._record_time("sampling"):
-            tokens = self.sampler.sample_many(logits)
-        eos_flags = self._eos_flags(tokens, requests)
+            tokens = self._sample_rows(logits, requests)
+        eos_flags = self._eos_flags(torch.stack(tokens), requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
-        self._trace_decode_step(
-            requests,
-            [token for token in tokens.reshape(-1)],
-            token_source="decode",
+        self._trace_decode_step(requests, list(tokens), token_source="decode")
+
+    def _params_for(self, request: Request) -> SamplingParams:
+        """The request's own sampling params, or the engine default when it set none."""
+        return request.sampling if request.sampling is not GREEDY else self.default_sampling
+
+    def _sample_one(self, logits: torch.Tensor, request: Request) -> torch.Tensor:
+        """Sample one token from a 1-D ``(vocab,)`` row under this request (prefill path)."""
+        return sample_row(
+            logits, self._params_for(request), request.generated, request.generator(logits.device)
         )
+
+    def _sample_rows(self, logits: torch.Tensor, requests: list[Request]) -> list[torch.Tensor]:
+        """Sample one token per row of ``(B, vocab)`` logits, each under its own request.
+
+        Greedy rows take the vectorized argmax (no RNG); the rest are sampled per row under that
+        request's params, against its own generated history, from its own seeded generator — so a
+        request's draw is independent of its batchmates. Returns scalar long tensors on device.
+        """
+        if logits.ndim != 2:
+            raise ValueError(f"expected 2-D logits, got shape {tuple(logits.shape)}")
+        params = [self._params_for(request) for request in requests]
+        tokens: list[torch.Tensor] = [None] * len(requests)  # type: ignore[list-item]
+
+        greedy_rows = [i for i, p in enumerate(params) if p.is_greedy]
+        if greedy_rows:
+            index = torch.tensor(greedy_rows, device=logits.device)
+            argmax = torch.argmax(logits.index_select(0, index), dim=-1)
+            for position, token in zip(greedy_rows, argmax, strict=True):
+                tokens[position] = token
+
+        for i, (request, p) in enumerate(zip(requests, params, strict=True)):
+            if p.is_greedy:
+                continue
+            tokens[i] = sample_row(
+                logits[i], p, request.generated, request.generator(logits.device)
+            )
+        return tokens
 
     def _make_decode_room(self, requests: list[Request]) -> list[Request]:
         """Ensure the whole decode batch can grow by one token; preempt LIFO victims if not.
@@ -483,8 +518,14 @@ class InferenceEngine:
             self._preempt(victim)
 
     def _draft_for(self, request: Request) -> list[int]:
-        """Return a draft only when there is room for draft tokens plus verifier recovery."""
-        if self.speculative is None:
+        """Return a draft only when there is room for draft tokens plus verifier recovery.
+
+        Speculative decoding verifies with a greedy (argmax) verifier, so only a greedy request
+        is eligible: a sampled request falls through to the normal per-row sampling path, which
+        keeps its draw seeded and independent. The guard is per request, not engine-wide, so a
+        greedy request can still speculate while a sampled one in the same batch does not.
+        """
+        if self.speculative is None or not self._params_for(request).is_greedy:
             return []
         max_draft_tokens = request.remaining_tokens - 1
         if max_draft_tokens < 1:
