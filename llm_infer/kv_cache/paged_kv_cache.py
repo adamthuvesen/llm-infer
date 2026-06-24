@@ -63,6 +63,33 @@ class PagedKVCache:
         """Fork a request's current block table by shared physical-block ownership."""
         return table.fork_shared()
 
+    def append_cost(self, table: BlockTable, count: int) -> int:
+        """Physical blocks an append of ``count`` tokens will pull from the pool — a dry run.
+
+        The engine must reserve two costs before a forward writes: **capacity growth** (new blocks
+        to extend the table past its current capacity) and **copy-on-write** (a shared partial
+        block the append lands in is copied private before mutation; see :meth:`prepare_write`).
+        Counting only capacity growth under-reserves when prefix-shared siblings decode — a COW
+        append could then find the pool empty mid-write. Allocates nothing; pure accounting.
+        """
+        if count < 1:
+            return 0
+        start_pos = table.length
+        end_pos = start_pos + count
+        needed_blocks = -(-end_pos // self.block_size)  # ceil
+        growth = max(0, needed_blocks - len(table.blocks))
+        # COW copies only blocks that already exist (freshly grown blocks are private) and are
+        # shared (refcount > 1). The append touches the blocks holding positions [start_pos,
+        # end_pos); only the already-allocated ones among them can be shared and so be copied.
+        first_block = start_pos // self.block_size
+        last_existing = min((end_pos - 1) // self.block_size, len(table.blocks) - 1)
+        cow = sum(
+            1
+            for block_index in range(first_block, last_existing + 1)
+            if self.allocator.refcount(table.blocks[block_index]) > 1
+        )
+        return growth + cow
+
     def prepare_write(self, table: BlockTable, start_pos: int, count: int) -> None:
         """Make append writes safe when a shared prompt ends in a partial block.
 

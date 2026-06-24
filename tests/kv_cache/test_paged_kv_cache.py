@@ -124,6 +124,33 @@ def test_block_table_fork_refcounts_shared_blocks_until_last_free() -> None:
     assert alloc.num_free == 8
 
 
+def test_append_cost_counts_copy_on_write_for_a_shared_partial_block() -> None:
+    """append_cost includes the COW block when appending into a prefix-shared partial block.
+
+    Bare capacity-growth accounting misses it: a shared partial block (refcount > 1) is copied
+    private on append, pulling a block the engine must reserve or it OOMs mid-decode.
+    """
+    cache = PagedKVCache(
+        num_layers=1, num_blocks=8, block_size=4, num_kv_heads=1, head_dim=2, dtype=torch.float32
+    )
+    leader = cache.new_request()
+    leader.reserve(6)  # 2 blocks: one full (0..3) + one partial (4..5)
+    leader.length = 6
+    fork = cache.fork_request(leader)  # shares both blocks → refcount 2
+
+    # Append lands in block 1 (positions 4..7), already allocated and shared: growth 0, COW +1.
+    assert cache.append_cost(fork, 1) == 1
+
+    # An unshared table costs pure capacity growth, no COW.
+    solo = cache.new_request()
+    assert cache.append_cost(solo, 1) == 1  # empty → 1 block for the first token
+    solo.reserve(4)
+    solo.length = 4  # block full → next token crosses into a new private block
+    assert cache.append_cost(solo, 1) == 1  # growth 1, COW 0
+    solo.length = 2  # room left in the current private block
+    assert cache.append_cost(solo, 1) == 0  # no growth, no COW
+
+
 def _ramp(n: int, kv_heads: int, head_dim: int, offset: float) -> torch.Tensor:
     return (
         torch.arange(n * kv_heads * head_dim, dtype=torch.float32).reshape(n, kv_heads, head_dim)

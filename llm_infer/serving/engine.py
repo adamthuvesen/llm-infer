@@ -203,12 +203,17 @@ class InferenceEngine:
     # rebuilds from a pristine state and stays token-exact.
 
     def _blocks_to_grow(self, request: Request, new_tokens: int) -> int:
-        """How many *new* physical blocks ``request`` must pull to cache ``new_tokens`` more."""
+        """How many *new* physical blocks ``request`` must pull to cache ``new_tokens`` more.
+
+        Delegates to the cache's dry-run cost so the count includes copy-on-write: a request
+        whose last block is a prefix-shared partial block copies it private on append, which
+        pulls a block the bare capacity-growth math misses (and would otherwise OOM mid-write).
+        """
         table = request.block_table
-        current = table.num_blocks if table is not None else 0
-        length = table.length if table is not None else 0
-        needed = -(-(length + new_tokens) // self.scheduler.block_size)  # ceil division
-        return max(0, needed - current)
+        if table is None:
+            # Fresh request: no blocks yet and nothing shared, so just capacity growth from empty.
+            return -(-new_tokens // self.scheduler.block_size)  # ceil division
+        return self.cache.append_cost(table, new_tokens)
 
     def _ensure_pool_room(self, request: Request, new_tokens: int) -> None:
         """Free enough blocks for ``request`` to grow by ``new_tokens``, preempting LIFO victims.
