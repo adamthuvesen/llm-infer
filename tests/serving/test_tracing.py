@@ -138,13 +138,23 @@ def test_trace_recorder_captures_real_engine_events() -> None:
 
     decode_events = [event for event in events if event.event == "decode_step"]
     assert decode_events[0].request_ids == ("active",)
-    assert decode_events[0].token_ids == (12,)
+    assert decode_events[0].token_ids == (11,)
+    assert decode_events[0].token_source == "prefill"
     assert any(event.request_ids == ("active", "long") for event in decode_events)
 
     finished = {event.request_id: event for event in events if event.event == "request_finished"}
     assert finished["active"].reason == "length"
     assert finished["active"].token_ids == (11, 12, 13, 14)
     assert finished["long"].generated_tokens == 2
+    traced_tokens_by_request: dict[str, list[int]] = {"active": [], "long": []}
+    for event in decode_events:
+        if len(event.request_ids) == 1:
+            traced_tokens_by_request[event.request_ids[0]].extend(event.token_ids)
+            continue
+        for request_id, token_id in zip(event.request_ids, event.token_ids, strict=True):
+            traced_tokens_by_request[request_id].append(token_id)
+    assert traced_tokens_by_request["active"] == [11, 12, 13, 14]
+    assert traced_tokens_by_request["long"] == [15, 16]
 
     samples = [event for event in events if event.event == "tokens_per_second_sampled"]
     assert samples[-1].total_generated_tokens == 6

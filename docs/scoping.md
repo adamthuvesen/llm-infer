@@ -130,8 +130,10 @@ Prefill events are **chunk-scoped**, not once-per-request. A long prompt can emi
 Visualizer handoff contract: consume only schema-versioned JSONL events from the real engine;
 order by `sequence`; group per-request work by `request_id`; use `step` only as the engine loop
 tick; use `start_pos`/`end_pos`/`cached_tokens` for prompt chunk rendering; use `request_ids`,
-`token_ids`, and `tokens_emitted` for decode rows; and treat absent optional fields as absent,
-not zero.
+`token_ids`, `token_source`, and `tokens_emitted` for generated-token rows; and treat absent
+optional fields as absent, not zero. `decode_step` is the generated-token trace event even when
+the token source is `prefill`: the first token sampled after a completed prompt prefill must be
+represented there before it appears in `request_finished.token_ids`.
 
 Block lifecycle remains a deliberate follow-up: `block_allocated` / `block_freed` need a clean
 request-aware cache hook around `BlockTable.reserve()` / `BlockTable.free()` (and copy-on-write

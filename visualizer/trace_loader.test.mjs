@@ -17,6 +17,13 @@ test("loads the committed schema-v2 fixture into a renderable model", async () =
   );
   assert.equal(model.requestList.length, 4);
   assert.ok(model.requestList.some((request) => request.chunks.length >= 3));
+  for (const request of model.requestList) {
+    assert.deepEqual(
+      request.decodes.flatMap((decode) => decode.tokenIds),
+      request.finish.tokenIds,
+    );
+  }
+  assert.ok(model.requestList.every((request) => request.decodes.some((decode) => decode.tokenSource === "prefill")));
   assert.ok(model.batchSignals.length > 0);
   assert.ok(model.throughputSignals.length > 0);
   assert.ok(model.pressureSamples.some((sample) => sample.reservedBlocks > 0));

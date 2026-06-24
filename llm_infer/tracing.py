@@ -26,6 +26,7 @@ TraceEventName = Literal[
 ]
 
 FinishReason = Literal["eos", "length"]
+TokenSource = Literal["prefill", "decode", "speculative"]
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class TraceEvent:
     waiting: int | None = None
     token_ids: tuple[int, ...] = ()
     tokens_emitted: int | None = None
+    token_source: TokenSource | None = None
     generated_tokens: int | None = None
     reason: FinishReason | None = None
     total_generated_tokens: int | None = None

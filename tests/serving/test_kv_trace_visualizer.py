@@ -55,6 +55,30 @@ def test_kv_trace_fixture_is_schema_v2_ordered_and_real_engine_shaped() -> None:
     )
 
 
+def test_kv_trace_fixture_has_no_missing_generated_token_events() -> None:
+    events = _fixture_events()
+    traced_tokens: dict[str, list[int]] = {}
+
+    for event in events:
+        if event["event"] != "decode_step":
+            continue
+        request_ids = event.get("request_ids", [])
+        token_ids = event.get("token_ids", [])
+        assert event.get("token_source") in {"prefill", "decode", "speculative"}
+        if len(request_ids) == 1:
+            traced_tokens.setdefault(request_ids[0], []).extend(token_ids)
+            continue
+        for request_id, token_id in zip(request_ids, token_ids, strict=True):
+            traced_tokens.setdefault(request_id, []).append(token_id)
+
+    finished = {
+        event["request_id"]: event["token_ids"]
+        for event in events
+        if event["event"] == "request_finished"
+    }
+    assert traced_tokens == finished
+
+
 def test_visualizer_parser_loads_fixture_with_node() -> None:
     node = shutil.which("node")
     if node is None:

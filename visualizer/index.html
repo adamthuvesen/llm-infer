@@ -66,38 +66,32 @@
       </section>
 
       <section class="workspace">
-        <div class="stage-panel lanes-panel">
-          <div class="panel-heading">
-            <h2>Request Lanes</h2>
-            <p>Prefill chunks · decode · finish · shared prefix</p>
+        <div class="theater-panel">
+          <div class="theater-copy">
+            <h2>Engine Theater</h2>
+            <p>Loop · lanes · tokens · KV pressure</p>
           </div>
-          <div class="svg-scroll">
-            <svg id="laneSvg" role="img" aria-label="request trace lanes"></svg>
+          <div class="svg-scroll theater-scroll">
+            <svg id="theaterSvg" role="img" aria-label="integrated KV trace theater"></svg>
           </div>
         </div>
 
-        <aside class="stage-panel inspector-panel">
+        <aside class="inspector-panel">
           <div class="panel-heading">
             <h2 id="inspectorTitle">Event</h2>
             <p id="inspectorMeta">sequence · step</p>
           </div>
-          <pre id="inspectorJson" class="json-view">{}</pre>
+          <div id="eventAnatomy" class="event-anatomy"></div>
+          <details class="json-disclosure">
+            <summary>Raw JSON</summary>
+            <pre id="inspectorJson" class="json-view">{}</pre>
+          </details>
         </aside>
 
-        <div class="stage-panel signals-panel">
-          <div class="panel-heading">
-            <h2>Loop Signals</h2>
-            <p>Batch · queue · tok/s · reserved KV</p>
-          </div>
-          <div class="svg-scroll">
-            <svg id="signalSvg" role="img" aria-label="batch throughput and cache pressure signals"></svg>
-          </div>
-        </div>
-
-        <aside class="stage-panel event-panel">
+        <aside class="event-panel">
           <div class="panel-heading">
             <h2>Event Stream</h2>
-            <p>Schema-v2 sequence order</p>
+            <p>Click to scrub</p>
           </div>
           <div id="eventList" class="event-list" aria-label="trace events"></div>
         </aside>

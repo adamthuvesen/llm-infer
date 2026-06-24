@@ -10,6 +10,8 @@ const KNOWN_EVENTS = new Set([
   "tokens_per_second_sampled",
 ]);
 
+const KNOWN_TOKEN_SOURCES = new Set(["prefill", "decode", "speculative"]);
+
 export function parseJsonlTrace(text) {
   const lines = text
     .split(/\r?\n/)
@@ -133,9 +135,6 @@ export function buildTraceModel(events) {
         completed: event.completed === true,
       });
       cachedTokens.set(event.request_id, event.cached_tokens ?? cachedTokens.get(event.request_id) ?? 0);
-      if (event.completed === true) {
-        generatedTokens.set(event.request_id, (generatedTokens.get(event.request_id) ?? 0) + 1);
-      }
     }
 
     if (event.event === "decode_step") {
@@ -146,6 +145,7 @@ export function buildTraceModel(events) {
           sequence: event.sequence,
           step: event.step,
           tokenIds: item.tokenIds,
+          tokenSource: event.token_source ?? "decode",
           batchSize: event.batch_size ?? null,
           tokensEmitted: event.tokens_emitted ?? item.tokenIds.length,
         });
@@ -247,5 +247,8 @@ function validateEvent(event, lineNumber) {
       event.request_ids.some((requestId) => typeof requestId !== "string"))
   ) {
     throw new Error(`Line ${lineNumber} request_ids must be an array of strings when present.`);
+  }
+  if (event.token_source !== undefined && !KNOWN_TOKEN_SOURCES.has(event.token_source)) {
+    throw new Error(`Line ${lineNumber} has unknown token_source ${JSON.stringify(event.token_source)}.`);
   }
 }

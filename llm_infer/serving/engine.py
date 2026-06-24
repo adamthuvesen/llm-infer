@@ -30,7 +30,7 @@ from llm_infer.scheduler.scheduler import Scheduler, max_blocks_for
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import Sampler
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
-from llm_infer.tracing import FinishReason, TraceEvent, TraceEventName, TraceRecorder
+from llm_infer.tracing import FinishReason, TokenSource, TraceEvent, TraceEventName, TraceRecorder
 
 
 @dataclass
@@ -180,6 +180,7 @@ class InferenceEngine:
         with self._record_time("sampling"):
             token = self.sampler.sample(logits)
         self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
+        self._trace_decode_step([request], [token], token_source="prefill")
 
     def _prefill_shared_group(self, requests: list[Request], result: StepResult) -> None:
         prompt_ids = requests[0].prompt_ids
@@ -212,6 +213,7 @@ class InferenceEngine:
         eos_flags = self._eos_flags(torch.stack(tokens), requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
+        self._trace_decode_step(requests, tokens, token_source="prefill")
 
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
@@ -246,7 +248,11 @@ class InferenceEngine:
         eos_flags = self._eos_flags(tokens, requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
-        self._trace_decode_step(requests, [token for token in tokens.reshape(-1)])
+        self._trace_decode_step(
+            requests,
+            [token for token in tokens.reshape(-1)],
+            token_source="decode",
+        )
 
     def _draft_for(self, request: Request) -> list[int]:
         """Return a draft only when there is room for draft tokens plus verifier recovery."""
@@ -302,7 +308,7 @@ class InferenceEngine:
             if request.finished:
                 break
             self._record(request, token, self._is_eos(token, request), result)
-        self._trace_decode_step([request], emitted)
+        self._trace_decode_step([request], emitted, token_source="speculative")
 
     def _accepted_prefix_length(
         self, verifier_tokens: torch.Tensor, draft_tokens: torch.Tensor
@@ -436,7 +442,13 @@ class InferenceEngine:
                 break
         return truncated
 
-    def _trace_decode_step(self, requests: list[Request], tokens: list[int | torch.Tensor]) -> None:
+    def _trace_decode_step(
+        self,
+        requests: list[Request],
+        tokens: list[int | torch.Tensor],
+        *,
+        token_source: TokenSource,
+    ) -> None:
         if self.trace is None:
             return
         self._emit_trace(
@@ -445,6 +457,7 @@ class InferenceEngine:
             batch_size=len(requests),
             token_ids=tuple(self._trace_token_id(token) for token in tokens),
             tokens_emitted=len(tokens),
+            token_source=token_source,
         )
 
     def _trace_request_finished(self, request: Request) -> None:
