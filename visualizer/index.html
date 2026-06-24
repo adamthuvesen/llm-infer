@@ -15,7 +15,7 @@
           <span class="brand-name">KV&nbsp;Cache Observatory</span>
         </div>
         <div class="nav-right">
-          <span class="tag" id="schemaTag">schema v2</span>
+          <span class="tag" id="schemaTag">schema v3</span>
           <label class="btn btn-ghost btn-file">
             <input id="fileInput" type="file" accept=".jsonl,application/jsonl,text/plain" />
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 18v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1"/></svg>
@@ -30,10 +30,10 @@
         <h1>Six requests. One cache.<br />Every token, in order.</h1>
         <p class="lede">
           A frame-by-frame replay of a paged-attention inference engine — admitting requests,
-          prefilling prompts into KV blocks, and decoding tokens under continuous batching.
-          A synthetic sample trace in the engine's schema-v2 format.
+          prefilling prompts into KV blocks, decoding tokens under continuous batching, and
+          allocating and freeing real cache blocks. A synthetic sample in the engine's schema-v3 format.
         </p>
-        <p class="trace-meta" id="traceMeta">loading schema-v2 trace…</p>
+        <p class="trace-meta" id="traceMeta">loading schema-v3 trace…</p>
       </header>
 
       <!-- ===== Player ===== -->
@@ -128,15 +128,20 @@
           <section class="card kvwall" aria-label="paged KV cache">
             <div class="panel-bar">
               <h2>Paged KV cache</h2>
-              <span class="kv-reserve"><span id="kvReserved">0</span><span class="kv-slash">/</span><span id="kvTotal">0</span> blocks</span>
+              <span class="kv-reserve"><span id="kvReserved">0</span><span class="kv-slash">/</span><span id="kvTotal">0</span> blocks live</span>
             </div>
             <div class="kv-grid" id="kvGrid" aria-hidden="true"></div>
+            <div class="kv-legend" aria-hidden="true">
+              <span class="kv-lg" data-k="live"><i></i>allocated</span>
+              <span class="kv-lg" data-k="reserved"><i></i>reserved headroom</span>
+            </div>
             <div class="kv-meter">
               <div class="kv-meter-head"><span>Logical footprint</span><span id="kvLogical">0 tokens</span></div>
               <div class="kv-meter-track"><span id="kvLogicalFill"></span></div>
             </div>
-            <p class="kv-note">Schema v2 reports scheduler reservation and observed
-              cached/generated tokens. Block alloc/free is not emitted, so none is invented.</p>
+            <p class="kv-note">Schema v3 emits real <code>block_allocated</code> /
+              <code>block_freed</code> from the allocator: filled blocks are physically held
+              right now, freed when a request finishes. Prefix-shared blocks are counted once.</p>
           </section>
 
           <section class="card now" aria-label="current event">
@@ -155,7 +160,7 @@
 
       <footer class="foot">
         <span>KV Cache Observatory</span>
-        <span>rendered from <code>InferenceEngine(trace=…)</code> schema-v2 JSONL</span>
+        <span>rendered from <code>InferenceEngine(trace=…)</code> schema-v3 JSONL</span>
       </footer>
     </div>
 

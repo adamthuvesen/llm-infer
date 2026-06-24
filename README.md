@@ -25,7 +25,7 @@ synthetic microbench. (Serving rlvr-sql rollouts is a fun applied benchmark, not
 | **prefix caching** | refcounted KV-block sharing for G=4 rollout siblings | ✅ 411.5 tok/s, 3026-token path preserved |
 | **chunked prefill** | bounded prompt chunks interleaved with active decode work | ✅ |
 | **speculative decoding v1** | prompt-lookup n-gram draft + greedy verifier, no second model | ✅ technique/correctness evidence, no speed claim |
-| **KV trace visualizer MVP** | static local KV-cache-theater viewer fed by real schema-v2 engine traces | ✅ |
+| **KV trace visualizer** | static local KV-cache-theater viewer fed by real schema-v3 engine traces, incl. block lifecycle | ✅ |
 
 The engine itself is the goal — a small, legible paged inference engine to learn from and show.
 Speed and the rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**:
@@ -127,17 +127,17 @@ legibility**. Speed is a side-quest with its own track, last.
    falls back to the verifier's next token on mismatch or no draft. It is off by default and
    supports greedy decoding only; sampled rollouts keep the existing path. This is evidence
    that the draft/verify technique is wired correctly, not a claimed speed win.
-6. **KV-cache-theater trace visualizer MVP.** `InferenceEngine(trace=...)` emits typed,
+6. **KV-cache-theater trace visualizer.** `InferenceEngine(trace=...)` emits typed,
    schema-versioned events from the real request path, and
    [`visualizer/`](visualizer/) renders those traces as local request lanes, prefill chunks,
-   decode emissions, batch/throughput signals, event inspection, playback, and honest
-   scheduler-reservation/cache-pressure views.
+   decode emissions, batch/throughput signals, event inspection, playback, and a paged KV wall
+   driven by real block allocation/free.
+7. **Block-lifecycle trace hooks.** `block_allocated` / `block_freed` are emitted from an
+   observer on `BlockAllocator` — the physical free-pool boundary — so they stay honest for
+   refcounted prefix sharing and copy-on-write. The prerequisite for the preemption demo below.
 
 **Primary forward track — finish the engine's technique set (dependency order)**
 
-7. **Block-lifecycle trace hooks.** A clean request-aware hook around block reserve/free (and
-   copy-on-write) so the visualizer can show allocation/free honestly — the prerequisite for
-   the preemption demo below.
 8. **Request preemption / eviction.** When the KV budget is exhausted, preempt a running request
    (recompute or swap to host) and resume it later, instead of only admitting when it fits. The
    canonical scheduling technique the engine still lacks — and it shows vividly in the visualizer.
@@ -178,13 +178,14 @@ uv run python scripts/generate_kv_trace_fixture.py
 python -m http.server 8765
 ```
 
-Open `http://localhost:8765/visualizer/` to inspect the committed schema-v2 fixture at
-[`docs/assets/kv_trace_schema_v2.jsonl`](docs/assets/kv_trace_schema_v2.jsonl), or load another
-JSONL trace in the browser. The viewer replays real `InferenceEngine(trace=...)` schema-v2
+Open `http://localhost:8765/visualizer/` to inspect the committed schema-v3 fixture at
+[`docs/assets/kv_trace_schema_v3.jsonl`](docs/assets/kv_trace_schema_v3.jsonl), or load another
+JSONL trace in the browser. The viewer replays real `InferenceEngine(trace=...)` schema-v3
 traces; the committed fixture is a **labelled synthetic sample** produced by a standalone
 generator that emits the same event shapes with a deterministic clock (no engine, model, or GPU
-needed), so the visualizer ships on its own. The viewer does not invent block allocation/free
-events.
+needed), so the visualizer ships on its own. The KV wall is driven by real `block_allocated` /
+`block_freed` events emitted from the allocator boundary — filled blocks are physically held,
+prefix-shared blocks are counted once, and a block frees only when its last owner releases it.
 
 ## Model pin
 

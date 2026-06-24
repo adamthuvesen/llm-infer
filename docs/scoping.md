@@ -105,27 +105,27 @@ kernels/
 ## KV Cache Theater (primary track — trace-driven)
 
 The engine-side trace emitter lives in `llm_infer/tracing.py` and `InferenceEngine(trace=...)`.
-The visualizer replays **real schema-v2 traces** from that path, not a hand-drawn simulation —
+The visualizer replays **real schema-v3 traces** from that path, not a hand-drawn simulation —
 the engine trace is the artifact; the visualizer is a debugger + proof view, not decoration. The
 bundled demo fixture is a labelled synthetic sample emitted in the same schema by a standalone
 generator, so the viewer can ship and run without the engine, a model, or a GPU.
 
-Current trace contract: schema version **2**, emitted as JSON Lines from `TraceRecorder`.
+Current trace contract: schema version **3**, emitted as JSON Lines from `TraceRecorder`.
 Events are typed and stored in engine emission order:
 
-`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · request_finished · batch_size_changed · tokens_per_second_sampled`
+`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · block_allocated · block_freed · request_finished · batch_size_changed · tokens_per_second_sampled`
 
 Prefill events are **chunk-scoped**, not once-per-request. A long prompt can emit several
 `prefill_chunk_started` / `prefill_chunk_progress` pairs before its first sampled token:
 
 ```json
-{"event":"request_admitted","schema_version":2,"sequence":1,"step":0,"request_id":"long","prompt_tokens":5,"max_new_tokens":2,"reserved_blocks":2}
-{"event":"prefill_chunk_started","schema_version":2,"sequence":4,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"total_prompt_tokens":5}
-{"event":"prefill_chunk_progress","schema_version":2,"sequence":5,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"cached_tokens":2,"total_prompt_tokens":5,"completed":false}
-{"event":"prefill_chunk_started","schema_version":2,"sequence":8,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"total_prompt_tokens":5}
-{"event":"prefill_chunk_progress","schema_version":2,"sequence":9,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"cached_tokens":4,"total_prompt_tokens":5,"completed":false}
-{"event":"prefill_chunk_started","schema_version":2,"sequence":12,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"total_prompt_tokens":5}
-{"event":"prefill_chunk_progress","schema_version":2,"sequence":13,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"cached_tokens":5,"total_prompt_tokens":5,"completed":true}
+{"event":"request_admitted","schema_version":3,"sequence":1,"step":0,"request_id":"long","prompt_tokens":5,"max_new_tokens":2,"reserved_blocks":2}
+{"event":"prefill_chunk_started","schema_version":3,"sequence":4,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":3,"sequence":5,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"cached_tokens":2,"total_prompt_tokens":5,"completed":false}
+{"event":"prefill_chunk_started","schema_version":3,"sequence":8,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":3,"sequence":9,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"cached_tokens":4,"total_prompt_tokens":5,"completed":false}
+{"event":"prefill_chunk_started","schema_version":3,"sequence":12,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":3,"sequence":13,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"cached_tokens":5,"total_prompt_tokens":5,"completed":true}
 ```
 
 Visualizer handoff contract: consume only schema-versioned JSONL events from the real engine;
@@ -136,11 +136,14 @@ optional fields as absent, not zero. `decode_step` is the generated-token trace 
 the token source is `prefill`: the first token sampled after a completed prompt prefill must be
 represented there before it appears in `request_finished.token_ids`.
 
-Block lifecycle remains a deliberate follow-up: `block_allocated` / `block_freed` need a clean
-request-aware cache hook around `BlockTable.reserve()` / `BlockTable.free()` (and copy-on-write
-inside `PagedKVCache.prepare_write()`). Do not fake those events from higher-level request
-state, because prefix-shared blocks can be retained or released without returning to the free
-pool.
+Block lifecycle is now emitted honestly. `block_allocated` / `block_freed` come from an observer
+on `BlockAllocator` — the single owner of the free pool — not from higher-level request state. A
+block is `block_allocated` only when it leaves the pool (copy-on-write inside
+`PagedKVCache.prepare_write()` counts, because it allocates a new physical block) and
+`block_freed` only when it truly returns (refcount-0), so a prefix-shared block retained by a
+sibling is never reported freed until its last owner releases it. Block deltas are attributed to
+the owning request via `BlockTable.owner`; each event carries `request_id`, `block_count`,
+`block_ids`, and the post-change `pool_used` / `pool_free` totals.
 
 ## Expansion path (post-v1, engine-first)
 
@@ -177,15 +180,20 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   accepting only the greedy-matching prefix and falling back safely. This is correctness and
   technique evidence only: it is off by default, greedy-only, uses no second model, and makes
   no speed claim.
-- **KV-cache-theater trace visualizer MVP.** The engine now has an opt-in typed recorder for
+- **KV-cache-theater trace visualizer.** The engine has an opt-in typed recorder for
   schema-versioned runtime events emitted from the real `InferenceEngine` path, plus a static
-  local visualizer in `visualizer/` that renders schema-v2 JSONL as request lanes, prefill
-  chunks, decode emissions, batch/throughput signals, event inspection, playback, and honest
-  scheduler-reservation/cache-pressure views. The committed fixture at
-  `docs/assets/kv_trace_schema_v2.jsonl` is a labelled **synthetic sample** produced by a
-  standalone generator that emits the engine's schema-v2 event shapes (no engine/model/GPU
+  local visualizer in `visualizer/` that renders schema-v3 JSONL as request lanes, prefill
+  chunks, decode emissions, batch/throughput signals, event inspection, playback, and a paged
+  KV wall driven by **real block allocation/free** (filled blocks physically held now, the
+  scheduler's reservation shown as headroom). The committed fixture at
+  `docs/assets/kv_trace_schema_v3.jsonl` is a labelled **synthetic sample** produced by a
+  standalone generator that emits the engine's schema-v3 event shapes (no engine/model/GPU
   dependency), so the visualizer ships on its own; the viewer can equally replay real
   `InferenceEngine(trace=...)` traces.
+- **Block allocation/free trace hooks.** `block_allocated` / `block_freed` are emitted from an
+  observer on `BlockAllocator` — the physical free-pool boundary — so they stay honest for
+  refcounted prefix sharing (a retained block is not a free) and copy-on-write (a new physical
+  block is an allocation). This is the prerequisite the preemption demo below needs.
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
@@ -210,9 +218,6 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Block allocation/free trace hooks** — a clean request-aware hook around block reserve/free
-  (and copy-on-write) so KV-cache-theater can show allocation/free honestly (see the *KV Cache
-  Theater* section above). Prerequisite for the preemption demo below.
 - **Request preemption / eviction** — when the KV budget is exhausted, preempt a running request
   (recompute or swap to host) and resume it later, instead of only admitting when it fits. The
   canonical scheduling technique the engine still lacks; it also shows vividly in the visualizer

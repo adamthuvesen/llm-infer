@@ -318,8 +318,16 @@ body.is-playing .btn-play .ico-pause { display: inline; }
 }
 .kv-block.on { border-color: transparent; box-shadow: 0 9px 20px -9px rgba(13, 148, 136, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.3); }
 .kv-block.on::after { opacity: 1; }
+.kv-block.reserved { border-color: var(--prefill); border-style: dashed; box-shadow: none; }
+.kv-block.reserved::after { opacity: 0.12; }
 .kv-block.just::after { animation: blockHit 0.62s var(--ease); }
 @keyframes blockHit { 0% { opacity: 0.35; transform: scale(1.32); } 100% { opacity: 1; transform: scale(1); } }
+
+.kv-legend { display: flex; gap: 16px; padding: 0 20px 4px; }
+.kv-lg { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kv-lg i { width: 12px; height: 12px; border-radius: 4px; flex: none; }
+.kv-lg[data-k="live"] i { background: linear-gradient(155deg, #2dd4bf, var(--prefill) 55%, #0f766e); }
+.kv-lg[data-k="reserved"] i { background: transparent; border: 1px dashed var(--prefill); }
 
 .tooltip {
   position: fixed; z-index: 80; pointer-events: none; opacity: 0; transform: translateY(3px);

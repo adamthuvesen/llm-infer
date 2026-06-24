@@ -26,23 +26,23 @@ def test_committed_kv_trace_fixture_matches_generator(monkeypatch: pytest.Monkey
     assert (ROOT / FIXTURE_PATH).read_text(encoding="utf-8") == build_trace_jsonl()
 
 
-def test_kv_trace_fixture_is_schema_v2_ordered_and_shaped() -> None:
+def test_kv_trace_fixture_is_schema_v3_ordered_and_shaped() -> None:
     events = _fixture_events()
     names = {event["event"] for event in events}
 
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
-    assert all(event["schema_version"] == 2 for event in events)
+    assert all(event["schema_version"] == 3 for event in events)
     assert {
         "request_admitted",
         "prefill_chunk_started",
         "prefill_chunk_progress",
         "decode_step",
+        "block_allocated",
+        "block_freed",
         "request_finished",
         "batch_size_changed",
         "tokens_per_second_sampled",
     } <= names
-    assert "block_allocated" not in names
-    assert "block_freed" not in names
     assert any(event.get("prefix_group_id") == "shared prompt" for event in events)
     assert any(event.get("waiting") == 2 for event in events)
     assert any(
@@ -77,6 +77,55 @@ def test_kv_trace_fixture_has_no_missing_generated_token_events() -> None:
         if event["event"] == "request_finished"
     }
     assert traced_tokens == finished
+
+
+def test_kv_trace_fixture_block_lifecycle_is_honest() -> None:
+    """Every freed block was live, pool counts stay valid, and the shared prefix frees once."""
+    events = _fixture_events()
+    pool_size = None
+    live: set[int] = set()
+    allocations = 0
+    frees = 0
+    for event in events:
+        if event["event"] not in {"block_allocated", "block_freed"}:
+            continue
+        block_ids = event["block_ids"]
+        assert block_ids, "block lifecycle events must carry block_ids"
+        assert event["block_count"] == len(block_ids)
+        assert event["pool_used"] >= 0 and event["pool_free"] >= 0
+        total = event["pool_used"] + event["pool_free"]
+        pool_size = total if pool_size is None else pool_size
+        assert total == pool_size
+
+        if event["event"] == "block_allocated":
+            allocations += 1
+            for block in block_ids:
+                assert block not in live, f"block {block} allocated while still live"
+                live.add(block)
+        else:
+            frees += 1
+            for block in block_ids:
+                assert block in live, f"free-before-alloc of block {block}"
+                live.discard(block)
+        assert len(live) == event["pool_used"]
+
+    assert allocations > 0 and frees > 0
+    assert not live, f"blocks never returned to the pool: {sorted(live)}"
+
+    # The shared prompt block is allocated once (the leader) and the sibling retains it by
+    # fork — so it is never re-allocated and is reported freed exactly once, by the last owner.
+    leader_first_alloc = next(
+        event["block_ids"][0]
+        for event in events
+        if event["event"] == "block_allocated" and event.get("request_id") == "sample-a"
+    )
+    sibling_allocs = [
+        block
+        for event in events
+        if event["event"] == "block_allocated" and event.get("request_id") == "sample-b"
+        for block in event["block_ids"]
+    ]
+    assert leader_first_alloc not in sibling_allocs
 
 
 def test_visualizer_parser_loads_fixture_with_node() -> None:

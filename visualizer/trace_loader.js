@@ -1,10 +1,12 @@
-export const TRACE_SCHEMA_VERSION = 2;
+export const TRACE_SCHEMA_VERSION = 3;
 
 const KNOWN_EVENTS = new Set([
   "request_admitted",
   "prefill_chunk_started",
   "prefill_chunk_progress",
   "decode_step",
+  "block_allocated",
+  "block_freed",
   "request_finished",
   "batch_size_changed",
   "tokens_per_second_sampled",
@@ -51,6 +53,11 @@ export function buildTraceModel(events) {
   const active = new Set();
   const cachedTokens = new Map();
   const generatedTokens = new Map();
+  const heldBlocks = new Map();
+  // Pool occupancy reported by the allocator itself (block_allocated/block_freed carry the
+  // post-change totals), so the KV wall can show blocks actually held, not just reserved.
+  let poolUsed = 0;
+  let poolFree = null;
 
   const ensureRequest = (requestId) => {
     if (!requestId) {
@@ -67,6 +74,7 @@ export function buildTraceModel(events) {
         prefixGroupId: null,
         chunks: [],
         decodes: [],
+        blockEvents: [],
         finish: null,
       });
     }
@@ -97,6 +105,10 @@ export function buildTraceModel(events) {
       sequence: event.sequence,
       step: event.step,
       reservedBlocks,
+      // Blocks physically held right now, summed from the per-request running counts the
+      // allocator events drive. Shared prefix blocks are counted once, by their last owner.
+      allocatedBlocks: poolUsed,
+      poolFree,
       logicalTokens,
       activeRequests: active.size,
     });
@@ -153,6 +165,25 @@ export function buildTraceModel(events) {
       }
     }
 
+    if (event.event === "block_allocated" || event.event === "block_freed") {
+      const request = ensureRequest(event.request_id);
+      const blockCount = event.block_count ?? (Array.isArray(event.block_ids) ? event.block_ids.length : 0);
+      const signed = event.event === "block_allocated" ? blockCount : -blockCount;
+      if (request) {
+        request.blockEvents.push({
+          sequence: event.sequence,
+          step: event.step,
+          kind: event.event,
+          blockCount,
+          blockIds: Array.isArray(event.block_ids) ? event.block_ids : [],
+        });
+        heldBlocks.set(event.request_id, Math.max(0, (heldBlocks.get(event.request_id) ?? 0) + signed));
+      }
+      // Prefer the allocator's own post-change totals; fall back to the running sum.
+      poolUsed = event.pool_used ?? Math.max(0, poolUsed + signed);
+      poolFree = event.pool_free ?? poolFree;
+    }
+
     if (event.event === "request_finished") {
       const request = ensureRequest(event.request_id);
       request.finish = {
@@ -195,6 +226,17 @@ export function buildTraceModel(events) {
   const maxSequence = Math.max(...events.map((event) => event.sequence), 0);
   const maxReservedBlocks = Math.max(...pressureSamples.map((sample) => sample.reservedBlocks), 1);
   const maxLogicalTokens = Math.max(...pressureSamples.map((sample) => sample.logicalTokens), 1);
+  const maxAllocatedBlocks = Math.max(...pressureSamples.map((sample) => sample.allocatedBlocks), 0);
+  // Pool capacity = peak blocks ever in use simultaneously. With pool_free present we know the
+  // true size; otherwise fall back to the reservation wall so the grid stays meaningful.
+  const poolFromFree = Math.max(
+    ...pressureSamples.map((sample) =>
+      sample.poolFree === null || sample.poolFree === undefined ? 0 : sample.allocatedBlocks + sample.poolFree,
+    ),
+    0,
+  );
+  const poolCapacity = poolFromFree > 0 ? poolFromFree : maxReservedBlocks;
+  const hasBlockLifecycle = maxAllocatedBlocks > 0;
 
   return {
     events,
@@ -206,6 +248,9 @@ export function buildTraceModel(events) {
     maxSequence,
     maxReservedBlocks,
     maxLogicalTokens,
+    maxAllocatedBlocks,
+    poolCapacity,
+    hasBlockLifecycle,
   };
 }
 
@@ -250,5 +295,22 @@ function validateEvent(event, lineNumber) {
   }
   if (event.token_source !== undefined && !KNOWN_TOKEN_SOURCES.has(event.token_source)) {
     throw new Error(`Line ${lineNumber} has unknown token_source ${JSON.stringify(event.token_source)}.`);
+  }
+  if (event.event === "block_allocated" || event.event === "block_freed") {
+    validateBlockEvent(event, lineNumber);
+  }
+}
+
+function validateBlockEvent(event, lineNumber) {
+  if (!Array.isArray(event.block_ids) || event.block_ids.some((id) => !Number.isInteger(id) || id < 0)) {
+    throw new Error(`Line ${lineNumber} ${event.event} must have block_ids as non-negative integers.`);
+  }
+  if (!Number.isInteger(event.block_count) || event.block_count !== event.block_ids.length) {
+    throw new Error(`Line ${lineNumber} ${event.event} block_count must match block_ids length.`);
+  }
+  for (const field of ["pool_used", "pool_free"]) {
+    if (!Number.isInteger(event[field]) || event[field] < 0) {
+      throw new Error(`Line ${lineNumber} ${event.event} must have a non-negative integer ${field}.`);
+    }
   }
 }
