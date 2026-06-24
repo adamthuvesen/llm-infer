@@ -1,12 +1,12 @@
 # llm-infer — scoping doc
 
-A minimal, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**, measured as an **rlvr-sql rollout backend**. The engine itself is the goal — learning and showing how a small paged inference engine is built. Beautiful explanation second; speed and the rlvr-sql hook are the *fun side-quest*, not the point.
+A from-scratch, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**. The engine itself is the goal — to **learn** how a real paged inference engine is built and to **showcase** it on GitHub, with code and presentation held to a staff-engineer bar: most of the core things real engines do, kept simple, no over-engineering. Honest explanation second; speed and the rlvr-sql rollout hook are the *fun side-quest* and one applied benchmark, not the identity.
 
 ## The claim (capability statement, not a number)
 
-> A small paged-inference engine for Qwen2.5-Coder-3B — exact greedy decoding vs HF, paged KV-cache + continuous batching running end-to-end, benchmarked against naive HF and vLLM on one GPU, with an early rlvr-sql rollout timing hook.
+> A from-scratch paged-inference engine for Qwen2.5-Coder-3B — exact greedy decoding vs HF; paged KV-cache + continuous batching, chunked prefill, prefix caching, and speculative decoding; benchmarked against naive HF and vLLM on one GPU; replayable in a KV-cache trace visualizer.
 
-Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the RL-rollout measurement — that is what makes it *yours* rather than a generic vLLM clone.
+Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the **methodology and completeness** — correctness proven before any tok/s, the canonical techniques built and made legible, every ceiling and dead-end named — not a single number. The rlvr-sql rollout is one applied benchmark that grounds it in real RL economics, not what makes it *yours*.
 
 ## Hard stop (evidence-based, ship v1 when ALL hold)
 
@@ -102,15 +102,45 @@ kernels/
 - **Benchmark equivalence across all three systems:** same prompts, `max_new_tokens`, stop tokens, greedy decoding, warmup/measurement windows.
 - **No silent gaming.** The directional floor is naive-baseline-relative, not vLLM-relative.
 
-## KV Cache Theater (planned later — trace-driven)
+## KV Cache Theater (primary track — trace-driven)
 
-Planned as a later-stage artifact, after the core engine techniques land (it's the
-*KV-cache-theater visualizer* bullet in the primary forward track above). Build it only if it
-replays **real engine events**, not a simulation. The engine emits a trace; the visualizer is a
-debugger + proof artifact, not decoration. Separate repo / app, fed by llm-infer traces. Event
-schema:
+The engine-side trace emitter lives in `llm_infer/tracing.py` and `InferenceEngine(trace=...)`.
+The visualizer replays **real schema-v2 traces** from that path, not a hand-drawn simulation —
+the engine trace is the artifact; the visualizer is a debugger + proof view, not decoration. The
+bundled demo fixture is a labelled synthetic sample emitted in the same schema by a standalone
+generator, so the viewer can ship and run without the engine, a model, or a GPU.
 
-`request_admitted · prefill_started · block_allocated · decode_step · request_finished · block_freed · batch_size_changed · tokens_per_second_sampled`
+Current trace contract: schema version **2**, emitted as JSON Lines from `TraceRecorder`.
+Events are typed and stored in engine emission order:
+
+`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · request_finished · batch_size_changed · tokens_per_second_sampled`
+
+Prefill events are **chunk-scoped**, not once-per-request. A long prompt can emit several
+`prefill_chunk_started` / `prefill_chunk_progress` pairs before its first sampled token:
+
+```json
+{"event":"request_admitted","schema_version":2,"sequence":1,"step":0,"request_id":"long","prompt_tokens":5,"max_new_tokens":2,"reserved_blocks":2}
+{"event":"prefill_chunk_started","schema_version":2,"sequence":4,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":2,"sequence":5,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"cached_tokens":2,"total_prompt_tokens":5,"completed":false}
+{"event":"prefill_chunk_started","schema_version":2,"sequence":8,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":2,"sequence":9,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"cached_tokens":4,"total_prompt_tokens":5,"completed":false}
+{"event":"prefill_chunk_started","schema_version":2,"sequence":12,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":2,"sequence":13,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"cached_tokens":5,"total_prompt_tokens":5,"completed":true}
+```
+
+Visualizer handoff contract: consume only schema-versioned JSONL events from the real engine;
+order by `sequence`; group per-request work by `request_id`; use `step` only as the engine loop
+tick; use `start_pos`/`end_pos`/`cached_tokens` for prompt chunk rendering; use `request_ids`,
+`token_ids`, `token_source`, and `tokens_emitted` for generated-token rows; and treat absent
+optional fields as absent, not zero. `decode_step` is the generated-token trace event even when
+the token source is `prefill`: the first token sampled after a completed prompt prefill must be
+represented there before it appears in `request_finished.token_ids`.
+
+Block lifecycle remains a deliberate follow-up: `block_allocated` / `block_freed` need a clean
+request-aware cache hook around `BlockTable.reserve()` / `BlockTable.free()` (and copy-on-write
+inside `PagedKVCache.prepare_write()`). Do not fake those events from higher-level request
+state, because prefix-shared blocks can be retained or released without returning to the free
+pool.
 
 ## Expansion path (post-v1, engine-first)
 
@@ -120,7 +150,7 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
 
 ### Done
 
-- **v1 / v1.5 — correct minimal engine + differentiator.** HF-exact greedy oracle, paged
+- **v1 / v1.5 — correct minimal engine + applied benchmark.** HF-exact greedy oracle, paged
   KV-cache + continuous batching end-to-end, the flash backend behind the `AttentionBackend`
   adapter, the three-way benchmark, and the frozen rlvr-sql rollout hook + *Keeping the GPU
   Busy* writeup.
@@ -139,6 +169,23 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   engine from **365.8 tok/s / $0.18 per 1k rollouts** to **411.5 tok/s / $0.16 per 1k
   rollouts**, with prompt prefill token-ops reduced from **15,416** to **3,854** (pinned:
   `bench-results/rollout-rollout-20260622T173732.json`).
+- **Chunked prefill / mixed prefill-decode.** Active decode requests now keep advancing between
+  bounded prompt chunks for not-yet-prefilled requests, preserving the cached-token path while
+  removing the old "prefill fully, then decode" split for long prompts.
+- **Speculative decoding v1 — prompt-lookup draft + greedy verifier.** The engine can use an
+  n-gram / prompt-lookup draft source and verify `last_token + draft` in one cached forward,
+  accepting only the greedy-matching prefix and falling back safely. This is correctness and
+  technique evidence only: it is off by default, greedy-only, uses no second model, and makes
+  no speed claim.
+- **KV-cache-theater trace visualizer MVP.** The engine now has an opt-in typed recorder for
+  schema-versioned runtime events emitted from the real `InferenceEngine` path, plus a static
+  local visualizer in `visualizer/` that renders schema-v2 JSONL as request lanes, prefill
+  chunks, decode emissions, batch/throughput signals, event inspection, playback, and honest
+  scheduler-reservation/cache-pressure views. The committed fixture at
+  `docs/assets/kv_trace_schema_v2.jsonl` is a labelled **synthetic sample** produced by a
+  standalone generator that emits the engine's schema-v2 event shapes (no engine/model/GPU
+  dependency), so the visualizer ships on its own; the viewer can equally replay real
+  `InferenceEngine(trace=...)` traces.
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
@@ -163,19 +210,19 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Chunked prefill / mixed prefill-decode** — admit and interleave prefill chunks with the
-  decode batch instead of the v1 "prefill fully, then decode" split.
-- **Speculative decoding** — draft-and-verify: propose several tokens cheaply, then verify them
-  in one forward pass. A canonical modern inference technique, a real speed lever, and very
-  teachable. The honest constraint: it needs a *draft source* — a smaller draft model, an
-  n-gram / prompt-lookup table, or self-speculation — and a single-3B frame has no obvious
-  second model, so pick the draft source that fits when the slice is designed.
-- **KV-cache-theater visualizer** — a later-stage "show how the engine works" artifact: a
-  trace-driven view of block allocation, decode steps, and batch-size changes (see the *KV Cache
-  Theater* section below for the event schema). It comes after the core techniques land.
-- **Serving depth** — streaming, an OpenAI-compatible endpoint, metrics, and a load generator,
-  so the engine is drivable as a real server rather than only through the frozen harness. This
-  is the final engine piece — it makes the engine drivable as a real server.
+- **Block allocation/free trace hooks** — a clean request-aware hook around block reserve/free
+  (and copy-on-write) so KV-cache-theater can show allocation/free honestly (see the *KV Cache
+  Theater* section above). Prerequisite for the preemption demo below.
+- **Request preemption / eviction** — when the KV budget is exhausted, preempt a running request
+  (recompute or swap to host) and resume it later, instead of only admitting when it fits. The
+  canonical scheduling technique the engine still lacks; it also shows vividly in the visualizer
+  once the lifecycle hooks exist.
+- **Serving depth** — streaming token output, an OpenAI-compatible endpoint, metrics, and a load
+  generator, so the engine is drivable as a real server rather than only through the frozen
+  harness. The release-defining piece — it turns the engine from a harness into something you
+  can `curl`.
+- **Sampling completeness** — top-k, repetition/frequency penalties, and stop-strings, to round
+  out the decode surface beyond greedy / temperature / top-p.
 - **Expand *Keeping the GPU Busy*** — grow the writeup into a narration of the architecture and
   the honest dead-ends (the v2 ceiling and the decode-graph rejection above), so the doc
   teaches the engine, not just the one rollout number.

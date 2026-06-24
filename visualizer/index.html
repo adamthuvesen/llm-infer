@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KV Cache Observatory</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- ===== Nav ===== -->
+      <nav class="nav">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <span class="brand-name">KV&nbsp;Cache Observatory</span>
+        </div>
+        <div class="nav-right">
+          <span class="tag" id="schemaTag">schema v2</span>
+          <label class="btn btn-ghost btn-file">
+            <input id="fileInput" type="file" accept=".jsonl,application/jsonl,text/plain" />
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 18v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1"/></svg>
+            <span>Load JSONL</span>
+          </label>
+        </div>
+      </nav>
+
+      <!-- ===== Hero ===== -->
+      <header class="hero">
+        <span class="eyebrow">Paged KV cache · live inference trace</span>
+        <h1>Six requests. One cache.<br />Every token, in order.</h1>
+        <p class="lede">
+          A frame-by-frame replay of a paged-attention inference engine — admitting requests,
+          prefilling prompts into KV blocks, and decoding tokens under continuous batching.
+          A synthetic sample trace in the engine's schema-v2 format.
+        </p>
+        <p class="trace-meta" id="traceMeta">loading schema-v2 trace…</p>
+      </header>
+
+      <!-- ===== Player ===== -->
+      <section class="player" aria-label="trace playback">
+        <button id="playButton" type="button" class="btn btn-primary btn-play">
+          <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l12-7-12-7z"/></svg>
+          <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+          <span id="playLabel">Play</span>
+        </button>
+
+        <div class="scrub" id="scrubWrap">
+          <div class="scrub-track">
+            <div class="scrub-fill" id="scrubFill"></div>
+            <div class="scrub-head" id="scrubHead"></div>
+          </div>
+          <input id="scrubber" type="range" min="1" max="1" value="1" aria-label="scrub trace events" />
+        </div>
+
+        <div class="player-readout">
+          <span class="seq"><span id="seqNow">01</span><span class="seq-of">/<span id="seqTotal">49</span></span></span>
+          <span class="phase-chip" id="phaseChip" data-event="">
+            <span class="phase-dot"></span><span id="phaseName">request admitted</span>
+          </span>
+        </div>
+
+        <div class="seg" id="speedSeg" role="group" aria-label="playback speed">
+          <button type="button" data-ms="1000">0.5×</button>
+          <button type="button" data-ms="650" class="is-active">1×</button>
+          <button type="button" data-ms="320">2×</button>
+          <button type="button" data-ms="150">4×</button>
+        </div>
+      </section>
+
+      <!-- ===== Stat strip ===== -->
+      <section class="stats" aria-label="live engine telemetry">
+        <article class="stat">
+          <span class="stat-key">Engine step</span>
+          <span class="stat-val"><span id="gStep">0</span></span>
+          <span class="stat-foot" id="gStepFoot">scheduler loop</span>
+        </article>
+        <article class="stat">
+          <span class="stat-key">Occupancy</span>
+          <span class="stat-val"><span id="gRunning">0</span><span class="stat-unit">running</span></span>
+          <span class="stat-foot"><span id="gWaiting">0</span> waiting</span>
+          <div class="occ-bar" id="occBar" aria-hidden="true"></div>
+        </article>
+        <article class="stat">
+          <span class="stat-key">Throughput</span>
+          <span class="stat-val"><span id="gTps">—</span><span class="stat-unit">tok/s</span></span>
+          <span class="stat-foot" id="tpsNote"></span>
+          <svg class="spark" id="sparkTps" viewBox="0 0 200 38" preserveAspectRatio="none" aria-hidden="true"></svg>
+        </article>
+        <article class="stat">
+          <span class="stat-key">Generated</span>
+          <span class="stat-val"><span id="gGen">0</span><span class="stat-unit">tokens</span></span>
+          <svg class="spark" id="sparkGen" viewBox="0 0 200 38" preserveAspectRatio="none" aria-hidden="true"></svg>
+        </article>
+        <article class="stat" id="statStatus">
+          <span class="stat-key">Status</span>
+          <span class="status" id="status">booting</span>
+        </article>
+      </section>
+
+      <!-- ===== Main ===== -->
+      <div class="main">
+        <div class="main-left">
+        <section class="stage" aria-label="request timeline">
+          <div class="panel-bar">
+            <h2>Decode timeline</h2>
+            <div class="legend" aria-label="token source legend">
+              <span class="lg" data-k="prefill"><i></i>prefill</span>
+              <span class="lg" data-k="decode"><i></i>decode</span>
+              <span class="lg" data-k="speculative"><i></i>speculative</span>
+              <span class="lg" data-k="finish"><i></i>finish</span>
+            </div>
+          </div>
+          <div class="stage-scroll">
+            <svg id="theater" role="img" aria-label="request lanes over scheduler steps"></svg>
+          </div>
+        </section>
+
+        <section class="card stream" aria-label="event stream">
+          <div class="panel-bar">
+            <h2>Event stream</h2>
+            <span class="stream-hint">click to scrub</span>
+          </div>
+          <div class="stream-list" id="eventList"></div>
+        </section>
+        </div><!-- /main-left -->
+
+        <aside class="rail">
+          <section class="card kvwall" aria-label="paged KV cache">
+            <div class="panel-bar">
+              <h2>Paged KV cache</h2>
+              <span class="kv-reserve"><span id="kvReserved">0</span><span class="kv-slash">/</span><span id="kvTotal">0</span> blocks</span>
+            </div>
+            <div class="kv-grid" id="kvGrid" aria-hidden="true"></div>
+            <div class="kv-meter">
+              <div class="kv-meter-head"><span>Logical footprint</span><span id="kvLogical">0 tokens</span></div>
+              <div class="kv-meter-track"><span id="kvLogicalFill"></span></div>
+            </div>
+            <p class="kv-note">Schema v2 reports scheduler reservation and observed
+              cached/generated tokens. Block alloc/free is not emitted, so none is invented.</p>
+          </section>
+
+          <section class="card now" aria-label="current event">
+            <div class="panel-bar">
+              <h2 id="nowTitle">request admitted</h2>
+              <span class="now-meta" id="nowMeta">seq 1 · step 0</span>
+            </div>
+            <dl class="anatomy" id="anatomy"></dl>
+            <details class="raw">
+              <summary>Raw event</summary>
+              <pre id="rawJson">{}</pre>
+            </details>
+          </section>
+        </aside>
+      </div>
+
+      <footer class="foot">
+        <span>KV Cache Observatory</span>
+        <span>rendered from <code>InferenceEngine(trace=…)</code> schema-v2 JSONL</span>
+      </footer>
+    </div>
+
+    <div class="tooltip" id="tooltip" role="status" aria-live="polite"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
