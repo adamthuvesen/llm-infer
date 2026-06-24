@@ -23,7 +23,7 @@ import pytest
 import torch
 
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
-from llm_infer.serving.sampler import greedy, sample_row
+from llm_infer.serving.sampler import _apply_top_p, greedy, sample_row
 
 GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
 FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -78,6 +78,31 @@ def test_top_p_one_is_a_no_op_full_softmax() -> None:
     params = SamplingParams(temperature=1.0, top_p=1.0)
     drawn = {int(sample_row(logits, params, generated=[], generator=_gen(s))) for s in range(128)}
     assert drawn == {0, 1, 2, 3}
+
+
+def test_top_p_drops_the_redundant_token_at_an_exact_boundary() -> None:
+    """When the prefix mass reaches exactly top_p, the next token is redundant and is dropped.
+
+    Regression for a ``>`` boundary that kept an extra token when the mass *before* it equalled
+    top_p exactly: the nucleus must be the minimal set whose cumulative mass reaches top_p.
+    """
+    probs = torch.tensor([0.6, 0.4])  # token0 alone reaches top_p=0.6 exactly
+    kept = _apply_top_p(probs, top_p=0.6)
+    assert float(kept[1]) == 0.0  # token1 is redundant at the exact boundary -> dropped
+    assert float(kept[0]) == 1.0  # and the nucleus renormalizes to the single kept token
+
+
+def test_non_finite_params_rejected() -> None:
+    """nan/inf slip past the ``<``/``<=`` range checks, so they must be rejected explicitly."""
+    for kwargs in (
+        {"temperature": float("nan")},
+        {"temperature": float("inf")},
+        {"top_p": float("nan")},
+        {"presence_penalty": float("inf")},
+        {"frequency_penalty": float("nan")},
+    ):
+        with pytest.raises(ValueError):
+            SamplingParams(**kwargs)
 
 
 def test_frequency_penalty_pushes_off_a_repeated_token() -> None:

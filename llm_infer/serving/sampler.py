@@ -18,6 +18,7 @@ standard decode surface: penalties → temperature → top-k → top-p → softm
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -50,6 +51,16 @@ class SamplingParams:
     seed: int = 0
 
     def __post_init__(self) -> None:
+        # Reject non-finite floats first: nan slips past every ``<``/``<=`` range check below
+        # (``nan < 0`` is False), then poisons the softmax — a malformed request must fail loudly.
+        for name, value in (
+            ("temperature", self.temperature),
+            ("top_p", self.top_p),
+            ("presence_penalty", self.presence_penalty),
+            ("frequency_penalty", self.frequency_penalty),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite; got {value}")
         if self.temperature < 0:
             raise ValueError(f"temperature must be >= 0; got {self.temperature}")
         if not (0.0 < self.top_p <= 1.0):
@@ -127,9 +138,10 @@ def _apply_top_p(probs: torch.Tensor, top_p: float) -> torch.Tensor:
         return probs
     sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
     cumulative = torch.cumsum(sorted_probs, dim=-1)
-    # Keep the smallest prefix whose cumulative mass reaches top_p: a token is dropped only if
-    # the mass *strictly before* it already covers top_p, so the boundary token stays.
-    drop = (cumulative - sorted_probs) > top_p
+    # Keep the smallest prefix whose cumulative mass reaches top_p. A token is dropped once the
+    # mass *before* it already covers top_p (``>=``, not ``>``): if the prefix is complete at
+    # exactly top_p, the next token is redundant and must go, so the nucleus is the minimal set.
+    drop = (cumulative - sorted_probs) >= top_p
     sorted_probs = sorted_probs.masked_fill(drop, 0.0)
     kept = torch.zeros_like(probs).scatter_(-1, sorted_idx, sorted_probs)
     return kept / kept.sum(dim=-1, keepdim=True)
