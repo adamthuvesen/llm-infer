@@ -232,6 +232,7 @@ body.is-playing .btn-play .ico-pause { display: inline; }
   display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; margin-bottom: 18px;
   align-items: start;
 }
+.main-left { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 .stage { display: flex; flex-direction: column; min-width: 0; }
 .legend { display: flex; gap: 15px; flex-wrap: wrap; }
 .lg { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }

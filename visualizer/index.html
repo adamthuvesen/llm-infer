@@ -98,6 +98,7 @@
 
       <!-- ===== Main ===== -->
       <div class="main">
+        <div class="main-left">
         <section class="stage" aria-label="request timeline">
           <div class="panel-bar">
             <h2>Decode timeline</h2>
@@ -112,6 +113,15 @@
             <svg id="theater" role="img" aria-label="request lanes over scheduler steps"></svg>
           </div>
         </section>
+
+        <section class="card stream" aria-label="event stream">
+          <div class="panel-bar">
+            <h2>Event stream</h2>
+            <span class="stream-hint">click to scrub</span>
+          </div>
+          <div class="stream-list" id="eventList"></div>
+        </section>
+        </div><!-- /main-left -->
 
         <aside class="rail">
           <section class="card kvwall" aria-label="paged KV cache">
@@ -141,15 +151,6 @@
           </section>
         </aside>
       </div>
-
-      <!-- ===== Event stream ===== -->
-      <section class="card stream" aria-label="event stream">
-        <div class="panel-bar">
-          <h2>Event stream</h2>
-          <span class="stream-hint">click to scrub</span>
-        </div>
-        <div class="stream-list" id="eventList"></div>
-      </section>
 
       <footer class="foot">
         <span>KV Cache Observatory</span>

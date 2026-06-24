@@ -3,6 +3,7 @@ import { buildTraceModel, eventLabel, parseJsonlTrace } from "./trace_loader.js"
 
 const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v2.jsonl";
 const NS = "http://www.w3.org/2000/svg";
+const REDUCE = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
 const state = {
   events: [],
@@ -161,6 +162,9 @@ function render() {
   els.scrubFill.style.width = `${progress * 100}%`;
   els.scrubHead.style.left = `${progress * 100}%`;
 
+  if (els.phaseChip.dataset.event !== event.event && !REDUCE) {
+    els.phaseChip.animate([{ opacity: 0.3 }, { opacity: 1 }], { duration: 240, easing: "ease-out" });
+  }
   els.phaseChip.dataset.event = event.event;
   els.phaseName.textContent = event.event.replaceAll("_", " ");
 
@@ -176,14 +180,19 @@ function renderGauges(event) {
   const batch = currentBatchSignal();
   const tps = currentThroughputSignal();
 
-  els.gStep.textContent = event.step;
+  animateNumber(els.gStep, event.step, 0);
   els.gStepFoot.textContent = `${pressure.activeRequests} active · ${state.model.maxStep + 1} total`;
-  els.gRunning.textContent = batch.batchSize;
-  els.gWaiting.textContent = batch.waiting;
+  animateNumber(els.gRunning, batch.batchSize, 0);
+  animateNumber(els.gWaiting, batch.waiting, 0);
   els.occBar.style.setProperty("--occ", `${(batch.batchSize / maxBatchSize()) * 100}%`);
 
-  els.gTps.textContent = tps ? tps.tokensPerSecond.toFixed(1) : "—";
-  els.gGen.textContent = tps ? tps.totalGeneratedTokens : 0;
+  if (tps) {
+    animateNumber(els.gTps, tps.tokensPerSecond, 1);
+  } else {
+    els.gTps.textContent = "—";
+    delete els.gTps.dataset.v;
+  }
+  animateNumber(els.gGen, tps ? tps.totalGeneratedTokens : 0, 0);
 
   const visibleTps = state.model.throughputSignals.filter((s) => s.sequence <= state.cursor);
   const maxTps = Math.max(...state.model.throughputSignals.map((s) => s.tokensPerSecond), 1);
@@ -288,9 +297,9 @@ function renderKvWall() {
   }
   state.prevReserved = pressure.reservedBlocks;
 
-  els.kvReserved.textContent = pressure.reservedBlocks;
+  animateNumber(els.kvReserved, pressure.reservedBlocks, 0);
   els.kvTotal.textContent = state.model.maxReservedBlocks;
-  els.kvLogical.textContent = `${pressure.logicalTokens} tokens`;
+  animateNumber(els.kvLogical, pressure.logicalTokens, 0, " tokens");
   els.kvLogicalFill.style.width = `${Math.max(3, (pressure.logicalTokens / state.model.maxLogicalTokens) * 100)}%`;
 }
 
@@ -312,6 +321,13 @@ function renderInspector(event) {
     fragment.append(row);
   }
   els.anatomy.replaceChildren(fragment);
+  if (!REDUCE) {
+    els.anatomy.animate(
+      [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }],
+      { duration: 240, easing: "cubic-bezier(0.22,0.61,0.36,1)" },
+    );
+    els.nowTitle.animate([{ opacity: 0.35 }, { opacity: 1 }], { duration: 220, easing: "ease-out" });
+  }
 }
 
 function renderEventList() {
@@ -566,6 +582,26 @@ function clear(node) { node.replaceChildren(); }
 function xForStep(step, geo) {
   const span = Math.max(state.model.maxStep, 1);
   return geo.left + (step / span) * (geo.right - geo.left);
+}
+
+function animateNumber(el, target, decimals = 0, suffix = "") {
+  const fmt = (n) => `${decimals ? n.toFixed(decimals) : Math.round(n)}${suffix}`;
+  const from = el.dataset.v !== undefined ? Number(el.dataset.v) : target;
+  el.dataset.v = String(target);
+  if (REDUCE || from === target) {
+    el.textContent = fmt(target);
+    return;
+  }
+  if (el._raf) cancelAnimationFrame(el._raf);
+  const duration = 360;
+  const start = performance.now();
+  const tick = (now) => {
+    const p = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = fmt(from + (target - from) * eased);
+    el._raf = p < 1 ? requestAnimationFrame(tick) : null;
+  };
+  el._raf = requestAnimationFrame(tick);
 }
 
 function pad(value) { return String(value).padStart(2, "0"); }
