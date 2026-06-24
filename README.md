@@ -175,6 +175,22 @@ The flash-attn backend is the one GPU-only path; its oracle runs on the target G
 
 See [`AGENTS.md`](AGENTS.md) for the working agreement and the honesty bar.
 
+## Serving
+
+The engine runs behind an OpenAI-compatible HTTP server (optional `serving` extra), so it is
+`curl`-able like OpenAI and continuous batching shows under concurrent load — many clients
+stream off one background `step()` loop. It speaks **Chat Completions** (`/v1/chat/completions`,
+the primary surface) and **Completions** (`/v1/completions`), plus a stateless **Responses**
+subset (`/v1/responses`, text generation only). Streaming and non-streaming both supported;
+unsupported features (tools, logprobs, `n>1`, server-side state) return an honest 4xx.
+
+```bash
+uv sync --extra serving
+python -m llm_infer.serve            # loads the pinned Qwen, serves on 127.0.0.1:8000
+```
+
+The metrics, load generator, and full showcase land in a follow-up.
+
 ## KV Trace Visualizer
 
 ```bash
