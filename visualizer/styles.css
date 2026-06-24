@@ -316,13 +316,13 @@ body.is-playing .btn-play .ico-pause { display: inline; }
 .now { display: flex; flex-direction: column; }
 #nowTitle { letter-spacing: -0.01em; }
 .now-meta { font-family: var(--mono); font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
-.anatomy { margin: 0; padding: 6px 20px; }
+.anatomy { margin: 0; padding: 6px 20px; min-height: 196px; }
 .anatomy .row { display: grid; grid-template-columns: 84px 1fr; gap: 12px; align-items: baseline; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .anatomy .row:last-child { border-bottom: 0; }
 .anatomy dt { margin: 0; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.03em; text-transform: uppercase; color: var(--faint); }
 .anatomy dd { margin: 0; font-size: 13.5px; line-height: 1.45; color: var(--ink); }
 .anatomy dd.mono { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.anatomy dd.why { font-size: 12.5px; color: var(--muted); }
+.anatomy dd.why { font-size: 12.5px; color: var(--muted); min-height: 2.9em; }
 .raw { margin: 4px 20px 20px; }
 .raw summary { cursor: pointer; list-style: none; font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); padding: 10px 0; border-top: 1px solid var(--line); }
 .raw summary::-webkit-details-marker { display: none; }
