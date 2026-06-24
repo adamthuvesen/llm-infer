@@ -124,8 +124,8 @@ legibility**. Speed is a side-quest with its own track, last.
    supports greedy decoding only; sampled rollouts keep the existing path. This is evidence
    that the draft/verify technique is wired correctly, not a claimed speed win.
 6. **KV-cache-theater trace emitter MVP.** `InferenceEngine(trace=...)` emits typed,
-   schema-versioned events from the real request path: request admission, prefill start and
-   progress, decode steps, request finish, batch-size changes, and throughput samples.
+   schema-versioned events from the real request path: request admission, prefill chunk start
+   and progress, decode steps, request finish, batch-size changes, and throughput samples.
 
 **Primary forward track — engine technique-completeness + legibility**
 

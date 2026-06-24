@@ -335,7 +335,7 @@ class InferenceEngine:
         end_pos = start_pos + chunk_size
         result.prefill_chunks[request.request_id] = (start_pos, end_pos)
         self._emit_trace(
-            "prefill_started",
+            "prefill_chunk_started",
             request_id=request.request_id,
             start_pos=start_pos,
             end_pos=end_pos,
@@ -361,7 +361,7 @@ class InferenceEngine:
                 )
         request.prompt_cached_tokens = end_pos
         self._emit_trace(
-            "prefill_progress",
+            "prefill_chunk_progress",
             request_id=request.request_id,
             start_pos=start_pos,
             end_pos=end_pos,

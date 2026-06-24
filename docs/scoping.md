@@ -107,13 +107,37 @@ kernels/
 The engine-side trace emitter MVP lives in `llm_infer/tracing.py` and
 `InferenceEngine(trace=...)`. Build the visualizer only if it replays **real engine events**,
 not a simulation. The engine trace is the artifact; the visualizer is a debugger + proof view,
-not decoration. Separate repo / app, fed by llm-infer traces. Current MVP event schema:
+not decoration. Separate repo / app, fed by llm-infer traces.
 
-`request_admitted · prefill_started · prefill_progress · decode_step · request_finished · batch_size_changed · tokens_per_second_sampled`
+Current trace contract: schema version **2**, emitted as JSON Lines from `TraceRecorder`.
+Events are typed and stored in engine emission order:
+
+`request_admitted · prefill_chunk_started · prefill_chunk_progress · decode_step · request_finished · batch_size_changed · tokens_per_second_sampled`
+
+Prefill events are **chunk-scoped**, not once-per-request. A long prompt can emit several
+`prefill_chunk_started` / `prefill_chunk_progress` pairs before its first sampled token:
+
+```json
+{"event":"request_admitted","schema_version":2,"sequence":1,"step":0,"request_id":"long","prompt_tokens":5,"max_new_tokens":2,"reserved_blocks":2}
+{"event":"prefill_chunk_started","schema_version":2,"sequence":4,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":2,"sequence":5,"step":0,"request_id":"long","start_pos":0,"end_pos":2,"cached_tokens":2,"total_prompt_tokens":5,"completed":false}
+{"event":"prefill_chunk_started","schema_version":2,"sequence":8,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":2,"sequence":9,"step":1,"request_id":"long","start_pos":2,"end_pos":4,"cached_tokens":4,"total_prompt_tokens":5,"completed":false}
+{"event":"prefill_chunk_started","schema_version":2,"sequence":12,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"total_prompt_tokens":5}
+{"event":"prefill_chunk_progress","schema_version":2,"sequence":13,"step":2,"request_id":"long","start_pos":4,"end_pos":5,"cached_tokens":5,"total_prompt_tokens":5,"completed":true}
+```
+
+Visualizer handoff contract: consume only schema-versioned JSONL events from the real engine;
+order by `sequence`; group per-request work by `request_id`; use `step` only as the engine loop
+tick; use `start_pos`/`end_pos`/`cached_tokens` for prompt chunk rendering; use `request_ids`,
+`token_ids`, and `tokens_emitted` for decode rows; and treat absent optional fields as absent,
+not zero.
 
 Block lifecycle remains a deliberate follow-up: `block_allocated` / `block_freed` need a clean
-allocator or block-table hook around `BlockTable.reserve()` / `BlockTable.free()`. Do not fake
-those events from higher-level request state.
+request-aware cache hook around `BlockTable.reserve()` / `BlockTable.free()` (and copy-on-write
+inside `PagedKVCache.prepare_write()`). Do not fake those events from higher-level request
+state, because prefix-shared blocks can be retained or released without returning to the free
+pool.
 
 ## Expansion path (post-v1, engine-first)
 

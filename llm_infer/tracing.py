@@ -13,12 +13,12 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-TRACE_SCHEMA_VERSION = 1
+TRACE_SCHEMA_VERSION = 2
 
 TraceEventName = Literal[
     "request_admitted",
-    "prefill_started",
-    "prefill_progress",
+    "prefill_chunk_started",
+    "prefill_chunk_progress",
     "decode_step",
     "request_finished",
     "batch_size_changed",

@@ -96,8 +96,8 @@ def test_trace_recorder_captures_real_engine_events() -> None:
     events = recorder.events
     names = [event.event for event in events]
     assert "request_admitted" in names
-    assert "prefill_started" in names
-    assert "prefill_progress" in names
+    assert "prefill_chunk_started" in names
+    assert "prefill_chunk_progress" in names
     assert "decode_step" in names
     assert "request_finished" in names
     assert "batch_size_changed" in names
@@ -111,10 +111,27 @@ def test_trace_recorder_captures_real_engine_events() -> None:
     assert events[0].prompt_tokens == 1
     assert events[0].reserved_blocks == 1
 
+    long_starts = [
+        event
+        for event in events
+        if event.event == "prefill_chunk_started" and event.request_id == "long"
+    ]
+    assert [(event.start_pos, event.end_pos) for event in long_starts] == [
+        (0, 2),
+        (2, 4),
+        (4, 5),
+    ]
+    assert [event.total_prompt_tokens for event in long_starts] == [5, 5, 5]
+
     long_progress = [
         event
         for event in events
-        if event.event == "prefill_progress" and event.request_id == "long"
+        if event.event == "prefill_chunk_progress" and event.request_id == "long"
+    ]
+    assert [(event.start_pos, event.end_pos) for event in long_progress] == [
+        (0, 2),
+        (2, 4),
+        (4, 5),
     ]
     assert [event.cached_tokens for event in long_progress] == [2, 4, 5]
     assert [event.completed for event in long_progress] == [False, False, True]
