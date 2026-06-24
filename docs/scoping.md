@@ -1,12 +1,12 @@
 # llm-infer — scoping doc
 
-A minimal, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**, measured as an **rlvr-sql rollout backend**. The engine itself is the goal — learning and showing how a small paged inference engine is built. Beautiful explanation second; speed and the rlvr-sql hook are the *fun side-quest*, not the point.
+A from-scratch, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**. The engine itself is the goal — to **learn** how a real paged inference engine is built and to **showcase** it on GitHub, with code and presentation held to a staff-engineer bar: most of the core things real engines do, kept simple, no over-engineering. Honest explanation second; speed and the rlvr-sql rollout hook are the *fun side-quest* and one applied benchmark, not the identity.
 
 ## The claim (capability statement, not a number)
 
-> A small paged-inference engine for Qwen2.5-Coder-3B — exact greedy decoding vs HF, paged KV-cache + continuous batching running end-to-end, benchmarked against naive HF and vLLM on one GPU, with an early rlvr-sql rollout timing hook.
+> A from-scratch paged-inference engine for Qwen2.5-Coder-3B — exact greedy decoding vs HF; paged KV-cache + continuous batching, chunked prefill, prefix caching, and speculative decoding; benchmarked against naive HF and vLLM on one GPU; replayable in a KV-cache trace visualizer.
 
-Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the RL-rollout measurement — that is what makes it *yours* rather than a generic vLLM clone.
+Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the **methodology and completeness** — correctness proven before any tok/s, the canonical techniques built and made legible, every ceiling and dead-end named — not a single number. The rlvr-sql rollout is one applied benchmark that grounds it in real RL economics, not what makes it *yours*.
 
 ## Hard stop (evidence-based, ship v1 when ALL hold)
 
@@ -104,10 +104,11 @@ kernels/
 
 ## KV Cache Theater (primary track — trace-driven)
 
-The engine-side trace emitter MVP lives in `llm_infer/tracing.py` and
-`InferenceEngine(trace=...)`. Build the visualizer only if it replays **real engine events**,
-not a simulation. The engine trace is the artifact; the visualizer is a debugger + proof view,
-not decoration. Separate repo / app, fed by llm-infer traces.
+The engine-side trace emitter lives in `llm_infer/tracing.py` and `InferenceEngine(trace=...)`.
+The visualizer replays **real schema-v2 traces** from that path, not a hand-drawn simulation —
+the engine trace is the artifact; the visualizer is a debugger + proof view, not decoration. The
+bundled demo fixture is a labelled synthetic sample emitted in the same schema by a standalone
+generator, so the viewer can ship and run without the engine, a model, or a GPU.
 
 Current trace contract: schema version **2**, emitted as JSON Lines from `TraceRecorder`.
 Events are typed and stored in engine emission order:
@@ -149,7 +150,7 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
 
 ### Done
 
-- **v1 / v1.5 — correct minimal engine + differentiator.** HF-exact greedy oracle, paged
+- **v1 / v1.5 — correct minimal engine + applied benchmark.** HF-exact greedy oracle, paged
   KV-cache + continuous batching end-to-end, the flash backend behind the `AttentionBackend`
   adapter, the three-way benchmark, and the frozen rlvr-sql rollout hook + *Keeping the GPU
   Busy* writeup.
@@ -181,7 +182,10 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   local visualizer in `visualizer/` that renders schema-v2 JSONL as request lanes, prefill
   chunks, decode emissions, batch/throughput signals, event inspection, playback, and honest
   scheduler-reservation/cache-pressure views. The committed fixture at
-  `docs/assets/kv_trace_schema_v2.jsonl` is generated through `InferenceEngine(trace=...)`.
+  `docs/assets/kv_trace_schema_v2.jsonl` is a labelled **synthetic sample** produced by a
+  standalone generator that emits the engine's schema-v2 event shapes (no engine/model/GPU
+  dependency), so the visualizer ships on its own; the viewer can equally replay real
+  `InferenceEngine(trace=...)` traces.
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
@@ -206,11 +210,19 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Block allocation/free trace hooks** — extend KV-cache-theater only after the cache has a
-  clean request-aware lifecycle hook (see the *KV Cache Theater* section above).
-- **Serving depth** — streaming, an OpenAI-compatible endpoint, metrics, and a load generator,
-  so the engine is drivable as a real server rather than only through the frozen harness. This
-  is the final engine piece — it makes the engine drivable as a real server.
+- **Block allocation/free trace hooks** — a clean request-aware hook around block reserve/free
+  (and copy-on-write) so KV-cache-theater can show allocation/free honestly (see the *KV Cache
+  Theater* section above). Prerequisite for the preemption demo below.
+- **Request preemption / eviction** — when the KV budget is exhausted, preempt a running request
+  (recompute or swap to host) and resume it later, instead of only admitting when it fits. The
+  canonical scheduling technique the engine still lacks; it also shows vividly in the visualizer
+  once the lifecycle hooks exist.
+- **Serving depth** — streaming token output, an OpenAI-compatible endpoint, metrics, and a load
+  generator, so the engine is drivable as a real server rather than only through the frozen
+  harness. The release-defining piece — it turns the engine from a harness into something you
+  can `curl`.
+- **Sampling completeness** — top-k, repetition/frequency penalties, and stop-strings, to round
+  out the decode surface beyond greedy / temperature / top-p.
 - **Expand *Keeping the GPU Busy*** — grow the writeup into a narration of the architecture and
   the honest dead-ends (the v2 ceiling and the decode-graph rejection above), so the doc
   teaches the engine, not just the one rollout number.
