@@ -93,10 +93,10 @@ class PagedKVCache:
                     "cannot write into a shared prompt block; only appending into the "
                     "last partial prompt block may copy-on-write"
                 )
-            new_block = self.allocator.allocate(1)[0]
+            new_block = self.allocator.allocate(1, owner=table.owner)[0]
             self._copy_block(block, new_block)
             table.blocks[block_index] = new_block
-            self.allocator.free([block])
+            self.allocator.free([block], owner=table.owner)
 
     def write(
         self,
