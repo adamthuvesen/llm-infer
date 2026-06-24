@@ -409,9 +409,16 @@ class InferenceEngine:
         if logits is None:
             return
 
+        # Leader prefill can preempt a sibling to make pool room (under preemption): that sibling
+        # is now reset and back in the waiting queue. Re-filter the group to the still-running
+        # members before forking/sampling — forking onto a preempted sibling would resurrect it
+        # out of the waiting queue with a live block table and a sampled token. It re-prefills
+        # next step instead. The leader is never its own victim, so it always survives.
+        members = [leader, *(r for r in requests if r is not leader and self._is_running(r))]
+
         leader.prefilled = True
         leader.prompt_cached_tokens = len(prompt_ids)
-        for request in requests:
+        for request in members:
             if request is leader:
                 continue
             request.block_table = self.cache.fork_request(leader.block_table)
@@ -420,12 +427,12 @@ class InferenceEngine:
             request.prefilled = True
 
         with self._record_time("sampling"):
-            tokens = [self._sample_one(logits, request) for request in requests]
-        eos_flags = self._eos_flags(torch.stack(tokens), requests)
-        for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
+            tokens = [self._sample_one(logits, request) for request in members]
+        eos_flags = self._eos_flags(torch.stack(tokens), members)
+        for request, token, is_eos in zip(members, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
-        self._trace_decode_step(requests, tokens, token_source="prefill")
-        self._release_finished_in(requests)
+        self._trace_decode_step(members, tokens, token_source="prefill")
+        self._release_finished_in(members)
 
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""

@@ -153,6 +153,62 @@ def test_prefill_skips_a_request_preempted_mid_step() -> None:
         )
 
 
+def test_shared_prefix_group_under_preemption_is_uncorrupted_and_exact() -> None:
+    """Combined-path guard: prefix sharing + preemption + chunked prefill stays correct.
+
+    ``_prefill_shared_group`` re-filters the group to still-running members after the leader's
+    prefill, so a sibling that leader prefill preempted mid-loop is not forked/sampled out of the
+    waiting queue (it re-prefills next step). The exact eviction-during-shared-prefill window is
+    hard to force deterministically — footprint admission makes a *fresh* group prefill never
+    preempt, so it needs a chunked leader prefill spanning steps while growers exhaust the pool and
+    a sibling is the LIFO victim. Rather than chase those exact conditions, this exercises all
+    three features together under a tight chunked pool and asserts the invariant that no waiting
+    request ever holds cache state, then that the shared-group outputs match the uninterrupted run.
+    """
+    model = _tiny_qwen()
+    group = [([1, 5, 9, 13, 17, 21], 6, f"sib-{i}") for i in range(3)]
+    growers = [([2, 6, 10], 7, "grow-a"), ([3, 7, 11], 7, "grow-b")]
+
+    def build(engine: InferenceEngine) -> list[Request]:
+        reqs = []
+        # Growers admitted first so a sibling is the more-recent LIFO victim during group prefill.
+        for prompt, max_new, rid in growers:
+            reqs.append(Request(rid, list(prompt), max_new, EOS))
+        for prompt, max_new, rid in group:
+            reqs.append(Request(rid, list(prompt), max_new, EOS, prefix_group_id="shared"))
+        for request in reqs:
+            engine.add_request(request)
+        return reqs
+
+    roomy_engine = InferenceEngine(model, block_size=2, num_blocks=64, prefill_chunk_size=1)
+    roomy_reqs = build(roomy_engine)
+    roomy_engine.run()
+    roomy = {r.request_id: r.generated for r in roomy_reqs}
+
+    recorder = TraceRecorder()
+    engine = InferenceEngine(
+        model, block_size=2, num_blocks=6, preemption=True, prefill_chunk_size=1, trace=recorder
+    )
+    tracked = build(engine)
+
+    steps = 0
+    while engine.scheduler.has_work():
+        engine.step()
+        steps += 1
+        assert steps < 600, "engine made no forward progress"
+        for waiting in engine.scheduler.waiting:
+            assert not waiting.prefilled and waiting.block_table is None, (
+                f"{waiting.request_id!r} holds cache state while waiting — a sibling was forked "
+                "out of the waiting queue during shared-group prefill"
+            )
+
+    assert any(e.event == "request_preempted" for e in recorder.events), "scenario must preempt"
+    for request in tracked:
+        assert request.generated == roomy[request.request_id], (
+            f"{request.request_id}: shared-group output under preemption diverged"
+        )
+
+
 def test_finishers_under_pressure_do_not_crash_and_stay_exact() -> None:
     """A request that finishes mid-step must never be hit by a same-step preemption.
 
