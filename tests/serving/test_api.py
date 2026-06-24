@@ -490,7 +490,6 @@ def test_responses_streaming_matches_non_streaming() -> None:
         {"model": "tiny-qwen", "input": "hi", "store": True},
         {"model": "tiny-qwen", "input": "hi", "background": True},
         {"model": "tiny-qwen", "input": "hi", "n": 2},
-        {"model": "tiny-qwen", "input": "hi", "stop": ["\n"]},  # 10b scope — still rejected
         {"model": "tiny-qwen", "input": "hi", "temperature": -1.0},  # out of range -> 400
     ],
 )
@@ -540,8 +539,6 @@ def _chat(**extra) -> dict:
         (_chat(n=2), 422),
         # logprobs: not produced.
         (_chat(logprobs=True), 422),
-        # stop sequences: out of scope (mission 10b) — still rejected.
-        (_chat(stop=["\n"]), 422),
         # genuinely unknown field: extra=forbid -> 422 from validation.
         (_chat(logit_bias={"1": 1.0}), 422),
         # out-of-range sampling: mapped to SamplingParams, which rejects loudly as 400.

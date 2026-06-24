@@ -3,9 +3,9 @@
 The request models set ``extra="forbid"`` so an unknown field (``tools``, ``functions``,
 ``logit_bias``, …) is a loud 422, never a silent drop. Sampling fields (``temperature``,
 ``top_p``, ``top_k`` extension, ``presence_penalty``, ``frequency_penalty``, ``seed``) are
-honored per request. Fields this engine cannot honor (``n > 1``, ``logprobs``, ``stop`` beyond
-what we support) are validated explicitly with a clear message. We model only what we actually
-serve; we do not pretend to accept more.
+honored per request, and ``stop`` is honored as output-text truncation. Fields this engine
+cannot honor (``n > 1``, ``logprobs``) are validated explicitly with a clear message. We model
+only what we actually serve; we do not pretend to accept more.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ class SamplingRequestBody(BaseModel):
 
     ``top_k`` is a documented extension (OpenAI does not define it); the rest are standard.
     Sampling is per request, so any combination is honored rather than checked against a
-    server-wide sampler. Fields the engine cannot honor (``n > 1``, ``logprobs``, ``stop``)
-    are validated explicitly in the handlers.
+    server-wide sampler. ``stop`` is honored as output-text truncation; fields the engine cannot
+    honor (``n > 1``, ``logprobs``) are validated explicitly in the handlers.
     """
 
     model_config = ConfigDict(extra="forbid")
