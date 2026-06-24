@@ -18,6 +18,7 @@ entropy, so sampling actually exercises the RNG, but no 3B load and no GPU.
 from __future__ import annotations
 
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
+from llm_infer.tracing import TraceRecorder
 from tests.correctness.test_chunked_prefill import _tiny_qwen
 
 EOS = frozenset({36})  # the tiny model does not emit this on these prompts, so length caps decode
@@ -75,6 +76,44 @@ def test_sampled_request_batched_equals_serial() -> None:
         (i for i, (a, b) in enumerate(zip(batched["target"], alone, strict=False)) if a != b), None
     )
     assert batched["target"] == alone, f"sampled target diverged batched-vs-serial at step {diff}"
+
+
+def test_sampled_request_survives_preemption_batched_equals_serial() -> None:
+    """A sampled request preempted and resumed under KV pressure still equals its solo run.
+
+    The two hardest properties compose here: recompute rebuilds the *exact* KV of the evicted
+    request, AND its per-request RNG advances only on real emitted tokens (the recompute resume
+    samples nothing), so the seeded draw stream is identical no matter when eviction lands. We
+    force the target to be the LIFO victim, confirm it is actually preempted, then assert its
+    tokens match the same request decoded alone in a roomy, never-preempting pool — proof that
+    eviction perturbs neither the cache nor the sampler.
+    """
+    model = _tiny_qwen()
+    target_prompt = [3, 7, 11]
+    target_sampling = SamplingParams(temperature=1.0, top_p=0.95, seed=42)
+
+    # Reference: the target alone in a roomy pool, never preempted.
+    solo = InferenceEngine(model, block_size=4, num_blocks=8)
+    solo.add_request(Request("target", list(target_prompt), 6, EOS, sampling=target_sampling))
+    alone = solo.run()["target"]
+
+    # Tight preempting pool: fillers admitted first, the target last so the LIFO victim policy
+    # evicts it under pressure. A mix of sampled and greedy batchmates must not perturb its draw.
+    recorder = TraceRecorder()
+    engine = InferenceEngine(model, block_size=4, num_blocks=3, preemption=True, trace=recorder)
+    engine.add_request(
+        Request("filler", [2, 6, 10], 6, EOS, sampling=SamplingParams(temperature=1.5, seed=7))
+    )
+    engine.add_request(Request("filler2", [4, 8, 12], 6, EOS))  # greedy batchmate
+    engine.add_request(Request("target", list(target_prompt), 6, EOS, sampling=target_sampling))
+    batched = engine.run()
+
+    assert any(
+        e.event == "request_preempted" and e.request_id == "target" for e in recorder.events
+    ), "the target must actually be preempted or this test does not exercise the combined path"
+    assert batched["target"] == alone, (
+        f"sampled target diverged after preemption (batched={batched['target']}, alone={alone})"
+    )
 
 
 def test_greedy_row_in_a_sampled_batch_matches_greedy_alone() -> None:
