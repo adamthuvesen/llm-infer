@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from llm_infer.kv_cache.block_allocator import BlockPoolEvent
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.qwen import QwenModel
 from llm_infer.profiling import TimingProfiler
@@ -83,6 +84,11 @@ class InferenceEngine:
         self.prefill_chunk_size = prefill_chunk_size
         self.speculative = PromptLookupDraft(speculative) if speculative is not None else None
         self.trace = trace
+        if trace is not None:
+            # Emit block_allocated/block_freed from the real physical boundary: the allocator
+            # is the single owner of the free pool, so its events are honest for refcounted
+            # prefix sharing and copy-on-write. Nothing is faked from request state.
+            self.cache.allocator.observer = self._trace_pool_event
         self._trace_clock = trace_clock or time.perf_counter
         self._step_index = 0
         self._trace_sequence = 0
@@ -205,6 +211,7 @@ class InferenceEngine:
             if request is leader:
                 continue
             request.block_table = self.cache.fork_request(leader.block_table)
+            request.block_table.owner = request.request_id
             request.prompt_cached_tokens = leader.prompt_cached_tokens
             request.prefilled = True
 
@@ -328,6 +335,7 @@ class InferenceEngine:
         """Cache one prompt chunk and return final-prompt logits when ready to sample."""
         if request.block_table is None:
             request.block_table = self.cache.new_request()
+            request.block_table.owner = request.request_id
 
         start_pos = request.prompt_cached_tokens
         if request.block_table.length != start_pos:
@@ -459,6 +467,32 @@ class InferenceEngine:
             tokens_emitted=len(tokens),
             token_source=token_source,
         )
+
+    def _trace_pool_event(self, event: BlockPoolEvent) -> None:
+        """Emit block lifecycle from the allocator's physical free-pool boundary.
+
+        Each :class:`BlockPoolEvent` is purely an allocation or a real free (refcount-0):
+        ``allocate`` reports no frees, ``free`` reports only the blocks that returned to the
+        pool, and ``retain`` (prefix sharing) reports nothing at all.
+        """
+        if event.allocated:
+            self._emit_trace(
+                "block_allocated",
+                request_id=event.owner,
+                block_count=len(event.allocated),
+                block_ids=event.allocated,
+                pool_used=event.num_used,
+                pool_free=event.num_free,
+            )
+        if event.freed:
+            self._emit_trace(
+                "block_freed",
+                request_id=event.owner,
+                block_count=len(event.freed),
+                block_ids=event.freed,
+                pool_used=event.num_used,
+                pool_free=event.num_free,
+            )
 
     def _trace_request_finished(self, request: Request) -> None:
         if self.trace is None:

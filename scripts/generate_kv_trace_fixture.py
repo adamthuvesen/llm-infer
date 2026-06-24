@@ -1,10 +1,16 @@
-"""Generate the committed schema-v2 trace used by the KV trace visualizer.
+"""Generate the committed schema-v3 trace used by the KV trace visualizer.
 
 This is a **self-contained synthetic generator**: it does not import the inference
 engine or torch. It runs a small, simplified continuous-batching simulation — FIFO
 admission against a fixed block budget, chunked prefill, prefix-group sharing, batched
-decode, and throughput sampling — and emits schema-v2 trace events that mirror the
-shape ``InferenceEngine(trace=...)`` produces.
+decode, lazy physical block allocation, and throughput sampling — and emits schema-v3
+trace events that mirror the shape ``InferenceEngine(trace=...)`` produces.
+
+Block lifecycle is emitted honestly. A small ``BlockPool`` mirrors the real refcounted
+allocator: a ``block_allocated`` fires only when a block leaves the free pool, a
+``block_freed`` fires only when a block truly returns to it (refcount-0), and a shared
+prefix block retained by a forked sibling is never re-allocated and is freed once, by its
+last owner.
 
 The trace is a labelled **synthetic sample**, not a measured benchmark: the prompts,
 token ids, and per-step clock are all invented. Keeping the generator standalone lets
@@ -17,9 +23,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-FIXTURE_PATH = Path("docs/assets/kv_trace_schema_v2.jsonl")
+FIXTURE_PATH = Path("docs/assets/kv_trace_schema_v3.jsonl")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BLOCK_SIZE = 4
 NUM_BLOCKS = 12
 PREFILL_CHUNK = 2
@@ -35,6 +41,54 @@ def blocks_for(prompt_len: int, max_new: int) -> int:
     return -(-max_positions // BLOCK_SIZE)  # ceil division
 
 
+def blocks_for_length(length: int) -> int:
+    """How many physical blocks ``length`` cached positions occupy."""
+    return -(-length // BLOCK_SIZE)  # ceil division
+
+
+class BlockPool:
+    """A refcounted free list mirroring ``BlockAllocator`` so block events stay honest.
+
+    Hands out ids from the end (LIFO) and frees only the blocks whose refcount reaches
+    zero, exactly like the engine's allocator. ``retain`` shares a block without a new
+    allocation, so a forked prefix sibling emits no ``block_allocated`` for shared blocks.
+    """
+
+    def __init__(self, num_blocks: int) -> None:
+        self.num_blocks = num_blocks
+        self._free: list[int] = list(range(num_blocks))
+        self._refcounts: list[int] = [0] * num_blocks
+
+    @property
+    def used(self) -> int:
+        return self.num_blocks - len(self._free)
+
+    @property
+    def free(self) -> int:
+        return len(self._free)
+
+    def allocate(self, count: int) -> list[int]:
+        out = self._free[-count:]
+        del self._free[-count:]
+        for block in out:
+            self._refcounts[block] = 1
+        return out
+
+    def retain(self, blocks: list[int]) -> None:
+        for block in blocks:
+            self._refcounts[block] += 1
+
+    def free_blocks(self, blocks: list[int]) -> list[int]:
+        """Drop one reference each; return only the ids that truly returned to the pool."""
+        returned: list[int] = []
+        for block in blocks:
+            self._refcounts[block] -= 1
+            if self._refcounts[block] == 0:
+                self._free.append(block)
+                returned.append(block)
+        return returned
+
+
 @dataclass
 class Req:
     """One simulated request: a prompt length, a decode budget, and a deterministic ramp."""
@@ -48,6 +102,8 @@ class Req:
     prefilled: bool = False
     finished: bool = False
     generated: list[int] = field(default_factory=list)
+    blocks: list[int] = field(default_factory=list)
+    length: int = 0
 
     @property
     def reserved(self) -> int:
@@ -63,7 +119,7 @@ class Req:
 
 
 class TraceBuilder:
-    """Accumulates ordered schema-v2 events with a running sequence/step/throughput clock."""
+    """Accumulates ordered schema-v3 events with a running sequence/step/throughput clock."""
 
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
@@ -83,6 +139,30 @@ class TraceBuilder:
                 "step": self.step,
                 **fields,
             }
+        )
+
+    def block_allocated(self, request: Req, pool: BlockPool, block_ids: list[int]) -> None:
+        if not block_ids:
+            return
+        self.emit(
+            "block_allocated",
+            request_id=request.request_id,
+            block_count=len(block_ids),
+            block_ids=block_ids,
+            pool_used=pool.used,
+            pool_free=pool.free,
+        )
+
+    def block_freed(self, request: Req, pool: BlockPool, block_ids: list[int]) -> None:
+        if not block_ids:
+            return
+        self.emit(
+            "block_freed",
+            request_id=request.request_id,
+            block_count=len(block_ids),
+            block_ids=block_ids,
+            pool_used=pool.used,
+            pool_free=pool.free,
         )
 
     def batch_changed(self, size: int, waiting: int) -> None:
@@ -135,7 +215,21 @@ def _admit(tb: TraceBuilder, waiting: list[Req], running: list[Req], committed: 
     return committed
 
 
-def _prefill_chunk(tb: TraceBuilder, leader: Req) -> bool:
+def _grow(tb: TraceBuilder, request: Req, pool: BlockPool, new_length: int) -> None:
+    """Lazily allocate physical blocks so ``request`` can hold ``new_length`` positions.
+
+    Mirrors ``BlockTable.reserve``: pulls fresh blocks from the pool only when the existing
+    ones cannot cover the new length, emitting one ``block_allocated`` for the delta.
+    """
+    request.length = new_length
+    needed = blocks_for_length(new_length)
+    if needed > len(request.blocks):
+        new_blocks = pool.allocate(needed - len(request.blocks))
+        request.blocks.extend(new_blocks)
+        tb.block_allocated(request, pool, new_blocks)
+
+
+def _prefill_chunk(tb: TraceBuilder, leader: Req, pool: BlockPool) -> bool:
     """Cache one prompt chunk for the leader; return True when its prompt is fully cached."""
     start = leader.cached
     end = min(leader.prompt_len, start + PREFILL_CHUNK)
@@ -146,6 +240,9 @@ def _prefill_chunk(tb: TraceBuilder, leader: Req) -> bool:
         end_pos=end,
         total_prompt_tokens=leader.prompt_len,
     )
+    # The chunk's K/V write needs blocks to cover the newly cached positions (engine order:
+    # the model's table.reserve allocates inside the forward, before progress is recorded).
+    _grow(tb, leader, pool, end)
     leader.cached = end
     completed = end == leader.prompt_len
     tb.emit(
@@ -160,7 +257,7 @@ def _prefill_chunk(tb: TraceBuilder, leader: Req) -> bool:
     return completed
 
 
-def _prefill(tb: TraceBuilder, to_prefill: list[Req]) -> int:
+def _prefill(tb: TraceBuilder, to_prefill: list[Req], pool: BlockPool) -> int:
     """Advance prefill for unstarted requests; prefix siblings share the leader's cache."""
     tokens_emitted = 0
     handled: set[str] = set()
@@ -175,15 +272,21 @@ def _prefill(tb: TraceBuilder, to_prefill: list[Req]) -> int:
         handled.update(r.request_id for r in group)
 
         leader = group[0]
-        if not _prefill_chunk(tb, leader):
+        if not _prefill_chunk(tb, leader, pool):
             continue
 
-        # Prompt fully cached: siblings fork the leader's cache (no prefill events of their
-        # own), and every group member samples its first token from the prefill logits.
+        # Prompt fully cached: siblings fork the leader's cache by retaining its physical
+        # blocks (a refcount bump, never a new allocation), and every group member samples
+        # its first token from the prefill logits. The prefill-sampled token is written on
+        # the next decode step, so it does not grow the cache here.
         tokens = []
         for member in group:
             member.prefilled = True
             member.cached = leader.prompt_len
+            member.length = leader.length
+            if member is not leader:
+                member.blocks = list(leader.blocks)
+                pool.retain(member.blocks)
             tokens.append(member.emit_token())
         tb.emit(
             "decode_step",
@@ -197,10 +300,17 @@ def _prefill(tb: TraceBuilder, to_prefill: list[Req]) -> int:
     return tokens_emitted
 
 
-def _decode(tb: TraceBuilder, to_decode: list[Req]) -> int:
-    """One batched decode step advancing every already-ready request by a token."""
+def _decode(tb: TraceBuilder, to_decode: list[Req], pool: BlockPool) -> int:
+    """One batched decode step advancing every already-ready request by a token.
+
+    Each request first reserves a slot for the token being written (growing its block table
+    when the previous block is full — engine order: table.reserve runs before the step), then
+    the batched decode emits one token per request.
+    """
     if not to_decode:
         return 0
+    for request in to_decode:
+        _grow(tb, request, pool, request.length + 1)
     tokens = [request.emit_token() for request in to_decode]
     tb.emit(
         "decode_step",
@@ -214,14 +324,17 @@ def _decode(tb: TraceBuilder, to_decode: list[Req]) -> int:
 
 
 def build_trace_jsonl() -> str:
-    """Run the synthetic scenario and return its schema-v2 JSONL.
+    """Run the synthetic scenario and return its schema-v3 JSONL.
 
     Six requests against twelve blocks: the first four fit at once and the last two queue,
     so the trace shows real waiting pressure, continuous-batching churn, a long chunked
     prefill (``code-gen``), two requests sharing one prompt (``sample-a``/``sample-b`` —
-    the second reuses the first's cached prefix), and a KV wall that fills to capacity.
+    the second reuses the first's cached prefix), and a KV wall that fills as blocks are
+    allocated and drains as finished requests free them. The shared prompt block is freed
+    once, by whichever sibling finishes last.
     """
     tb = TraceBuilder()
+    pool = BlockPool(NUM_BLOCKS)
     waiting = [
         Req("sample-a", prompt_len=4, max_new=5, base_token=36, group="shared prompt"),
         Req("sample-b", prompt_len=4, max_new=5, base_token=36, group="shared prompt"),
@@ -241,7 +354,7 @@ def build_trace_jsonl() -> str:
 
         to_decode = [r for r in running if r.prefilled]
         to_prefill = [r for r in running if not r.prefilled]
-        tokens_this_step = _prefill(tb, to_prefill) + _decode(tb, to_decode)
+        tokens_this_step = _prefill(tb, to_prefill, pool) + _decode(tb, to_decode, pool)
 
         for request in [r for r in running if r.finished]:
             tb.emit(
@@ -251,6 +364,11 @@ def build_trace_jsonl() -> str:
                 generated_tokens=len(request.generated),
                 reason="length",
             )
+            # Free the request's physical blocks; only last-owner blocks return to the pool,
+            # so a shared prefix block held by a still-running sibling is not reported freed.
+            returned = pool.free_blocks(request.blocks)
+            tb.block_freed(request, pool, returned)
+            request.blocks = []
             committed -= request.reserved
             running.remove(request)
         tb.batch_changed(len(running), len(waiting))

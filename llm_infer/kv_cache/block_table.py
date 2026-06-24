@@ -22,6 +22,9 @@ class BlockTable:
         self.block_size = block_size
         self.blocks: list[int] = []
         self.length = 0
+        # Set by the engine to the owning request id so allocator pool events can be
+        # attributed in the trace. Pure bookkeeping — the table still owns its blocks.
+        self.owner: str | None = None
 
     @property
     def num_blocks(self) -> int:
@@ -39,7 +42,9 @@ class BlockTable:
         target = self.length + num_new_tokens
         needed_blocks = -(-target // self.block_size)  # ceil division
         if needed_blocks > len(self.blocks):
-            self.blocks.extend(self.allocator.allocate(needed_blocks - len(self.blocks)))
+            self.blocks.extend(
+                self.allocator.allocate(needed_blocks - len(self.blocks), owner=self.owner)
+            )
 
     def fork_shared(self) -> BlockTable:
         """Create another table pointing at the same physical blocks.
@@ -51,6 +56,7 @@ class BlockTable:
         fork = BlockTable(self.allocator, self.block_size)
         fork.blocks = list(self.blocks)
         fork.length = self.length
+        fork.owner = self.owner
         if fork.blocks:
             self.allocator.retain(fork.blocks)
         return fork
@@ -70,6 +76,6 @@ class BlockTable:
     def free(self) -> None:
         """Return all blocks to the allocator and reset to empty."""
         if self.blocks:
-            self.allocator.free(self.blocks)
+            self.allocator.free(self.blocks, owner=self.owner)
         self.blocks = []
         self.length = 0

@@ -1,7 +1,7 @@
 import { appendEventRowContent } from "./event_row.js";
 import { buildTraceModel, eventLabel, parseJsonlTrace } from "./trace_loader.js";
 
-const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v2.jsonl";
+const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v3.jsonl";
 const NS = "http://www.w3.org/2000/svg";
 const REDUCE = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
@@ -317,16 +317,23 @@ function drawToken(scene, x, y, decode, visible) {
 
 function renderKvWall() {
   const pressure = currentPressure();
+  // Physically-held blocks (block_allocated minus block_freed) fill the wall; the scheduler's
+  // reservation shows as fainter headroom beyond them so the gap between reserved and real is
+  // visible. Without lifecycle events the wall falls back to reservation only.
+  const live = state.model.hasBlockLifecycle ? pressure.allocatedBlocks : pressure.reservedBlocks;
+  const reserved = pressure.reservedBlocks;
   const blocks = els.kvGrid.children;
   for (let i = 0; i < blocks.length; i += 1) {
-    const on = i < pressure.reservedBlocks;
-    blocks[i].classList.toggle("on", on);
-    blocks[i].classList.toggle("just", on && i >= state.prevReserved && pressure.reservedBlocks > state.prevReserved);
+    const isLive = i < live;
+    const isReserved = !isLive && i < reserved;
+    blocks[i].classList.toggle("on", isLive);
+    blocks[i].classList.toggle("reserved", isReserved);
+    blocks[i].classList.toggle("just", isLive && i >= state.prevReserved && live > state.prevReserved);
   }
-  state.prevReserved = pressure.reservedBlocks;
+  state.prevReserved = live;
 
-  animateNumber(els.kvReserved, pressure.reservedBlocks, 0);
-  els.kvTotal.textContent = state.model.maxReservedBlocks;
+  animateNumber(els.kvReserved, live, 0);
+  els.kvTotal.textContent = state.model.poolCapacity;
   animateNumber(els.kvLogical, pressure.logicalTokens, 0, " tokens");
   els.kvLogicalFill.style.width = `${Math.max(3, (pressure.logicalTokens / state.model.maxLogicalTokens) * 100)}%`;
 }
@@ -458,6 +465,7 @@ function eventFamily(event) {
   switch (event.event) {
     case "request_admitted": case "batch_size_changed": return "admit";
     case "prefill_chunk_started": case "prefill_chunk_progress": return "prefill";
+    case "block_allocated": case "block_freed": return "prefill";
     case "decode_step": return event.token_source === "speculative" ? "spec" : "decode";
     case "request_finished": return "finish";
     default: return "";
@@ -500,6 +508,22 @@ function eventAnatomy(event) {
       { label: "why", value: "Every generated token is emitted here, one loop step at a time.", why: true },
     ];
   }
+  if (event.event === "block_allocated" || event.event === "block_freed") {
+    const verb = event.event === "block_allocated" ? "allocated" : "freed";
+    return [
+      { label: "request", value: event.request_id ?? "—", mono: true },
+      { label: verb, value: `${event.block_count} block${event.block_count === 1 ? "" : "s"} · ${event.block_ids.join(", ")}`, mono: true },
+      { label: "pool", value: `${event.pool_used} used · ${event.pool_free} free`, mono: true },
+      {
+        label: "why",
+        value:
+          event.event === "block_allocated"
+            ? "A physical block left the free pool — copy-on-write counts, prefix sharing does not."
+            : "A block returned to the pool only because its last owner released it.",
+        why: true,
+      },
+    ];
+  }
   if (event.event === "batch_size_changed") {
     return [
       { label: "running", value: `${event.previous_batch_size} → ${event.batch_size}`, mono: true },
@@ -528,7 +552,8 @@ function eventAnatomy(event) {
 
 function buildKvWall() {
   const fragment = document.createDocumentFragment();
-  for (let i = 0; i < state.model.maxReservedBlocks; i += 1) {
+  const capacity = Math.max(state.model.poolCapacity, state.model.maxReservedBlocks);
+  for (let i = 0; i < capacity; i += 1) {
     const block = document.createElement("div");
     block.className = "kv-block";
     fragment.append(block);

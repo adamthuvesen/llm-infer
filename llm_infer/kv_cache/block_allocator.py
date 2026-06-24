@@ -8,6 +8,30 @@ about tensors — it is pure bookkeeping over integer ids.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BlockPoolEvent:
+    """One physical change to the free pool, reported at the allocator boundary.
+
+    ``allocated``/``freed`` are the physical block ids that actually left or
+    re-entered the free pool — a ``retain`` reports nothing, and a ``free`` that only
+    drops a shared block's refcount above zero reports nothing freed. ``num_used`` and
+    ``num_free`` are the pool totals *after* the change. ``owner`` is the request whose
+    table triggered the change, when one is known.
+    """
+
+    owner: str | None
+    allocated: tuple[int, ...]
+    freed: tuple[int, ...]
+    num_used: int
+    num_free: int
+
+
+PoolObserver = Callable[[BlockPoolEvent], None]
+
 
 class OutOfBlocksError(RuntimeError):
     """Raised when more blocks are requested than the pool has free.
@@ -27,19 +51,26 @@ class BlockAllocator:
     finishes and a queued one is admitted.
     """
 
-    def __init__(self, num_blocks: int) -> None:
+    def __init__(self, num_blocks: int, *, observer: PoolObserver | None = None) -> None:
         if num_blocks < 1:
             raise ValueError(f"num_blocks must be >= 1; got {num_blocks}")
         self.num_blocks = num_blocks
         # Stack of free ids; pop/extend from the end so freed blocks are reused soon.
         self._free: list[int] = list(range(num_blocks))
         self._refcounts: list[int] = [0] * num_blocks
+        # Fires after every physical change to the free pool — the single honest hook for
+        # the KV block-lifecycle trace. ``retain`` deliberately does not fire.
+        self.observer = observer
 
     @property
     def num_free(self) -> int:
         return len(self._free)
 
-    def allocate(self, count: int = 1) -> list[int]:
+    @property
+    def num_used(self) -> int:
+        return self.num_blocks - len(self._free)
+
+    def allocate(self, count: int = 1, *, owner: str | None = None) -> list[int]:
         """Hand out ``count`` free block ids, removing them from the pool."""
         if count < 1:
             raise ValueError(f"count must be >= 1; got {count}")
@@ -52,6 +83,7 @@ class BlockAllocator:
         del self._free[-count:]
         for block in out:
             self._refcounts[block] = 1
+        self._notify(owner, allocated=out, freed=[])
         return out
 
     def retain(self, blocks: list[int]) -> None:
@@ -60,7 +92,7 @@ class BlockAllocator:
         for block in blocks:
             self._refcounts[block] += 1
 
-    def free(self, blocks: list[int]) -> None:
+    def free(self, blocks: list[int], *, owner: str | None = None) -> None:
         """Release table references, returning only last-owner blocks to the pool.
 
         Validates the *entire* batch before mutating ``_free`` — out-of-range ids,
@@ -68,12 +100,32 @@ class BlockAllocator:
         changes. A failed free therefore leaves the free list (and the next allocation)
         untouched, never half-applied: a partially-applied release could return a still-owned
         block to the pool and alias another request's KV pages.
+
+        Only blocks whose refcount reaches zero — the ones that truly return to the pool —
+        are reported as freed; a shared prefix block dropped while a sibling still owns it
+        is not a free.
         """
         self._validate_live_blocks(blocks, action="free")
+        returned: list[int] = []
         for block in blocks:
             self._refcounts[block] -= 1
             if self._refcounts[block] == 0:
                 self._free.append(block)
+                returned.append(block)
+        self._notify(owner, allocated=[], freed=returned)
+
+    def _notify(self, owner: str | None, *, allocated: list[int], freed: list[int]) -> None:
+        if self.observer is None or (not allocated and not freed):
+            return
+        self.observer(
+            BlockPoolEvent(
+                owner=owner,
+                allocated=tuple(allocated),
+                freed=tuple(freed),
+                num_used=self.num_used,
+                num_free=self.num_free,
+            )
+        )
 
     def refcount(self, block: int) -> int:
         """Current owner count for one physical block."""

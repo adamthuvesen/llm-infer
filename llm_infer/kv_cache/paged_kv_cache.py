@@ -93,10 +93,10 @@ class PagedKVCache:
                     "cannot write into a shared prompt block; only appending into the "
                     "last partial prompt block may copy-on-write"
                 )
-            new_block = self.allocator.allocate(1)[0]
+            new_block = self.allocator.allocate(1, owner=table.owner)[0]
             self._copy_block(block, new_block)
             table.blocks[block_index] = new_block
-            self.allocator.free([block])
+            self.allocator.free([block], owner=table.owner)
 
     def write(
         self,
@@ -139,16 +139,12 @@ class PagedKVCache:
             )
         for table, pos in zip(tables, positions, strict=True):
             self.prepare_write(table, pos, 1)
-        slots = [
-            table.physical_slot(pos) for table, pos in zip(tables, positions, strict=True)
-        ]
+        slots = [table.physical_slot(pos) for table, pos in zip(tables, positions, strict=True)]
         idx = torch.as_tensor(slots, dtype=torch.long, device=key.device)
         self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = key
         self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = value
 
-    def read(
-        self, table: BlockTable, layer: int, length: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def read(self, table: BlockTable, layer: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather K/V for positions ``0 .. length-1`` as ``(length, num_kv_heads, head_dim)``."""
         idx = torch.as_tensor(
             table.physical_slots(0, length), dtype=torch.long, device=self.key.device
@@ -196,9 +192,7 @@ class PagedKVCache:
             max_len=max(lengths),
         )
 
-    def read_many_plan(
-        self, layer: int, plan: KVReadPlan
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def read_many_plan(self, layer: int, plan: KVReadPlan) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather packed K/V for ``layer`` using a prebuilt :class:`KVReadPlan`."""
         key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[plan.idx]
         value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[plan.idx]

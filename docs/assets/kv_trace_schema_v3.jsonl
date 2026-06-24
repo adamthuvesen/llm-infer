@@ -1,0 +1,115 @@
+{"event": "request_admitted", "max_new_tokens": 5, "prefix_group_id": "shared prompt", "prompt_tokens": 4, "request_id": "sample-a", "reserved_blocks": 2, "schema_version": 3, "sequence": 1, "step": 0}
+{"event": "request_admitted", "max_new_tokens": 5, "prefix_group_id": "shared prompt", "prompt_tokens": 4, "request_id": "sample-b", "reserved_blocks": 2, "schema_version": 3, "sequence": 2, "step": 0}
+{"event": "request_admitted", "max_new_tokens": 8, "prompt_tokens": 12, "request_id": "code-gen", "reserved_blocks": 5, "schema_version": 3, "sequence": 3, "step": 0}
+{"event": "request_admitted", "max_new_tokens": 4, "prompt_tokens": 7, "request_id": "summarize", "reserved_blocks": 3, "schema_version": 3, "sequence": 4, "step": 0}
+{"batch_size": 4, "event": "batch_size_changed", "previous_batch_size": 0, "schema_version": 3, "sequence": 5, "step": 0, "waiting": 2}
+{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "sample-a", "schema_version": 3, "sequence": 6, "start_pos": 0, "step": 0, "total_prompt_tokens": 4}
+{"block_count": 1, "block_ids": [11], "event": "block_allocated", "pool_free": 11, "pool_used": 1, "request_id": "sample-a", "schema_version": 3, "sequence": 7, "step": 0}
+{"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "sample-a", "schema_version": 3, "sequence": 8, "start_pos": 0, "step": 0, "total_prompt_tokens": 4}
+{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 3, "sequence": 9, "start_pos": 0, "step": 0, "total_prompt_tokens": 12}
+{"block_count": 1, "block_ids": [10], "event": "block_allocated", "pool_free": 10, "pool_used": 2, "request_id": "code-gen", "schema_version": 3, "sequence": 10, "step": 0}
+{"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 3, "sequence": 11, "start_pos": 0, "step": 0, "total_prompt_tokens": 12}
+{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 3, "sequence": 12, "start_pos": 0, "step": 0, "total_prompt_tokens": 7}
+{"block_count": 1, "block_ids": [9], "event": "block_allocated", "pool_free": 9, "pool_used": 3, "request_id": "summarize", "schema_version": 3, "sequence": 13, "step": 0}
+{"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 3, "sequence": 14, "start_pos": 0, "step": 0, "total_prompt_tokens": 7}
+{"end_pos": 4, "event": "prefill_chunk_started", "request_id": "sample-a", "schema_version": 3, "sequence": 15, "start_pos": 2, "step": 1, "total_prompt_tokens": 4}
+{"cached_tokens": 4, "completed": true, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "sample-a", "schema_version": 3, "sequence": 16, "start_pos": 2, "step": 1, "total_prompt_tokens": 4}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["sample-a", "sample-b"], "schema_version": 3, "sequence": 17, "step": 1, "token_ids": [36, 36], "token_source": "prefill", "tokens_emitted": 2}
+{"end_pos": 4, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 3, "sequence": 18, "start_pos": 2, "step": 1, "total_prompt_tokens": 12}
+{"cached_tokens": 4, "completed": false, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 3, "sequence": 19, "start_pos": 2, "step": 1, "total_prompt_tokens": 12}
+{"end_pos": 4, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 3, "sequence": 20, "start_pos": 2, "step": 1, "total_prompt_tokens": 7}
+{"cached_tokens": 4, "completed": false, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 3, "sequence": 21, "start_pos": 2, "step": 1, "total_prompt_tokens": 7}
+{"elapsed_seconds": 0.006, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 22, "step": 1, "tokens_emitted": 2, "tokens_per_second": 333.3333333333333, "total_generated_tokens": 2}
+{"end_pos": 6, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 3, "sequence": 23, "start_pos": 4, "step": 2, "total_prompt_tokens": 12}
+{"block_count": 1, "block_ids": [8], "event": "block_allocated", "pool_free": 8, "pool_used": 4, "request_id": "code-gen", "schema_version": 3, "sequence": 24, "step": 2}
+{"cached_tokens": 6, "completed": false, "end_pos": 6, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 3, "sequence": 25, "start_pos": 4, "step": 2, "total_prompt_tokens": 12}
+{"end_pos": 6, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 3, "sequence": 26, "start_pos": 4, "step": 2, "total_prompt_tokens": 7}
+{"block_count": 1, "block_ids": [7], "event": "block_allocated", "pool_free": 7, "pool_used": 5, "request_id": "summarize", "schema_version": 3, "sequence": 27, "step": 2}
+{"cached_tokens": 6, "completed": false, "end_pos": 6, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 3, "sequence": 28, "start_pos": 4, "step": 2, "total_prompt_tokens": 7}
+{"block_count": 1, "block_ids": [6], "event": "block_allocated", "pool_free": 6, "pool_used": 6, "request_id": "sample-a", "schema_version": 3, "sequence": 29, "step": 2}
+{"block_count": 1, "block_ids": [5], "event": "block_allocated", "pool_free": 5, "pool_used": 7, "request_id": "sample-b", "schema_version": 3, "sequence": 30, "step": 2}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["sample-a", "sample-b"], "schema_version": 3, "sequence": 31, "step": 2, "token_ids": [37, 37], "token_source": "decode", "tokens_emitted": 2}
+{"elapsed_seconds": 0.012, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 32, "step": 2, "tokens_emitted": 2, "tokens_per_second": 333.3333333333333, "total_generated_tokens": 4}
+{"end_pos": 8, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 3, "sequence": 33, "start_pos": 6, "step": 3, "total_prompt_tokens": 12}
+{"cached_tokens": 8, "completed": false, "end_pos": 8, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 3, "sequence": 34, "start_pos": 6, "step": 3, "total_prompt_tokens": 12}
+{"end_pos": 7, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 3, "sequence": 35, "start_pos": 6, "step": 3, "total_prompt_tokens": 7}
+{"cached_tokens": 7, "completed": true, "end_pos": 7, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 3, "sequence": 36, "start_pos": 6, "step": 3, "total_prompt_tokens": 7}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["summarize"], "schema_version": 3, "sequence": 37, "step": 3, "token_ids": [33], "token_source": "prefill", "tokens_emitted": 1}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["sample-a", "sample-b"], "schema_version": 3, "sequence": 38, "step": 3, "token_ids": [38, 38], "token_source": "decode", "tokens_emitted": 2}
+{"elapsed_seconds": 0.018000000000000002, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 39, "step": 3, "tokens_emitted": 3, "tokens_per_second": 388.88888888888886, "total_generated_tokens": 7}
+{"end_pos": 10, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 3, "sequence": 40, "start_pos": 8, "step": 4, "total_prompt_tokens": 12}
+{"block_count": 1, "block_ids": [4], "event": "block_allocated", "pool_free": 4, "pool_used": 8, "request_id": "code-gen", "schema_version": 3, "sequence": 41, "step": 4}
+{"cached_tokens": 10, "completed": false, "end_pos": 10, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 3, "sequence": 42, "start_pos": 8, "step": 4, "total_prompt_tokens": 12}
+{"batch_size": 3, "event": "decode_step", "request_ids": ["sample-a", "sample-b", "summarize"], "schema_version": 3, "sequence": 43, "step": 4, "token_ids": [39, 39, 34], "token_source": "decode", "tokens_emitted": 3}
+{"elapsed_seconds": 0.024, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 44, "step": 4, "tokens_emitted": 3, "tokens_per_second": 416.6666666666667, "total_generated_tokens": 10}
+{"end_pos": 12, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 3, "sequence": 45, "start_pos": 10, "step": 5, "total_prompt_tokens": 12}
+{"cached_tokens": 12, "completed": true, "end_pos": 12, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 3, "sequence": 46, "start_pos": 10, "step": 5, "total_prompt_tokens": 12}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["code-gen"], "schema_version": 3, "sequence": 47, "step": 5, "token_ids": [37], "token_source": "prefill", "tokens_emitted": 1}
+{"block_count": 1, "block_ids": [3], "event": "block_allocated", "pool_free": 3, "pool_used": 9, "request_id": "summarize", "schema_version": 3, "sequence": 48, "step": 5}
+{"batch_size": 3, "event": "decode_step", "request_ids": ["sample-a", "sample-b", "summarize"], "schema_version": 3, "sequence": 49, "step": 5, "token_ids": [40, 40, 35], "token_source": "decode", "tokens_emitted": 3}
+{"event": "request_finished", "generated_tokens": 5, "reason": "length", "request_id": "sample-a", "schema_version": 3, "sequence": 50, "step": 5, "token_ids": [36, 37, 38, 39, 40]}
+{"block_count": 1, "block_ids": [6], "event": "block_freed", "pool_free": 4, "pool_used": 8, "request_id": "sample-a", "schema_version": 3, "sequence": 51, "step": 5}
+{"event": "request_finished", "generated_tokens": 5, "reason": "length", "request_id": "sample-b", "schema_version": 3, "sequence": 52, "step": 5, "token_ids": [36, 37, 38, 39, 40]}
+{"block_count": 2, "block_ids": [11, 5], "event": "block_freed", "pool_free": 6, "pool_used": 6, "request_id": "sample-b", "schema_version": 3, "sequence": 53, "step": 5}
+{"batch_size": 2, "event": "batch_size_changed", "previous_batch_size": 4, "schema_version": 3, "sequence": 54, "step": 5, "waiting": 2}
+{"elapsed_seconds": 0.03, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 55, "step": 5, "tokens_emitted": 4, "tokens_per_second": 466.6666666666667, "total_generated_tokens": 14}
+{"event": "request_admitted", "max_new_tokens": 6, "prompt_tokens": 2, "request_id": "chat-quick", "reserved_blocks": 2, "schema_version": 3, "sequence": 56, "step": 6}
+{"batch_size": 3, "event": "batch_size_changed", "previous_batch_size": 2, "schema_version": 3, "sequence": 57, "step": 6, "waiting": 1}
+{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "chat-quick", "schema_version": 3, "sequence": 58, "start_pos": 0, "step": 6, "total_prompt_tokens": 2}
+{"block_count": 1, "block_ids": [5], "event": "block_allocated", "pool_free": 5, "pool_used": 7, "request_id": "chat-quick", "schema_version": 3, "sequence": 59, "step": 6}
+{"cached_tokens": 2, "completed": true, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "chat-quick", "schema_version": 3, "sequence": 60, "start_pos": 0, "step": 6, "total_prompt_tokens": 2}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["chat-quick"], "schema_version": 3, "sequence": 61, "step": 6, "token_ids": [26], "token_source": "prefill", "tokens_emitted": 1}
+{"block_count": 1, "block_ids": [11], "event": "block_allocated", "pool_free": 4, "pool_used": 8, "request_id": "code-gen", "schema_version": 3, "sequence": 62, "step": 6}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "summarize"], "schema_version": 3, "sequence": 63, "step": 6, "token_ids": [38, 36], "token_source": "decode", "tokens_emitted": 2}
+{"event": "request_finished", "generated_tokens": 4, "reason": "length", "request_id": "summarize", "schema_version": 3, "sequence": 64, "step": 6, "token_ids": [33, 34, 35, 36]}
+{"block_count": 3, "block_ids": [9, 7, 3], "event": "block_freed", "pool_free": 7, "pool_used": 5, "request_id": "summarize", "schema_version": 3, "sequence": 65, "step": 6}
+{"batch_size": 2, "event": "batch_size_changed", "previous_batch_size": 3, "schema_version": 3, "sequence": 66, "step": 6, "waiting": 1}
+{"elapsed_seconds": 0.036000000000000004, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 67, "step": 6, "tokens_emitted": 3, "tokens_per_second": 472.2222222222222, "total_generated_tokens": 17}
+{"event": "request_admitted", "max_new_tokens": 6, "prompt_tokens": 9, "request_id": "translate", "reserved_blocks": 4, "schema_version": 3, "sequence": 68, "step": 7}
+{"batch_size": 3, "event": "batch_size_changed", "previous_batch_size": 2, "schema_version": 3, "sequence": 69, "step": 7, "waiting": 0}
+{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "translate", "schema_version": 3, "sequence": 70, "start_pos": 0, "step": 7, "total_prompt_tokens": 9}
+{"block_count": 1, "block_ids": [3], "event": "block_allocated", "pool_free": 6, "pool_used": 6, "request_id": "translate", "schema_version": 3, "sequence": 71, "step": 7}
+{"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "translate", "schema_version": 3, "sequence": 72, "start_pos": 0, "step": 7, "total_prompt_tokens": 9}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "chat-quick"], "schema_version": 3, "sequence": 73, "step": 7, "token_ids": [39, 27], "token_source": "decode", "tokens_emitted": 2}
+{"elapsed_seconds": 0.042, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 74, "step": 7, "tokens_emitted": 2, "tokens_per_second": 452.38095238095235, "total_generated_tokens": 19}
+{"end_pos": 4, "event": "prefill_chunk_started", "request_id": "translate", "schema_version": 3, "sequence": 75, "start_pos": 2, "step": 8, "total_prompt_tokens": 9}
+{"cached_tokens": 4, "completed": false, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "translate", "schema_version": 3, "sequence": 76, "start_pos": 2, "step": 8, "total_prompt_tokens": 9}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "chat-quick"], "schema_version": 3, "sequence": 77, "step": 8, "token_ids": [40, 28], "token_source": "decode", "tokens_emitted": 2}
+{"elapsed_seconds": 0.048, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 78, "step": 8, "tokens_emitted": 2, "tokens_per_second": 437.5, "total_generated_tokens": 21}
+{"end_pos": 6, "event": "prefill_chunk_started", "request_id": "translate", "schema_version": 3, "sequence": 79, "start_pos": 4, "step": 9, "total_prompt_tokens": 9}
+{"block_count": 1, "block_ids": [7], "event": "block_allocated", "pool_free": 5, "pool_used": 7, "request_id": "translate", "schema_version": 3, "sequence": 80, "step": 9}
+{"cached_tokens": 6, "completed": false, "end_pos": 6, "event": "prefill_chunk_progress", "request_id": "translate", "schema_version": 3, "sequence": 81, "start_pos": 4, "step": 9, "total_prompt_tokens": 9}
+{"block_count": 1, "block_ids": [9], "event": "block_allocated", "pool_free": 4, "pool_used": 8, "request_id": "chat-quick", "schema_version": 3, "sequence": 82, "step": 9}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "chat-quick"], "schema_version": 3, "sequence": 83, "step": 9, "token_ids": [41, 29], "token_source": "decode", "tokens_emitted": 2}
+{"elapsed_seconds": 0.054, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 84, "step": 9, "tokens_emitted": 2, "tokens_per_second": 425.9259259259259, "total_generated_tokens": 23}
+{"end_pos": 8, "event": "prefill_chunk_started", "request_id": "translate", "schema_version": 3, "sequence": 85, "start_pos": 6, "step": 10, "total_prompt_tokens": 9}
+{"cached_tokens": 8, "completed": false, "end_pos": 8, "event": "prefill_chunk_progress", "request_id": "translate", "schema_version": 3, "sequence": 86, "start_pos": 6, "step": 10, "total_prompt_tokens": 9}
+{"block_count": 1, "block_ids": [6], "event": "block_allocated", "pool_free": 3, "pool_used": 9, "request_id": "code-gen", "schema_version": 3, "sequence": 87, "step": 10}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "chat-quick"], "schema_version": 3, "sequence": 88, "step": 10, "token_ids": [42, 30], "token_source": "decode", "tokens_emitted": 2}
+{"elapsed_seconds": 0.06, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 89, "step": 10, "tokens_emitted": 2, "tokens_per_second": 416.6666666666667, "total_generated_tokens": 25}
+{"end_pos": 9, "event": "prefill_chunk_started", "request_id": "translate", "schema_version": 3, "sequence": 90, "start_pos": 8, "step": 11, "total_prompt_tokens": 9}
+{"block_count": 1, "block_ids": [2], "event": "block_allocated", "pool_free": 2, "pool_used": 10, "request_id": "translate", "schema_version": 3, "sequence": 91, "step": 11}
+{"cached_tokens": 9, "completed": true, "end_pos": 9, "event": "prefill_chunk_progress", "request_id": "translate", "schema_version": 3, "sequence": 92, "start_pos": 8, "step": 11, "total_prompt_tokens": 9}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["translate"], "schema_version": 3, "sequence": 93, "step": 11, "token_ids": [32], "token_source": "prefill", "tokens_emitted": 1}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "chat-quick"], "schema_version": 3, "sequence": 94, "step": 11, "token_ids": [43, 31], "token_source": "decode", "tokens_emitted": 2}
+{"event": "request_finished", "generated_tokens": 6, "reason": "length", "request_id": "chat-quick", "schema_version": 3, "sequence": 95, "step": 11, "token_ids": [26, 27, 28, 29, 30, 31]}
+{"block_count": 2, "block_ids": [5, 9], "event": "block_freed", "pool_free": 4, "pool_used": 8, "request_id": "chat-quick", "schema_version": 3, "sequence": 96, "step": 11}
+{"batch_size": 2, "event": "batch_size_changed", "previous_batch_size": 3, "schema_version": 3, "sequence": 97, "step": 11, "waiting": 0}
+{"elapsed_seconds": 0.066, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 98, "step": 11, "tokens_emitted": 3, "tokens_per_second": 424.24242424242425, "total_generated_tokens": 28}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["code-gen", "translate"], "schema_version": 3, "sequence": 99, "step": 12, "token_ids": [44, 33], "token_source": "decode", "tokens_emitted": 2}
+{"event": "request_finished", "generated_tokens": 8, "reason": "length", "request_id": "code-gen", "schema_version": 3, "sequence": 100, "step": 12, "token_ids": [37, 38, 39, 40, 41, 42, 43, 44]}
+{"block_count": 5, "block_ids": [10, 8, 4, 11, 6], "event": "block_freed", "pool_free": 9, "pool_used": 3, "request_id": "code-gen", "schema_version": 3, "sequence": 101, "step": 12}
+{"batch_size": 1, "event": "batch_size_changed", "previous_batch_size": 2, "schema_version": 3, "sequence": 102, "step": 12, "waiting": 0}
+{"elapsed_seconds": 0.07200000000000001, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 103, "step": 12, "tokens_emitted": 2, "tokens_per_second": 416.66666666666663, "total_generated_tokens": 30}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["translate"], "schema_version": 3, "sequence": 104, "step": 13, "token_ids": [34], "token_source": "decode", "tokens_emitted": 1}
+{"elapsed_seconds": 0.078, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 105, "step": 13, "tokens_emitted": 1, "tokens_per_second": 397.43589743589746, "total_generated_tokens": 31}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["translate"], "schema_version": 3, "sequence": 106, "step": 14, "token_ids": [35], "token_source": "decode", "tokens_emitted": 1}
+{"elapsed_seconds": 0.084, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 107, "step": 14, "tokens_emitted": 1, "tokens_per_second": 380.9523809523809, "total_generated_tokens": 32}
+{"block_count": 1, "block_ids": [6], "event": "block_allocated", "pool_free": 8, "pool_used": 4, "request_id": "translate", "schema_version": 3, "sequence": 108, "step": 15}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["translate"], "schema_version": 3, "sequence": 109, "step": 15, "token_ids": [36], "token_source": "decode", "tokens_emitted": 1}
+{"elapsed_seconds": 0.09, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 110, "step": 15, "tokens_emitted": 1, "tokens_per_second": 366.6666666666667, "total_generated_tokens": 33}
+{"batch_size": 1, "event": "decode_step", "request_ids": ["translate"], "schema_version": 3, "sequence": 111, "step": 16, "token_ids": [37], "token_source": "decode", "tokens_emitted": 1}
+{"event": "request_finished", "generated_tokens": 6, "reason": "length", "request_id": "translate", "schema_version": 3, "sequence": 112, "step": 16, "token_ids": [32, 33, 34, 35, 36, 37]}
+{"block_count": 4, "block_ids": [3, 7, 2, 6], "event": "block_freed", "pool_free": 12, "pool_used": 0, "request_id": "translate", "schema_version": 3, "sequence": 113, "step": 16}
+{"batch_size": 0, "event": "batch_size_changed", "previous_batch_size": 1, "schema_version": 3, "sequence": 114, "step": 16, "waiting": 0}
+{"elapsed_seconds": 0.096, "event": "tokens_per_second_sampled", "schema_version": 3, "sequence": 115, "step": 16, "tokens_emitted": 1, "tokens_per_second": 354.1666666666667, "total_generated_tokens": 34}

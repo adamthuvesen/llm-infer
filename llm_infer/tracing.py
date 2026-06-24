@@ -2,9 +2,11 @@
 
 Tracing is opt-in: pass a :class:`TraceRecorder` to ``InferenceEngine(trace=...)``.
 The recorder stores schema-versioned events in emission order and can serialize them as
-JSON Lines for a later visualizer. The MVP intentionally records engine lifecycle events
-only; block allocation/free events need a lower-level allocator/table hook so they are not
-faked here.
+JSON Lines for a later visualizer. Block allocation/free events are emitted from the real
+physical boundary in :class:`~llm_infer.kv_cache.block_allocator.BlockAllocator` — a block is
+``block_allocated`` only when it leaves the free pool and ``block_freed`` only when it truly
+returns to it (refcount-0), so prefix-shared blocks retained by a sibling are never reported as
+freed and a copy-on-write that allocates a new physical block is reported as an allocation.
 """
 
 from __future__ import annotations
@@ -13,13 +15,15 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-TRACE_SCHEMA_VERSION = 2
+TRACE_SCHEMA_VERSION = 3
 
 TraceEventName = Literal[
     "request_admitted",
     "prefill_chunk_started",
     "prefill_chunk_progress",
     "decode_step",
+    "block_allocated",
+    "block_freed",
     "request_finished",
     "batch_size_changed",
     "tokens_per_second_sampled",
@@ -52,6 +56,10 @@ class TraceEvent:
     cached_tokens: int | None = None
     total_prompt_tokens: int | None = None
     completed: bool | None = None
+    block_count: int | None = None
+    block_ids: tuple[int, ...] = ()
+    pool_used: int | None = None
+    pool_free: int | None = None
     batch_size: int | None = None
     previous_batch_size: int | None = None
     waiting: int | None = None

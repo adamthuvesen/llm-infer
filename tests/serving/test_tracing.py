@@ -102,8 +102,10 @@ def test_trace_recorder_captures_real_engine_events() -> None:
     assert "request_finished" in names
     assert "batch_size_changed" in names
     assert "tokens_per_second_sampled" in names
-    assert "block_allocated" not in names
-    assert "block_freed" not in names
+    assert "block_allocated" in names
+    assert "block_freed" in names
+
+    _assert_block_lifecycle_is_honest(events, pool_size=8)
 
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[0].event == "request_admitted"
@@ -164,3 +166,58 @@ def test_trace_recorder_captures_real_engine_events() -> None:
     first_json_event = json.loads(recorder.to_jsonl().splitlines()[0])
     assert first_json_event["schema_version"] == TRACE_SCHEMA_VERSION
     assert first_json_event["event"] == "request_admitted"
+
+
+def _assert_block_lifecycle_is_honest(events: tuple, pool_size: int) -> None:
+    """Every freed block was live, pool counts stay valid, and nothing frees before alloc."""
+    live: set[int] = set()
+    for event in events:
+        if event.event not in {"block_allocated", "block_freed"}:
+            continue
+        block_ids = list(event.block_ids)
+        assert block_ids, f"{event.event} must carry block_ids"
+        assert event.block_count == len(block_ids)
+        assert event.pool_used is not None and event.pool_free is not None
+        assert event.pool_used >= 0 and event.pool_free >= 0
+        assert event.pool_used + event.pool_free == pool_size
+
+        if event.event == "block_allocated":
+            for block in block_ids:
+                assert block not in live, f"block {block} allocated while still live"
+                live.add(block)
+        else:
+            for block in block_ids:
+                assert block in live, f"free-before-alloc of block {block}"
+                live.discard(block)
+        assert len(live) == event.pool_used
+
+    assert not live, f"blocks never returned to the pool: {sorted(live)}"
+
+
+def test_block_lifecycle_is_honest_for_shared_prefix() -> None:
+    """A shared prompt block is reported freed exactly once — by its last owner.
+
+    Two prefix-group siblings share one full prompt block. The leader's free drops that
+    block to refcount 1 (a sibling still owns it), so it is NOT reported freed there; only
+    when the second sibling frees does the block truly return to the pool and get traced.
+    """
+    recorder = TraceRecorder()
+    engine = InferenceEngine(TraceToyModel(), block_size=4, num_blocks=8, trace=recorder)
+    engine.add_request(Request("sib-a", [1, 2, 3, 4], 3, frozenset({63}), prefix_group_id="g"))
+    engine.add_request(Request("sib-b", [1, 2, 3, 4], 3, frozenset({63}), prefix_group_id="g"))
+    engine.run()
+
+    events = recorder.events
+    _assert_block_lifecycle_is_honest(events, pool_size=8)
+
+    allocated = [event for event in events if event.event == "block_allocated"]
+    freed = [event for event in events if event.event == "block_freed"]
+
+    # The shared prompt block is allocated once (by the leader) and never re-allocated:
+    # the sibling retains it by refcount, which emits no allocation.
+    shared_block = allocated[0].block_ids[0]
+    assert sum(shared_block in event.block_ids for event in allocated) == 1
+    # And it is reported freed exactly once across both siblings — last-owner only.
+    assert sum(shared_block in event.block_ids for event in freed) == 1
+    free_owner = next(event.request_id for event in freed if shared_block in event.block_ids)
+    assert free_owner == "sib-b"
