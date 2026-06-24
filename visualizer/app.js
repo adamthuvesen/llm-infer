@@ -51,12 +51,14 @@ const els = {
   anatomy: q("#anatomy"),
   rawJson: q("#rawJson"),
   eventList: q("#eventList"),
+  tooltip: q("#tooltip"),
 };
 
 init();
 
 async function init() {
   bindControls();
+  setupTooltip();
   try {
     const response = await fetch(SAMPLE_TRACE_PATH);
     if (!response.ok) {
@@ -117,6 +119,12 @@ async function loadTraceText(text, sourceName) {
   buildKvWall();
   setStatus("trace loaded", false);
   render();
+
+  if (!REDUCE) {
+    els.theater.classList.remove("intro");
+    void els.theater.offsetWidth;
+    els.theater.classList.add("intro");
+  }
 }
 
 function play() {
@@ -210,10 +218,12 @@ function renderTheater() {
   const cursorX = xForStep(currentEvent().step, t.geo);
 
   // step grid + ticks
+  const curStep = currentEvent().step;
   for (let step = 0; step <= state.model.maxStep; step += 1) {
     const x = xForStep(step, t.geo);
-    line(t.scene, x, t.geo.gridTop, x, t.geo.gridBottom, "grid-line");
-    text(t.scene, x, t.geo.gridTop - 8, String(step), "tick-label", "middle");
+    const on = step === curStep;
+    line(t.scene, x, t.geo.gridTop, x, t.geo.gridBottom, `grid-line${on ? " active" : ""}`);
+    text(t.scene, x, t.geo.gridTop - 8, String(step), `tick-label${on ? " active" : ""}`, "middle");
   }
   text(t.scene, t.geo.left - 14, t.geo.gridTop - 8, "STEP", "axis-cap", "end");
 
@@ -228,14 +238,19 @@ function renderTheater() {
 function renderLane(scene, request, index, geo) {
   const y0 = geo.laneTop + index * geo.laneH;
   const trackY = y0 + geo.laneH * 0.62;
+  const lane = group(scene, "lane");
 
-  if (index % 2 === 1) rect(scene, geo.frameLeft, y0, geo.frameRight - geo.frameLeft, geo.laneH, "lane-band alt", 0);
+  rect(lane, geo.frameLeft, y0, geo.frameRight - geo.frameLeft, geo.laneH, `lane-band${index % 2 ? " alt" : ""}`, 0);
 
-  text(scene, 16, y0 + 26, request.requestId, "lane-title");
-  text(scene, 16, y0 + 44, laneMeta(request), "lane-sub");
-  if (request.prefixGroupId) text(scene, 16, y0 + 60, `▦ ${request.prefixGroupId}`, "lane-group");
+  text(lane, 16, y0 + 26, request.requestId, "lane-title");
+  text(lane, 16, y0 + 44, laneMeta(request), "lane-sub");
+  if (request.prefixGroupId) text(lane, 16, y0 + 60, `▦ ${request.prefixGroupId}`, "lane-group");
 
-  line(scene, geo.left, trackY, geo.right, trackY, "lane-track");
+  // track: live up to finish, faded after — only once the request has actually finished
+  const finished = request.finish && request.finish.sequence <= state.cursor;
+  const finishX = finished ? xForStep(request.finish.step, geo) : geo.right;
+  line(lane, geo.left, trackY, Math.max(geo.left, finishX), trackY, "lane-track");
+  if (finishX < geo.right - 1) line(lane, finishX, trackY, geo.right, trackY, "lane-track done");
 
   // prefill chunks
   for (const chunk of request.chunks) {
@@ -243,18 +258,28 @@ function renderLane(scene, request, index, geo) {
     const visible = chunk.sequence <= state.cursor;
     const frac = chunk.totalPromptTokens ? (chunk.endPos - chunk.startPos) / chunk.totalPromptTokens : 0.3;
     const w = Math.max(26, Math.min(74, frac * 90 + 26));
-    const h = 20;
     const cls = !visible ? "chunk future" : chunk.completed ? "chunk" : "chunk partial";
-    const node = rect(scene, x - w / 2, trackY - 36, w, h, cls + enterClass(chunk.sequence, "enter-chunk"), 6);
-    node.append(titleNode(`prefill ${chunk.startPos}-${chunk.endPos} of ${chunk.totalPromptTokens}`));
-    text(scene, x, trackY - 22, `${chunk.startPos}–${chunk.endPos}`, `chunk-label${visible ? "" : " future"}`, "middle");
+    const node = rect(lane, x - w / 2, trackY - 36, w, 20, cls + enterClass(chunk.sequence, "enter-chunk"), 6);
+    node.setAttribute("data-tip", `prefill · cached ${chunk.startPos}–${chunk.endPos} of ${chunk.totalPromptTokens}${chunk.completed ? " · complete" : " · filling"}`);
+    text(lane, x, trackY - 22, `${chunk.startPos}–${chunk.endPos}`, `chunk-label${visible ? "" : " future"}`, "middle");
+  }
+
+  // thread the visible decode tokens so the generation sequence reads as a line
+  const threadXs = request.decodes
+    .filter((decode) => decode.sequence <= state.cursor)
+    .map((decode) => xForStep(decode.step, geo))
+    .sort((a, b) => a - b);
+  if (threadXs.length >= 2) {
+    const thread = document.createElementNS(NS, "polyline");
+    thread.setAttribute("points", threadXs.map((x) => `${x},${trackY}`).join(" "));
+    thread.setAttribute("class", "lane-thread");
+    lane.append(thread);
   }
 
   // decode tokens on the track
   for (const decode of request.decodes) {
     const x = xForStep(decode.step, geo);
-    const visible = decode.sequence <= state.cursor;
-    drawToken(scene, x, trackY, decode, visible);
+    drawToken(lane, x, trackY, decode, decode.sequence <= state.cursor);
   }
 
   // finish marker
@@ -262,8 +287,9 @@ function renderLane(scene, request, index, geo) {
     const x = xForStep(request.finish.step, geo);
     const visible = request.finish.sequence <= state.cursor;
     const fx = x + 26;
-    const g = group(scene, visible ? enterClass(request.finish.sequence, "enter-finish") : "");
-    circle(g, fx, trackY, 11, `finish-ring${visible ? "" : " future"}`);
+    const g = group(lane, visible ? enterClass(request.finish.sequence, "enter-finish") : "");
+    const ring = circle(g, fx, trackY, 11, `finish-ring${visible ? "" : " future"}`);
+    ring.setAttribute("data-tip", `finished · ${request.finish.reason} · ${request.finish.tokenIds.length} tokens`);
     diamond(g, fx, trackY, 6, `finish-flag${visible ? "" : " future"}`);
     text(g, fx + 16, trackY + 4, request.finish.reason, `finish-label${visible ? "" : " future"}`);
   }
@@ -277,13 +303,13 @@ function drawToken(scene, x, y, decode, visible) {
   if (decode.tokenIds.length > 1) {
     const w = 44;
     const node = rect(scene, x - w / 2, y - 12, w, 24, `burst ${visible ? colour : "future"}${enter}`, 8);
-    node.append(titleNode(`${source} burst · ${decode.tokenIds.join(", ")}`));
+    node.setAttribute("data-tip", `${source} burst · step ${decode.step} · tokens ${decode.tokenIds.join(", ")}`);
     text(scene, x, y + 4, `×${decode.tokenIds.length}`, `burst-id${visible ? "" : " future"}`, "middle");
     text(scene, x, y + 24, decode.tokenIds.join(" "), `tok-id${visible ? "" : " future"}`, "middle");
     return;
   }
   const node = circle(scene, x, y, 8, `tok-dot ${visible ? colour : "future"}${enter}`);
-  node.append(titleNode(`${source} token · ${decode.tokenIds[0] ?? "—"}`));
+  node.setAttribute("data-tip", `${source} token · id ${decode.tokenIds[0] ?? "—"} · step ${decode.step}`);
   text(scene, x, y + 22, String(decode.tokenIds[0] ?? ""), `tok-id${visible ? "" : " future"}`, "middle");
 }
 
@@ -572,11 +598,6 @@ function text(parent, x, y, value, className, anchor = "start") {
   parent.append(node);
   return node;
 }
-function titleNode(value) {
-  const node = document.createElementNS(NS, "title");
-  node.textContent = value;
-  return node;
-}
 function clear(node) { node.replaceChildren(); }
 
 function xForStep(step, geo) {
@@ -602,6 +623,28 @@ function animateNumber(el, target, decimals = 0, suffix = "") {
     el._raf = p < 1 ? requestAnimationFrame(tick) : null;
   };
   el._raf = requestAnimationFrame(tick);
+}
+
+function setupTooltip() {
+  const tip = els.tooltip;
+  const svg = els.theater;
+  svg.addEventListener("mouseover", (event) => {
+    const text = event.target?.getAttribute?.("data-tip");
+    if (!text) return;
+    tip.textContent = text;
+    tip.classList.add("show");
+  });
+  svg.addEventListener("mouseout", (event) => {
+    if (event.target?.getAttribute?.("data-tip")) tip.classList.remove("show");
+  });
+  svg.addEventListener("mousemove", (event) => {
+    if (!tip.classList.contains("show")) return;
+    const gap = 14;
+    let x = event.clientX + gap;
+    if (x + tip.offsetWidth > window.innerWidth - 8) x = event.clientX - gap - tip.offsetWidth;
+    tip.style.left = `${x}px`;
+    tip.style.top = `${event.clientY + gap}px`;
+  });
 }
 
 function pad(value) { return String(value).padStart(2, "0"); }

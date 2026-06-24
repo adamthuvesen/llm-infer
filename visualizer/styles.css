@@ -245,14 +245,22 @@ body.is-playing .btn-play .ico-pause { display: inline; }
 #theater { width: 100%; height: auto; display: block; }
 
 /* SVG theater */
-.lane-band { fill: var(--paper-2); }
+#theater.intro { animation: sweepIn 0.9s var(--ease) both; }
+@keyframes sweepIn { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+.lane-band { fill: transparent; transition: fill 0.18s var(--ease); }
+.lane-band.alt { fill: var(--paper-2); }
+.lane:hover .lane-band { fill: var(--paper-3); }
 .lane-track { stroke: var(--line); stroke-width: 1.5; }
+.lane-track.done { stroke: var(--line); stroke-dasharray: 1 6; opacity: 0.7; }
+.lane-thread { fill: none; stroke: var(--line-2); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .lane-title { fill: var(--ink); font-family: var(--mono); font-size: 13px; font-weight: 600; }
 .lane-sub { fill: var(--muted); font-family: var(--mono); font-size: 10.5px; }
 .lane-group { fill: var(--spec); font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; }
 
-.grid-line { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 5; }
-.tick-label { fill: var(--faint); font-family: var(--mono); font-size: 10px; }
+.grid-line { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 5; transition: stroke 0.2s; }
+.grid-line.active { stroke: var(--line-2); stroke-dasharray: none; }
+.tick-label { fill: var(--faint); font-family: var(--mono); font-size: 10px; transition: fill 0.2s; }
+.tick-label.active { fill: var(--ink); font-weight: 700; }
 .axis-cap { fill: var(--faint); font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; }
 
 .chunk { fill: rgba(13, 148, 136, 0.1); stroke: var(--prefill); stroke-width: 1.2; }
@@ -294,14 +302,32 @@ body.is-playing .btn-play .ico-pause { display: inline; }
 .kv-reserve { font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--prefill); font-variant-numeric: tabular-nums; }
 .kv-slash { color: var(--faint); margin: 0 1px; font-weight: 400; }
 #kvTotal { color: var(--muted); }
-.kv-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 18px 20px; }
+.kv-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; padding: 20px; }
 .kv-block {
-  aspect-ratio: 1; border-radius: 7px; background: var(--paper-3); border: 1px solid var(--line);
-  position: relative; transition: background 0.34s var(--ease), border-color 0.34s var(--ease), transform 0.34s var(--ease);
+  aspect-ratio: 1; border-radius: 10px; position: relative; overflow: hidden;
+  background: linear-gradient(155deg, var(--paper-2), var(--paper-4));
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  transition: border-color 0.34s var(--ease), box-shadow 0.34s var(--ease);
 }
-.kv-block.on { background: rgba(13, 148, 136, 0.14); border-color: rgba(13, 148, 136, 0.5); }
-.kv-block.just { animation: blockHit 0.55s var(--ease); }
-@keyframes blockHit { 0% { transform: scale(1.16); } 100% { transform: scale(1); } }
+.kv-block::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; opacity: 0;
+  background: linear-gradient(155deg, #2dd4bf, var(--prefill) 55%, #0f766e);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  transition: opacity 0.4s var(--ease);
+}
+.kv-block.on { border-color: transparent; box-shadow: 0 9px 20px -9px rgba(13, 148, 136, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+.kv-block.on::after { opacity: 1; }
+.kv-block.just::after { animation: blockHit 0.62s var(--ease); }
+@keyframes blockHit { 0% { opacity: 0.35; transform: scale(1.32); } 100% { opacity: 1; transform: scale(1); } }
+
+.tooltip {
+  position: fixed; z-index: 80; pointer-events: none; opacity: 0; transform: translateY(3px);
+  transition: opacity 0.14s var(--ease), transform 0.14s var(--ease);
+  background: var(--ink); color: #fff; font-family: var(--mono); font-size: 11.5px;
+  padding: 7px 10px; border-radius: 8px; box-shadow: var(--shadow-lg); white-space: nowrap;
+}
+.tooltip.show { opacity: 1; transform: translateY(0); }
 .kv-meter { padding: 2px 20px 0; }
 .kv-meter-head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 7px; }
 .kv-meter-head span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
