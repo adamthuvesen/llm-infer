@@ -37,6 +37,7 @@ const els = {
   gWaiting: q("#gWaiting"),
   occBar: q("#occBar"),
   gTps: q("#gTps"),
+  tpsNote: q("#tpsNote"),
   gGen: q("#gGen"),
   sparkTps: q("#sparkTps"),
   sparkGen: q("#sparkGen"),
@@ -64,7 +65,7 @@ async function init() {
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
-    await loadTraceText(await response.text(), SAMPLE_TRACE_PATH);
+    await loadTraceText(await response.text(), SAMPLE_TRACE_PATH, true);
   } catch (error) {
     setStatus(`load a JSONL trace to begin · ${error.message}`, true);
   }
@@ -75,7 +76,7 @@ function bindControls() {
     const [file] = event.target.files;
     if (!file) return;
     try {
-      await loadTraceText(await file.text(), file.name);
+      await loadTraceText(await file.text(), file.name, false);
     } catch (error) {
       pause();
       setStatus(`could not load ${file.name} · ${error.message}`, true);
@@ -101,7 +102,7 @@ function bindControls() {
   });
 }
 
-async function loadTraceText(text, sourceName) {
+async function loadTraceText(text, sourceName, isSample = false) {
   const events = parseJsonlTrace(text);
   state.events = events;
   state.model = buildTraceModel(events);
@@ -114,7 +115,8 @@ async function loadTraceText(text, sourceName) {
   els.scrubber.max = state.model.maxSequence;
   els.scrubber.value = state.cursor;
   els.seqTotal.textContent = pad(state.model.maxSequence);
-  els.traceMeta.textContent = `${baseName(sourceName)} · ${events.length} events · ${state.model.requestList.length} requests · ${state.model.maxStep + 1} steps`;
+  els.traceMeta.textContent = `${baseName(sourceName)} · ${events.length} events · ${state.model.requestList.length} requests · ${state.model.maxStep + 1} steps${isSample ? " · synthetic sample" : ""}`;
+  els.tpsNote.textContent = isSample ? "simulated step clock" : "";
 
   buildKvWall();
   setStatus("trace loaded", false);

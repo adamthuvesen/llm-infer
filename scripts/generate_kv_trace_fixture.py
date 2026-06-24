@@ -19,15 +19,24 @@ from llm_infer.tracing import TraceRecorder
 FIXTURE_PATH = Path("docs/assets/kv_trace_schema_v2.jsonl")
 
 
-class FixtureClock:
-    """Small deterministic clock so throughput samples are stable in git."""
+# Simulated wall-clock advance per traced sample. The fixture runs a toy model on CPU,
+# so it has no meaningful real latency; this fixed step stands in for a plausible decode
+# step (~6 ms) purely so the throughput samples are deterministic AND land in a realistic
+# range instead of the old 0.25 s/step that read as ~5 tok/s. The trace is a labelled
+# synthetic sample, not a measured benchmark.
+STEP_SECONDS = 0.006
 
-    def __init__(self) -> None:
+
+class FixtureClock:
+    """Deterministic clock so throughput samples are stable in git and realistically paced."""
+
+    def __init__(self, step_seconds: float = STEP_SECONDS) -> None:
         self._ticks = -1
+        self._step_seconds = step_seconds
 
     def __call__(self) -> float:
         self._ticks += 1
-        return self._ticks * 0.25
+        return self._ticks * self._step_seconds
 
 
 class TraceFixtureModel:
@@ -107,26 +116,35 @@ def build_trace_jsonl() -> str:
     engine = InferenceEngine(
         TraceFixtureModel(),
         block_size=4,
-        num_blocks=6,
+        num_blocks=12,
         prefill_chunk_size=2,
         trace=recorder,
         trace_clock=FixtureClock(),
     )
-    engine.add_request(Request("chat-short", [3, 9], 5, frozenset({127})))
-    engine.add_request(Request("schema-long", [8, 4, 6, 2, 9, 5, 1], 3, frozenset({127})))
-    engine.add_request(
-        Request("rollout-a", [12, 7, 7, 3], 4, frozenset({127}), prefix_group_id="rollout")
-    )
-    engine.add_request(
-        Request("rollout-b", [12, 7, 7, 3], 4, frozenset({127}), prefix_group_id="rollout")
-    )
+    # Scenario, in admission (FIFO) order. With 12 blocks the first four fit at once and
+    # the last two queue, so the trace shows real waiting pressure, continuous-batching
+    # churn, and a KV wall that fills to capacity:
+    #   rollout-a/-b  shared 4-token prompt (prefix group) — b reuses a's prefilled cache
+    #   code-gen      12-token prompt → six chunked prefill steps while others decode
+    #   summarize     7-token prompt → multi-chunk prefill
+    #   chat-quick    2-token prompt → admitted once capacity frees, fast finisher
+    #   translate     9-token prompt → admitted last
+    stop = frozenset({127})
+    engine.add_request(Request("rollout-a", [12, 7, 7, 3], 5, stop, prefix_group_id="rollout"))
+    engine.add_request(Request("rollout-b", [12, 7, 7, 3], 5, stop, prefix_group_id="rollout"))
+    engine.add_request(Request("code-gen", [5, 1, 8, 2, 7, 3, 9, 4, 6, 2, 8, 1], 8, stop))
+    engine.add_request(Request("summarize", [6, 2, 9, 4, 1, 7, 3], 4, stop))
+    engine.add_request(Request("chat-quick", [4, 9], 6, stop))
+    engine.add_request(Request("translate", [3, 8, 1, 6, 2, 9, 5, 7, 4], 6, stop))
 
     outputs = engine.run()
     expected_lengths = {
-        "chat-short": 5,
-        "schema-long": 3,
-        "rollout-a": 4,
-        "rollout-b": 4,
+        "rollout-a": 5,
+        "rollout-b": 5,
+        "code-gen": 8,
+        "summarize": 4,
+        "chat-quick": 6,
+        "translate": 6,
     }
     if {request_id: len(tokens) for request_id, tokens in outputs.items()} != expected_lengths:
         raise RuntimeError(f"unexpected fixture output lengths: {outputs}")

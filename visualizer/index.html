@@ -27,7 +27,7 @@
       <!-- ===== Hero ===== -->
       <header class="hero">
         <span class="eyebrow">Paged KV cache · live inference trace</span>
-        <h1>Four requests. One cache.<br />Every token, in order.</h1>
+        <h1>Six requests. One cache.<br />Every token, in order.</h1>
         <p class="lede">
           A frame-by-frame replay of a paged-attention inference engine — admitting requests,
           prefilling prompts into KV blocks, and decoding tokens under continuous batching.
@@ -83,6 +83,7 @@
         <article class="stat">
           <span class="stat-key">Throughput</span>
           <span class="stat-val"><span id="gTps">—</span><span class="stat-unit">tok/s</span></span>
+          <span class="stat-foot" id="tpsNote"></span>
           <svg class="spark" id="sparkTps" viewBox="0 0 200 38" preserveAspectRatio="none" aria-hidden="true"></svg>
         </article>
         <article class="stat">

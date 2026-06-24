@@ -16,7 +16,7 @@ test("loads the committed schema-v2 fixture into a renderable model", async () =
     events.map((event) => event.sequence),
     Array.from({ length: events.length }, (_, index) => index + 1),
   );
-  assert.equal(model.requestList.length, 4);
+  assert.equal(model.requestList.length, 6);
   assert.ok(model.requestList.some((request) => request.chunks.length >= 3));
   for (const request of model.requestList) {
     assert.deepEqual(
