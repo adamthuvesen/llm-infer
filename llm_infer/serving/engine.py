@@ -249,6 +249,17 @@ class InferenceEngine:
             pool_free=self.cache.allocator.num_free,
         )
 
+    def _is_running(self, request: Request) -> bool:
+        """Whether ``request`` is in the running set *right now*, tested by identity.
+
+        Prefilling or resuming an earlier request can preempt a later candidate via
+        ``_ensure_pool_room``, moving it to ``waiting`` partway through the loop. Both loops
+        therefore re-check membership live rather than against a set snapshotted once before the
+        loop: a stale snapshot would let an already-evicted request be prefilled while it sits in
+        ``waiting``, double-allocating its KV and breaking forward progress.
+        """
+        return any(candidate is request for candidate in self.scheduler.running)
+
     def _resume_requests(self, requests: list[Request], result: StepResult) -> None:
         """Rebuild each preempted request's KV by recompute before it decodes again.
 
@@ -257,11 +268,11 @@ class InferenceEngine:
         evicted in. No token is sampled — the request already owns its generated ids — so on the
         next step it decodes its next token, identical to the uninterrupted run.
         """
-        running = {id(request) for request in self.scheduler.running}
         for request in requests:
-            # A queued resume can be preempted again while making room for an earlier one;
-            # skip it here and let the next step pick it up once it is re-admitted.
-            if id(request) not in running:
+            # A queued resume can be preempted again while making room for an earlier one this
+            # step; check membership live (see _is_running) so a request evicted mid-loop is
+            # skipped and re-picked once it is re-admitted, never resumed out of the waiting queue.
+            if not self._is_running(request):
                 continue
             self._recompute_prefill(request)
             self._emit_trace(
@@ -346,13 +357,13 @@ class InferenceEngine:
     def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
         """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
         handled: set[str] = set()
-        running = {id(request) for request in self.scheduler.running}
         for request in requests:
             if request.request_id in handled:
                 continue
             # A request can be preempted out of the running set while we make pool room for an
-            # earlier one this step; skip it, it will re-prefill once re-admitted.
-            if self.preemption and id(request) not in running:
+            # earlier one this step; check membership live (see _is_running) so it is skipped and
+            # re-prefills once re-admitted, never prefilled while sitting in the waiting queue.
+            if self.preemption and not self._is_running(request):
                 continue
             if request.prefix_group_id is None:
                 self._prefill_one(request, result)
@@ -363,6 +374,7 @@ class InferenceEngine:
                 candidate
                 for candidate in requests
                 if candidate.prefix_group_id == request.prefix_group_id
+                and (not self.preemption or self._is_running(candidate))
             ]
             if len(group) == 1:
                 self._prefill_one(request, result)

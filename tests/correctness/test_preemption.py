@@ -102,6 +102,57 @@ def test_preemption_with_chunked_prefill_stays_token_exact() -> None:
         )
 
 
+def test_prefill_skips_a_request_preempted_mid_step() -> None:
+    """A request evicted while an earlier one prefills must not be prefilled out of the queue.
+
+    Regression for a stale running-set snapshot: ``_prefill_requests`` / ``_resume_requests`` once
+    captured the running set *before* the loop, so a candidate that ``_ensure_pool_room`` preempted
+    partway through (to free blocks for an earlier request) still passed the membership check and
+    got prefilled while sitting in ``waiting`` — double-allocating its KV and stalling forward
+    progress. With chunked prefill over a tight pool the eviction lands inside the prefill loop. We
+    step the engine and assert the invariant that a waiting request never holds cache state, then
+    that every output still matches the uninterrupted run token-for-token.
+    """
+    model = _tiny_qwen()
+    requests = [
+        ([1, 5, 9], 5, "a"),
+        ([2, 6, 10], 5, "b"),
+        ([3, 7, 11], 5, "c"),
+        ([4, 8, 12], 5, "d"),
+    ]
+    recorder = TraceRecorder()
+    engine = InferenceEngine(
+        model, block_size=2, num_blocks=4, preemption=True, prefill_chunk_size=1, trace=recorder
+    )
+    tracked = [Request(rid, list(prompt), max_new, EOS) for prompt, max_new, rid in requests]
+    for request in tracked:
+        engine.add_request(request)
+
+    steps = 0
+    while engine.scheduler.has_work():
+        engine.step()
+        steps += 1
+        assert steps < 200, "engine made no forward progress (suspected preemption livelock)"
+        for waiting in engine.scheduler.waiting:
+            assert not waiting.prefilled and waiting.block_table is None, (
+                f"{waiting.request_id!r} was prefilled while in the waiting queue — a request "
+                "preempted mid-step must not be touched again until it is re-admitted"
+            )
+
+    assert any(e.event == "request_preempted" for e in recorder.events), (
+        "scenario must actually preempt mid-prefill or it does not exercise the bug"
+    )
+    tight = {request.request_id: request.generated for request in tracked}
+    roomy = _run(
+        model, requests, num_blocks=16, preemption=False, block_size=2, prefill_chunk_size=1
+    )
+    for _, _, request_id in requests:
+        assert tight[request_id] == roomy[request_id], (
+            f"{request_id}: output diverged from the uninterrupted run "
+            f"(preempted={tight[request_id]}, uninterrupted={roomy[request_id]})"
+        )
+
+
 def test_preemption_preserves_batched_equals_serial() -> None:
     """Under preemption, each request batched == run alone — eviction adds no drift."""
     model = _tiny_qwen()
