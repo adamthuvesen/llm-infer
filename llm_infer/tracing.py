@@ -24,12 +24,15 @@ TraceEventName = Literal[
     "decode_step",
     "block_allocated",
     "block_freed",
+    "request_preempted",
+    "request_resumed",
     "request_finished",
     "batch_size_changed",
     "tokens_per_second_sampled",
 ]
 
 FinishReason = Literal["eos", "length"]
+PreemptReason = Literal["kv_pressure"]
 TokenSource = Literal["prefill", "decode", "speculative"]
 
 
@@ -68,6 +71,7 @@ class TraceEvent:
     token_source: TokenSource | None = None
     generated_tokens: int | None = None
     reason: FinishReason | None = None
+    preempt_reason: PreemptReason | None = None
     total_generated_tokens: int | None = None
     elapsed_seconds: float | None = None
     tokens_per_second: float | None = None

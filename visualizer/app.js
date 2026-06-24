@@ -106,7 +106,9 @@ async function loadTraceText(text, sourceName, isSample = false) {
   const events = parseJsonlTrace(text);
   state.events = events;
   state.model = buildTraceModel(events);
-  state.cursor = events[0].sequence;
+  // Deep-link support: #seq=N opens the viewer paused at that event (handy for sharing or
+  // screenshotting a specific frame). Clamp to the trace's range; default to the first event.
+  state.cursor = clampSequence(hashSequence() ?? events[0].sequence);
   state.prevCursor = 0;
   state.prevReserved = 0;
   state.theater = null;
@@ -284,6 +286,28 @@ function renderLane(scene, request, index, geo) {
     drawToken(lane, x, trackY, decode, decode.sequence <= state.cursor);
   }
 
+  // preemption: an eviction notch on the track where the request was kicked out, plus a faded
+  // "evicted" gap until it resumes. The KV wall shows its blocks freed at the same moment.
+  for (const preempt of request.preempts) {
+    const x = xForStep(preempt.step, geo);
+    const visible = preempt.sequence <= state.cursor;
+    const g = group(lane, visible ? enterClass(preempt.sequence, "enter-preempt") : "");
+    const mark = diamond(g, x, trackY, 7, `preempt-mark${visible ? "" : " future"}`);
+    mark.setAttribute("data-tip", `preempted · kv pressure · freed ${preempt.freedBlocks} block${preempt.freedBlocks === 1 ? "" : "s"} · kept ${preempt.generatedTokens} tokens`);
+    line(g, x - 5, trackY - 9, x + 5, trackY + 9, `preempt-slash${visible ? "" : " future"}`);
+    text(g, x, trackY - 16, "evicted", `preempt-label${visible ? "" : " future"}`, "middle");
+  }
+
+  // resume: a marker where the request is re-admitted and starts recomputing its KV.
+  for (const resume of request.resumes) {
+    const x = xForStep(resume.step, geo);
+    const visible = resume.sequence <= state.cursor;
+    const g = group(lane, visible ? enterClass(resume.sequence, "enter-resume") : "");
+    const ring = circle(g, x, trackY, 8, `resume-ring${visible ? "" : " future"}`);
+    ring.setAttribute("data-tip", `resumed · recomputing ${resume.generatedTokens} tokens of KV`);
+    text(g, x, trackY + 22, "↻ resume", `resume-label${visible ? "" : " future"}`, "middle");
+  }
+
   // finish marker
   if (request.finish) {
     const x = xForStep(request.finish.step, geo);
@@ -442,6 +466,15 @@ function theaterGeometry(laneCount) {
 
 /* ============================ data helpers ============================ */
 
+function hashSequence() {
+  const match = /(?:^#|[#&])seq=(\d+)/.exec(window.location.hash);
+  return match ? Number(match[1]) : null;
+}
+function clampSequence(value) {
+  const lo = state.model.events[0].sequence;
+  const hi = state.model.maxSequence;
+  return Math.min(hi, Math.max(lo, value));
+}
 function currentEvent() {
   return state.model.events.find((event) => event.sequence === state.cursor) ?? state.model.events[0];
 }
@@ -467,6 +500,7 @@ function eventFamily(event) {
     case "prefill_chunk_started": case "prefill_chunk_progress": return "prefill";
     case "block_allocated": case "block_freed": return "prefill";
     case "decode_step": return event.token_source === "speculative" ? "spec" : "decode";
+    case "request_preempted": case "request_resumed": return "preempt";
     case "request_finished": return "finish";
     default: return "";
   }
@@ -522,6 +556,23 @@ function eventAnatomy(event) {
             : "A block returned to the pool only because its last owner released it.",
         why: true,
       },
+    ];
+  }
+  if (event.event === "request_preempted") {
+    return [
+      { label: "request", value: event.request_id, mono: true },
+      { label: "freed", value: `${event.block_count} KV block${event.block_count === 1 ? "" : "s"} returned`, mono: true },
+      { label: "kept", value: `${event.generated_tokens} generated tokens`, mono: true },
+      { label: "pool", value: `${event.pool_used} used · ${event.pool_free} free`, mono: true },
+      { label: "why", value: "Under KV pressure the newest running request is evicted — its blocks freed, its tokens kept — so a request that needs a block can grow.", why: true },
+    ];
+  }
+  if (event.event === "request_resumed") {
+    return [
+      { label: "request", value: event.request_id, mono: true },
+      { label: "rebuild", value: `${event.generated_tokens} tokens to recompute`, mono: true },
+      { label: "pool", value: `${event.pool_used} used · ${event.pool_free} free`, mono: true },
+      { label: "why", value: "Re-admitted: it rebuilds its KV by recomputing prompt-plus-generated, then decodes exactly where it left off — token-for-token identical.", why: true },
     ];
   }
   if (event.event === "batch_size_changed") {

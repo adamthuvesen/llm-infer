@@ -39,12 +39,16 @@ def test_kv_trace_fixture_is_schema_v3_ordered_and_shaped() -> None:
         "decode_step",
         "block_allocated",
         "block_freed",
+        "request_preempted",
+        "request_resumed",
         "request_finished",
         "batch_size_changed",
         "tokens_per_second_sampled",
     } <= names
     assert any(event.get("prefix_group_id") == "shared prompt" for event in events)
-    assert any(event.get("waiting") == 2 for event in events)
+    assert any(
+        event["event"] == "batch_size_changed" and event.get("waiting", 0) >= 1 for event in events
+    )
     assert any(
         event["event"] == "prefill_chunk_progress" and event.get("completed") is False
         for event in events
@@ -53,6 +57,34 @@ def test_kv_trace_fixture_is_schema_v3_ordered_and_shaped() -> None:
         event["event"] == "decode_step" and len(event.get("request_ids", [])) > 1
         for event in events
     )
+
+
+def test_kv_trace_fixture_shows_honest_preemption_and_resume() -> None:
+    """The bundled demo includes at least one real preempt + resume, shaped like the engine."""
+    events = _fixture_events()
+    preempts = [event for event in events if event["event"] == "request_preempted"]
+    resumes = [event for event in events if event["event"] == "request_resumed"]
+
+    assert preempts, "the demo fixture must show at least one preemption"
+    assert resumes, "a preempted request must resume"
+
+    for event in preempts:
+        assert event["preempt_reason"] == "kv_pressure"
+        assert event["block_count"] >= 1  # freed at least one KV block
+        assert event["generated_tokens"] >= 1  # kept its progress
+        assert event["pool_used"] + event["pool_free"] == 12
+
+    # Every preempted request resumes, and a preempt is immediately preceded by the honest
+    # block_freed that returned its KV to the pool (recompute eviction, not a bookkeeping fudge).
+    preempted_ids = {event["request_id"] for event in preempts}
+    resumed_ids = {event["request_id"] for event in resumes}
+    assert preempted_ids <= resumed_ids
+
+    by_seq = {event["sequence"]: event for event in events}
+    for event in preempts:
+        prior = by_seq.get(event["sequence"] - 1)
+        assert prior is not None and prior["event"] == "block_freed"
+        assert prior["request_id"] == event["request_id"]
 
 
 def test_kv_trace_fixture_has_no_missing_generated_token_events() -> None:

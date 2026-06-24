@@ -194,6 +194,55 @@ def _assert_block_lifecycle_is_honest(events: tuple, pool_size: int) -> None:
     assert not live, f"blocks never returned to the pool: {sorted(live)}"
 
 
+def test_preemption_emits_honest_preempt_and_resume_events() -> None:
+    """Under a tight budget the engine evicts a victim, frees its KV, and resumes it by recompute.
+
+    The victim's preemption fires a real ``block_freed`` (the allocator boundary), a
+    ``request_preempted`` naming the pressure, and on resume a ``request_resumed`` plus replayed
+    prefill_chunk events — the visible shape of recompute. The block lifecycle stays honest
+    throughout (no free-before-alloc; every block returns to the pool).
+    """
+    recorder = TraceRecorder()
+    # block_size 4, pool 3: three prompt-3 requests admit on footprint (1 block each), then must
+    # evict as they grow past one block — a genuine forced preemption.
+    engine = InferenceEngine(
+        TraceToyModel(), block_size=4, num_blocks=3, preemption=True, trace=recorder
+    )
+    engine.add_request(Request("a", [1, 2, 3], 6, frozenset({63})))
+    engine.add_request(Request("b", [4, 5, 6], 6, frozenset({63})))
+    engine.add_request(Request("c", [7, 8, 9], 6, frozenset({63})))
+    engine.run()
+
+    events = recorder.events
+    names = [event.event for event in events]
+    assert "request_preempted" in names
+    assert "request_resumed" in names
+
+    _assert_block_lifecycle_is_honest(events, pool_size=3)
+
+    preempts = [event for event in events if event.event == "request_preempted"]
+    for event in preempts:
+        assert event.preempt_reason == "kv_pressure"
+        assert event.block_count >= 1
+        assert event.generated_tokens is not None
+        assert event.pool_used is not None and event.pool_free is not None
+        assert event.pool_used + event.pool_free == 3
+
+    # A preempted request resumes and replays prefill chunks (recompute) before decoding again.
+    preempted_ids = {event.request_id for event in preempts}
+    resumed_ids = {event.request_id for event in events if event.event == "request_resumed"}
+    assert preempted_ids <= resumed_ids
+
+    # Every request still finishes with all its tokens — preemption never drops output.
+    finished = {
+        event.request_id: event.generated_tokens
+        for event in events
+        if event.event == "request_finished"
+    }
+    assert set(finished) == {"a", "b", "c"}
+    assert all(count == 6 for count in finished.values())
+
+
 def test_block_lifecycle_is_honest_for_shared_prefix() -> None:
     """A shared prompt block is reported freed exactly once — by its last owner.
 

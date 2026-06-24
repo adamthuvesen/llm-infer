@@ -1,16 +1,23 @@
 """Generate the committed schema-v3 trace used by the KV trace visualizer.
 
 This is a **self-contained synthetic generator**: it does not import the inference
-engine or torch. It runs a small, simplified continuous-batching simulation — FIFO
-admission against a fixed block budget, chunked prefill, prefix-group sharing, batched
-decode, lazy physical block allocation, and throughput sampling — and emits schema-v3
-trace events that mirror the shape ``InferenceEngine(trace=...)`` produces.
+engine or torch. It runs a small, simplified continuous-batching simulation — footprint
+admission against a fixed pool, chunked prefill, prefix-group sharing, batched decode,
+lazy physical block allocation, recompute **preemption** under KV pressure, and throughput
+sampling — and emits schema-v3 trace events that mirror the shape
+``InferenceEngine(trace=..., preemption=True)`` produces.
+
+Preemption is simulated consistently with the engine: admission reserves only the current
+footprint (over-committing the pool), and when a running request then needs a block the pool
+cannot give, the most-recently-admitted request (LIFO) is evicted — its KV freed, its tokens
+kept — then later resumed by recomputing prompt-plus-generated. So the trace shape (free →
+requeue → re-prefill → continue) matches what the real engine emits.
 
 Block lifecycle is emitted honestly. A small ``BlockPool`` mirrors the real refcounted
 allocator: a ``block_allocated`` fires only when a block leaves the free pool, a
 ``block_freed`` fires only when a block truly returns to it (refcount-0), and a shared
 prefix block retained by a forked sibling is never re-allocated and is freed once, by its
-last owner.
+last owner. A preemption frees the victim's blocks the same way.
 
 The trace is a labelled **synthetic sample**, not a measured benchmark: the prompts,
 token ids, and per-step clock are all invented. Keeping the generator standalone lets
@@ -33,12 +40,6 @@ PREFILL_CHUNK = 2
 # throughput samples are deterministic AND land in a realistic range, instead of reading
 # as ~5 tok/s. This is invented time for a synthetic sample, not a measurement.
 STEP_SECONDS = 0.006
-
-
-def blocks_for(prompt_len: int, max_new: int) -> int:
-    """Worst-case blocks: the prompt plus its decode budget, minus the prefill-sampled token."""
-    max_positions = prompt_len + max_new - 1
-    return -(-max_positions // BLOCK_SIZE)  # ceil division
 
 
 def blocks_for_length(length: int) -> int:
@@ -104,10 +105,25 @@ class Req:
     generated: list[int] = field(default_factory=list)
     blocks: list[int] = field(default_factory=list)
     length: int = 0
+    preempted: bool = False
 
     @property
-    def reserved(self) -> int:
-        return blocks_for(self.prompt_len, self.max_new)
+    def footprint(self) -> int:
+        """Blocks the request's KV occupies right now — its (re)admission footprint.
+
+        Mirrors the engine's ``blocks_for_footprint``: a fresh request needs its prompt, a
+        resumed one needs prompt-plus-generated (recompute rebuilds the whole prefix).
+        """
+        return blocks_for_length(self.prompt_len + len(self.generated))
+
+    @property
+    def resume_length(self) -> int:
+        """Positions a recompute resume rebuilds: prompt plus all generated tokens but the last.
+
+        The last generated token is re-fed by the resuming decode at its original position, so
+        it is not re-prefilled — matching ``Request.recompute_prompt_ids`` in the engine.
+        """
+        return self.prompt_len + max(0, len(self.generated) - 1)
 
     def emit_token(self) -> int:
         """Append the next token (a per-request ramp) and apply the length cap."""
@@ -116,6 +132,14 @@ class Req:
         if len(self.generated) >= self.max_new:
             self.finished = True
         return token
+
+    def reset_for_recompute(self) -> None:
+        """Drop cached-KV state for preemption, keeping generated tokens for later recompute."""
+        self.blocks = []
+        self.cached = 0
+        self.length = 0
+        self.prefilled = False
+        self.preempted = True
 
 
 class TraceBuilder:
@@ -165,6 +189,28 @@ class TraceBuilder:
             pool_free=pool.free,
         )
 
+    def preempted(self, request: Req, pool: BlockPool, freed_blocks: int) -> None:
+        self.emit(
+            "request_preempted",
+            request_id=request.request_id,
+            preempt_reason="kv_pressure",
+            block_count=freed_blocks,
+            generated_tokens=len(request.generated),
+            pool_used=pool.used,
+            pool_free=pool.free,
+        )
+
+    def resumed(self, request: Req, pool: BlockPool) -> None:
+        self.emit(
+            "request_resumed",
+            request_id=request.request_id,
+            prompt_tokens=request.prompt_len,
+            generated_tokens=len(request.generated),
+            cached_tokens=request.cached,
+            pool_used=pool.used,
+            pool_free=pool.free,
+        )
+
     def batch_changed(self, size: int, waiting: int) -> None:
         if size == self.last_batch:
             return
@@ -194,15 +240,26 @@ class TraceBuilder:
         return "\n".join(json.dumps(event, sort_keys=True) for event in self.events) + "\n"
 
 
-def _admit(tb: TraceBuilder, waiting: list[Req], running: list[Req], committed: int) -> int:
-    """FIFO admission with head-of-line blocking, mirroring the scheduler's block budget."""
+def _admit(tb: TraceBuilder, waiting: list[Req], running: list[Req], pool: BlockPool) -> None:
+    """Footprint admission against the free pool, mirroring the preemption scheduler.
+
+    Admits while each request's *current* footprint (prompt, plus generated for a resume) fits
+    in the blocks actually free right now. This deliberately over-commits — admission no longer
+    reserves worst-case decode budget — so the pool can be exhausted and the engine must preempt.
+    A re-admitted request is not re-announced with ``request_admitted``; its later
+    ``request_resumed`` marks its return.
+    """
+    free = pool.free
     while waiting:
-        need = waiting[0].reserved
-        if committed + need > NUM_BLOCKS:
+        request = waiting[0]
+        need = request.footprint
+        if need > free:
             break
-        request = waiting.pop(0)
+        free -= need
+        waiting.pop(0)
         running.append(request)
-        committed += need
+        if request.preempted:
+            continue  # a resume, not a first admission — request_resumed will mark it
         fields = {"prefix_group_id": request.group} if request.group is not None else {}
         tb.emit(
             "request_admitted",
@@ -212,7 +269,52 @@ def _admit(tb: TraceBuilder, waiting: list[Req], running: list[Req], committed: 
             reserved_blocks=need,
             **fields,
         )
-    return committed
+
+
+def _preempt(
+    tb: TraceBuilder,
+    victim: Req,
+    running: list[Req],
+    waiting: list[Req],
+    pool: BlockPool,
+) -> None:
+    """Evict ``victim`` by recompute: free its KV honestly, keep its tokens, requeue it front."""
+    returned = pool.free_blocks(victim.blocks)
+    freed = len(victim.blocks)
+    victim.reset_for_recompute()
+    running.remove(victim)
+    waiting.insert(0, victim)
+    if returned:
+        tb.block_freed(victim, pool, returned)
+    tb.preempted(victim, pool, freed)
+
+
+def _make_room(
+    tb: TraceBuilder,
+    demand: int,
+    block_needers: list[Req],
+    running: list[Req],
+    waiting: list[Req],
+    pool: BlockPool,
+) -> None:
+    """Preempt LIFO victims until the pool can satisfy ``demand`` new blocks for ``block_needers``.
+
+    The victim is the most-recently-admitted running request not among the block-needers; if a
+    needer is itself the newest, it can be evicted too (and drops out of its step). Forward
+    progress holds because every request fits the empty pool alone.
+    """
+    needer_ids = {r.request_id for r in block_needers}
+    while demand > pool.free:
+        victim = next((r for r in reversed(running) if r.request_id not in needer_ids), None)
+        if victim is None:
+            # Only block-needers remain; evict the newest of them to shrink demand.
+            victim = running[-1]
+        _preempt(tb, victim, running, waiting, pool)
+
+
+def _blocks_to_grow(request: Req, new_length: int) -> int:
+    """How many *new* blocks ``request`` must pull to hold ``new_length`` positions."""
+    return max(0, blocks_for_length(new_length) - len(request.blocks))
 
 
 def _grow(tb: TraceBuilder, request: Req, pool: BlockPool, new_length: int) -> None:
@@ -229,10 +331,19 @@ def _grow(tb: TraceBuilder, request: Req, pool: BlockPool, new_length: int) -> N
         tb.block_allocated(request, pool, new_blocks)
 
 
-def _prefill_chunk(tb: TraceBuilder, leader: Req, pool: BlockPool) -> bool:
+def _prefill_chunk(
+    tb: TraceBuilder,
+    leader: Req,
+    pool: BlockPool,
+    running: list[Req],
+    waiting: list[Req],
+) -> bool:
     """Cache one prompt chunk for the leader; return True when its prompt is fully cached."""
     start = leader.cached
     end = min(leader.prompt_len, start + PREFILL_CHUNK)
+    # Before the chunk write, ensure the pool can cover its growth — preempting LIFO victims if
+    # a fresh prompt's prefill would otherwise exhaust the pool (engine order: room first).
+    _make_room(tb, _blocks_to_grow(leader, end), [leader], running, waiting, pool)
     tb.emit(
         "prefill_chunk_started",
         request_id=leader.request_id,
@@ -240,8 +351,6 @@ def _prefill_chunk(tb: TraceBuilder, leader: Req, pool: BlockPool) -> bool:
         end_pos=end,
         total_prompt_tokens=leader.prompt_len,
     )
-    # The chunk's K/V write needs blocks to cover the newly cached positions (engine order:
-    # the model's table.reserve allocates inside the forward, before progress is recorded).
     _grow(tb, leader, pool, end)
     leader.cached = end
     completed = end == leader.prompt_len
@@ -257,13 +366,21 @@ def _prefill_chunk(tb: TraceBuilder, leader: Req, pool: BlockPool) -> bool:
     return completed
 
 
-def _prefill(tb: TraceBuilder, to_prefill: list[Req], pool: BlockPool) -> int:
+def _prefill(
+    tb: TraceBuilder,
+    to_prefill: list[Req],
+    pool: BlockPool,
+    running: list[Req],
+    waiting: list[Req],
+) -> int:
     """Advance prefill for unstarted requests; prefix siblings share the leader's cache."""
     tokens_emitted = 0
     handled: set[str] = set()
     for request in to_prefill:
         if request.request_id in handled:
             continue
+        if request not in running:
+            continue  # preempted out while making room for an earlier prefill this step
         group = (
             [r for r in to_prefill if r.group == request.group]
             if request.group is not None
@@ -272,7 +389,7 @@ def _prefill(tb: TraceBuilder, to_prefill: list[Req], pool: BlockPool) -> int:
         handled.update(r.request_id for r in group)
 
         leader = group[0]
-        if not _prefill_chunk(tb, leader, pool):
+        if not _prefill_chunk(tb, leader, pool, running, waiting):
             continue
 
         # Prompt fully cached: siblings fork the leader's cache by retaining its physical
@@ -300,22 +417,79 @@ def _prefill(tb: TraceBuilder, to_prefill: list[Req], pool: BlockPool) -> int:
     return tokens_emitted
 
 
-def _decode(tb: TraceBuilder, to_decode: list[Req], pool: BlockPool) -> int:
+def _resume(
+    tb: TraceBuilder,
+    to_resume: list[Req],
+    pool: BlockPool,
+    running: list[Req],
+    waiting: list[Req],
+) -> None:
+    """Rebuild each preempted request's KV by recompute before it decodes again.
+
+    Recompute, not swap: the request kept its generated tokens, so re-prefilling
+    ``prompt + generated[:-1]`` reconstructs exactly the evicted state. No token is sampled —
+    its generated ids already decide what it decodes next. Replayed prefill chunks (same shape
+    as a first prefill) are what makes the resume visible in the trace.
+    """
+    for request in list(to_resume):
+        if request not in running:
+            continue  # re-preempted while making room for an earlier resume
+        target = request.resume_length
+        while request.cached < target:
+            start = request.cached
+            end = min(target, start + PREFILL_CHUNK)
+            _make_room(tb, _blocks_to_grow(request, end), [request], running, waiting, pool)
+            tb.emit(
+                "prefill_chunk_started",
+                request_id=request.request_id,
+                start_pos=start,
+                end_pos=end,
+                total_prompt_tokens=target,
+            )
+            _grow(tb, request, pool, end)
+            request.cached = end
+            tb.emit(
+                "prefill_chunk_progress",
+                request_id=request.request_id,
+                start_pos=start,
+                end_pos=end,
+                cached_tokens=end,
+                total_prompt_tokens=target,
+                completed=end == target,
+            )
+        request.prefilled = True
+        tb.resumed(request, pool)
+
+
+def _decode(
+    tb: TraceBuilder,
+    to_decode: list[Req],
+    pool: BlockPool,
+    running: list[Req],
+    waiting: list[Req],
+) -> int:
     """One batched decode step advancing every already-ready request by a token.
 
-    Each request first reserves a slot for the token being written (growing its block table
-    when the previous block is full — engine order: table.reserve runs before the step), then
-    the batched decode emits one token per request.
+    ``decode_many`` allocates for the whole batch in one call, so room must cover the batch's
+    *total* growth. We preempt LIFO victims (possibly batch members, which then drop out) until
+    the pool can satisfy it, then grow and emit one token per surviving request.
     """
-    if not to_decode:
+    survivors = [r for r in to_decode if r.prefilled and r in running]
+    while True:
+        survivors = [r for r in survivors if r.prefilled and r in running]
+        demand = sum(_blocks_to_grow(r, r.length + 1) for r in survivors)
+        if demand <= pool.free:
+            break
+        _make_room(tb, demand, [], running, waiting, pool)
+    if not survivors:
         return 0
-    for request in to_decode:
+    for request in survivors:
         _grow(tb, request, pool, request.length + 1)
-    tokens = [request.emit_token() for request in to_decode]
+    tokens = [request.emit_token() for request in survivors]
     tb.emit(
         "decode_step",
-        request_ids=[request.request_id for request in to_decode],
-        batch_size=len(to_decode),
+        request_ids=[request.request_id for request in survivors],
+        batch_size=len(survivors),
         token_ids=tokens,
         tokens_emitted=len(tokens),
         token_source="decode",
@@ -326,12 +500,15 @@ def _decode(tb: TraceBuilder, to_decode: list[Req], pool: BlockPool) -> int:
 def build_trace_jsonl() -> str:
     """Run the synthetic scenario and return its schema-v3 JSONL.
 
-    Six requests against twelve blocks: the first four fit at once and the last two queue,
-    so the trace shows real waiting pressure, continuous-batching churn, a long chunked
-    prefill (``code-gen``), two requests sharing one prompt (``sample-a``/``sample-b`` —
-    the second reuses the first's cached prefix), and a KV wall that fills as blocks are
-    allocated and drains as finished requests free them. The shared prompt block is freed
-    once, by whichever sibling finishes last.
+    Six requests against a deliberately tight pool, under the **preemption** discipline:
+    admission reserves only each request's current footprint, so the pool over-commits and is
+    genuinely exhausted as requests decode. When a running request then needs a block, the
+    engine evicts the most-recently-admitted one (LIFO) — freeing its KV honestly and keeping
+    its tokens — then later resumes it by recompute, replaying its prefill. The scenario stays
+    rich: a long chunked prefill (``code-gen``), two requests sharing one prompt
+    (``sample-a``/``sample-b``), continuous-batching churn, a KV wall that fills and drains, and
+    now at least one real preemption + resume cycle. Every request still finishes with all its
+    tokens, and the block lifecycle stays honest throughout.
     """
     tb = TraceBuilder()
     pool = BlockPool(NUM_BLOCKS)
@@ -344,17 +521,20 @@ def build_trace_jsonl() -> str:
         Req("translate", prompt_len=9, max_new=6, base_token=32),
     ]
     running: list[Req] = []
-    committed = 0
     step = 0
 
     while waiting or running:
         tb.step = step
-        committed = _admit(tb, waiting, running, committed)
+        _admit(tb, waiting, running, pool)
         tb.batch_changed(len(running), len(waiting))
 
+        to_resume = [r for r in running if not r.prefilled and r.generated]
+        to_prefill = [r for r in running if not r.prefilled and not r.generated]
+        _resume(tb, to_resume, pool, running, waiting)
+        prefill_tokens = _prefill(tb, to_prefill, pool, running, waiting)
         to_decode = [r for r in running if r.prefilled]
-        to_prefill = [r for r in running if not r.prefilled]
-        tokens_this_step = _prefill(tb, to_prefill, pool) + _decode(tb, to_decode, pool)
+        decode_tokens = _decode(tb, to_decode, pool, running, waiting)
+        tokens_this_step = prefill_tokens + decode_tokens
 
         for request in [r for r in running if r.finished]:
             tb.emit(
@@ -369,7 +549,6 @@ def build_trace_jsonl() -> str:
             returned = pool.free_blocks(request.blocks)
             tb.block_freed(request, pool, returned)
             request.blocks = []
-            committed -= request.reserved
             running.remove(request)
         tb.batch_changed(len(running), len(waiting))
         tb.throughput(tokens_this_step)

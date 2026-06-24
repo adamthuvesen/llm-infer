@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_infer.scheduler import Scheduler, max_blocks_for
+from llm_infer.scheduler import Scheduler, blocks_for_footprint, max_blocks_for
 from llm_infer.serving.request import Request
 
 
@@ -82,3 +82,67 @@ def test_has_work_tracks_queue_and_running() -> None:
     sched.admit()
     sched.release(req)
     assert not sched.has_work()
+
+
+# --- preemption policy ------------------------------------------------------------------
+
+
+def test_footprint_counts_prompt_plus_generated() -> None:
+    request = _request("r", prompt_len=3, max_new_tokens=6)
+    # Fresh: just the prompt -> ceil(3/4) = 1 block.
+    assert blocks_for_footprint(request, block_size=4) == 1
+    # After two generated tokens: ceil((3 + 2) / 4) = 2 blocks — its rebuild footprint grows.
+    request.record(7)
+    request.record(7)
+    assert blocks_for_footprint(request, block_size=4) == 2
+
+
+def test_preempt_admission_over_commits_against_free_blocks() -> None:
+    """Preempt mode admits on current footprint and over-commits past the reservation wall."""
+    sched = Scheduler(num_blocks=3, block_size=4, preemption=True)
+    for rid in ("a", "b", "c"):
+        sched.add(_request(rid, prompt_len=3, max_new_tokens=6))  # worst-case 2 blk, footprint 1
+    # Reservation mode would admit one (3 blocks / 2 each); preemption admits all three on
+    # their 1-block prompt footprint, deliberately over-committing the pool.
+    admitted = [r.request_id for r in sched.admit(free_blocks=3)]
+    assert admitted == ["a", "b", "c"]
+
+
+def test_preempt_admission_stops_when_free_blocks_run_out() -> None:
+    sched = Scheduler(num_blocks=3, block_size=4, preemption=True)
+    for rid in ("a", "b", "c", "d"):
+        sched.add(_request(rid, prompt_len=3, max_new_tokens=6))  # footprint 1 each
+    admitted = [r.request_id for r in sched.admit(free_blocks=2)]  # only two fit free now
+    assert admitted == ["a", "b"]
+    assert [r.request_id for r in sched.waiting] == ["c", "d"]
+
+
+def test_preempt_admission_requires_free_block_count() -> None:
+    sched = Scheduler(num_blocks=3, block_size=4, preemption=True)
+    sched.add(_request("a"))
+    with pytest.raises(ValueError, match="free-block count"):
+        sched.admit()
+
+
+def test_preemption_victim_is_most_recently_admitted() -> None:
+    sched = Scheduler(num_blocks=4, block_size=4, preemption=True)
+    reqs = [_request(rid, prompt_len=3, max_new_tokens=6) for rid in ("a", "b", "c")]
+    for req in reqs:
+        sched.add(req)
+    sched.admit(free_blocks=4)
+    # LIFO: the newest running request is the victim; it is never the excluded block-needer.
+    assert sched.preemption_victim(exclude=reqs[2]) is reqs[1]
+    assert sched.preemption_victim(exclude=None) is reqs[2]
+
+
+def test_requeue_returns_preempted_request_to_front() -> None:
+    sched = Scheduler(num_blocks=4, block_size=4, preemption=True)
+    running = _request("running", prompt_len=3, max_new_tokens=6)
+    waiting = _request("waiting", prompt_len=3, max_new_tokens=6)
+    sched.add(running)
+    sched.admit(free_blocks=4)
+    sched.add(waiting)
+    sched.requeue(running)
+    # The preempted request reclaims a slot ahead of the never-started newcomer.
+    assert [r.request_id for r in sched.waiting] == ["running", "waiting"]
+    assert running not in sched.running
