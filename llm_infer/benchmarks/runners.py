@@ -215,8 +215,9 @@ def run_hf_sequential(
     """Naive baseline (the floor): HF ``generate()`` once per request, sequentially.
 
     Greedy by default; under ``workload.sampling`` it samples with the pinned temperature/
-    top-p and re-seeds (``set_seed``) at the start of every ``decode_once`` so each measured
-    iteration reproduces identical tokens.
+    top-p and re-seeds (``set_seed``) with a **per-completion seed** (base_seed + index) before
+    each request, so the G completions of a prompt are independent draws (not G identical copies)
+    yet every iteration reproduces the same tokens. Same per-completion policy as llm_infer/vLLM.
     """
     eos = sorted(workload.eos_token_ids)
     sampling = workload.sampling
@@ -234,10 +235,10 @@ def run_hf_sequential(
     def decode_once() -> dict[str, list[int]]:
         if sampling is not None:
             from transformers import set_seed
-
-            set_seed(sampling.seed)
         outputs: dict[str, list[int]] = {}
-        for req in workload.requests:
+        for index, req in enumerate(workload.requests):
+            if sampling is not None:
+                set_seed(sampling.seed + index)  # per-completion seed → independent G draws
             input_ids = torch.tensor([req.prompt_ids], device=device)
             gen = hf_model.generate(input_ids, **gen_kwargs)
             outputs[req.request_id] = gen[0, input_ids.shape[1] :].tolist()
@@ -336,11 +337,15 @@ def run_vllm(
         max_model_len=max_model_len,
         tensor_parallel_size=1,
     )
-    # Greedy (Phase D) → temperature 0. Rollout → the pinned temperature/top-p, seeded for
-    # a reproducible per-iteration token set. n=1 because the G=4 replication is already in
-    # the workload (32 independent completions), so every system decodes identical request set.
+    # Greedy (Phase D) → temperature 0, one shared deterministic params. Rollout → the pinned
+    # temperature/top-p with a **per-completion seed** (base_seed + index): a *list* of params,
+    # one per prompt, so the G completions of a prompt are independent draws, not G identical
+    # copies under a single shared seed. n=1 because the G replication is already expanded into
+    # the workload's request list. This matches the llm_infer/HF per-completion seed policy;
+    # tokens still differ across systems (different RNGs) — only WITHIN a system are the G
+    # completions independent and reproducible.
     if sampling is None:
-        params = SamplingParams(
+        request_params: SamplingParams | list[SamplingParams] = SamplingParams(
             temperature=0.0,
             max_tokens=workload.max_new_tokens,
             n=1,
@@ -348,20 +353,23 @@ def run_vllm(
             ignore_eos=False,
         )
     else:
-        params = SamplingParams(
-            temperature=sampling.temperature,
-            top_p=sampling.top_p,
-            seed=sampling.seed,
-            max_tokens=workload.max_new_tokens,
-            n=1,
-            stop_token_ids=sorted(workload.eos_token_ids),
-            ignore_eos=False,
-        )
+        request_params = [
+            SamplingParams(
+                temperature=sampling.temperature,
+                top_p=sampling.top_p,
+                seed=sampling.seed + index,
+                max_tokens=workload.max_new_tokens,
+                n=1,
+                stop_token_ids=sorted(workload.eos_token_ids),
+                ignore_eos=False,
+            )
+            for index in range(len(workload.requests))
+        ]
     prompts = [{"prompt_token_ids": list(req.prompt_ids)} for req in workload.requests]
     ids_by_index = [req.request_id for req in workload.requests]
 
     def decode_once() -> dict[str, list[int]]:
-        results = llm.generate(prompts, params, use_tqdm=False)
+        results = llm.generate(prompts, request_params, use_tqdm=False)
         # Coerce to plain Python ints: vLLM token_ids can be tensor/array scalars, which pickle
         # with a torch ref and fail to deserialize in the (torch-less) local `modal run` env.
         return {
