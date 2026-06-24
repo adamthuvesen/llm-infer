@@ -376,9 +376,9 @@ fixed-size **blocks** shared across requests. Each request has a **block table**
 logical token positions to physical block slots
 ([`block_table.py`](../llm_infer/kv_cache/block_table.py)).
 
-**Continuous batching (v1 scope).** At each decode-step boundary, finished requests leave the
-batch and queued requests may enter ([`docs/scoping.md`](scoping.md)). No chunked prefill, no
-mixed prefill/decode fusion in v1.
+**Continuous batching + chunked prefill.** At each decode-step boundary, finished requests leave
+the batch and queued requests may enter ([`docs/scoping.md`](scoping.md)). Long prompts can
+prefill in bounded chunks so already-prefilled requests keep decoding between chunks.
 
 **AttentionBackend protocol.** Narrow interface: given already-RoPE'd, GQA-expanded Q/K/V
 tensors, compute causal attention ([`kernels/base.py`](../llm_infer/kernels/base.py)).

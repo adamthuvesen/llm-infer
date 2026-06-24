@@ -17,6 +17,7 @@ requests gives token-for-token the same result as running each alone.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -24,10 +25,11 @@ import torch
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.qwen import QwenModel
 from llm_infer.profiling import TimingProfiler
-from llm_infer.scheduler.scheduler import Scheduler
+from llm_infer.scheduler.scheduler import Scheduler, max_blocks_for
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import Sampler
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
+from llm_infer.tracing import FinishReason, TraceEvent, TraceEventName, TraceRecorder
 
 
 @dataclass
@@ -54,6 +56,7 @@ class InferenceEngine:
         profiler: TimingProfiler | None = None,
         prefill_chunk_size: int | None = None,
         speculative: SpeculativeDecodingConfig | None = None,
+        trace: TraceRecorder | None = None,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -77,6 +80,13 @@ class InferenceEngine:
         self.model.profiler = profiler
         self.prefill_chunk_size = prefill_chunk_size
         self.speculative = PromptLookupDraft(speculative) if speculative is not None else None
+        self.trace = trace
+        self._step_index = 0
+        self._trace_sequence = 0
+        self._trace_step: int | None = None
+        self._trace_start_time = time.perf_counter()
+        self._trace_total_tokens = 0
+        self._last_traced_batch_size = 0
         self._requests: dict[str, Request] = {}
 
     def add_request(self, request: Request) -> None:
@@ -97,28 +107,44 @@ class InferenceEngine:
         continuous batching a throughput win, not just a scheduling one.
         """
         result = StepResult()
+        self._trace_step = self._step_index
+        self._step_index += 1
+        try:
+            for request in self.scheduler.admit():
+                result.admitted.append(request.request_id)
+                self._emit_trace(
+                    "request_admitted",
+                    request_id=request.request_id,
+                    prompt_tokens=len(request.prompt_ids),
+                    max_new_tokens=request.max_new_tokens,
+                    prefix_group_id=request.prefix_group_id,
+                    reserved_blocks=max_blocks_for(request, self.scheduler.block_size),
+                )
+            self._trace_batch_size_changed()
 
-        for request in self.scheduler.admit():
-            result.admitted.append(request.request_id)
+            to_decode: list[Request] = []
+            to_prefill: list[Request] = []
+            for request in self.scheduler.running:
+                if request.prefilled:
+                    to_decode.append(request)
+                    continue
+                to_prefill.append(request)
 
-        to_decode: list[Request] = []
-        to_prefill: list[Request] = []
-        for request in self.scheduler.running:
-            if request.prefilled:
-                to_decode.append(request)
-                continue
-            to_prefill.append(request)
+            self._prefill_requests(to_prefill, result)
 
-        self._prefill_requests(to_prefill, result)
+            if to_decode:
+                self._decode_requests(to_decode, result)
 
-        if to_decode:
-            self._decode_requests(to_decode, result)
+            for request in [r for r in self.scheduler.running if r.finished]:
+                self._trace_request_finished(request)
+                request.block_table.free()
+                self.scheduler.release(request)
+            self._trace_batch_size_changed()
+            self._trace_throughput_sample(result)
 
-        for request in [r for r in self.scheduler.running if r.finished]:
-            request.block_table.free()
-            self.scheduler.release(request)
-
-        return result
+            return result
+        finally:
+            self._trace_step = None
 
     def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
         """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
@@ -217,6 +243,7 @@ class InferenceEngine:
         eos_flags = self._eos_flags(tokens, requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
+        self._trace_decode_step(requests, [token for token in tokens.reshape(-1)])
 
     def _draft_for(self, request: Request) -> list[int]:
         """Return a draft only when there is room for draft tokens plus verifier recovery."""
@@ -243,10 +270,12 @@ class InferenceEngine:
 
         original_length = request.block_table.length
         draft_tensor = torch.tensor(draft, dtype=torch.long, device=self.model.device)
-        verify_input = torch.cat([
-            request.last_token_tensor.to(self.model.device).reshape(1),
-            draft_tensor,
-        ])
+        verify_input = torch.cat(
+            [
+                request.last_token_tensor.to(self.model.device).reshape(1),
+                draft_tensor,
+            ]
+        )
         with self._record_time("speculative_decode"):
             logits = decode_tokens(self.cache, request.block_table, verify_input)
 
@@ -270,6 +299,7 @@ class InferenceEngine:
             if request.finished:
                 break
             self._record(request, token, self._is_eos(token, request), result)
+        self._trace_decode_step([request], emitted)
 
     def _accepted_prefix_length(
         self, verifier_tokens: torch.Tensor, draft_tokens: torch.Tensor
@@ -304,6 +334,13 @@ class InferenceEngine:
         chunk_size = min(chunk_size, remaining)
         end_pos = start_pos + chunk_size
         result.prefill_chunks[request.request_id] = (start_pos, end_pos)
+        self._emit_trace(
+            "prefill_started",
+            request_id=request.request_id,
+            start_pos=start_pos,
+            end_pos=end_pos,
+            total_prompt_tokens=len(request.prompt_ids),
+        )
 
         with self._record_time("prefill"):
             if start_pos == 0 and end_pos == len(request.prompt_ids):
@@ -323,6 +360,15 @@ class InferenceEngine:
                     chunk_size=chunk_size,
                 )
         request.prompt_cached_tokens = end_pos
+        self._emit_trace(
+            "prefill_progress",
+            request_id=request.request_id,
+            start_pos=start_pos,
+            end_pos=end_pos,
+            cached_tokens=end_pos,
+            total_prompt_tokens=len(request.prompt_ids),
+            completed=end_pos == len(request.prompt_ids),
+        )
         if end_pos < len(request.prompt_ids):
             return None
         return logits
@@ -386,6 +432,80 @@ class InferenceEngine:
             if self._is_eos(token, request):
                 break
         return truncated
+
+    def _trace_decode_step(self, requests: list[Request], tokens: list[int | torch.Tensor]) -> None:
+        if self.trace is None:
+            return
+        self._emit_trace(
+            "decode_step",
+            request_ids=tuple(request.request_id for request in requests),
+            batch_size=len(requests),
+            token_ids=tuple(self._trace_token_id(token) for token in tokens),
+            tokens_emitted=len(tokens),
+        )
+
+    def _trace_request_finished(self, request: Request) -> None:
+        if self.trace is None:
+            return
+        reason: FinishReason = "eos" if request.last_token in request.eos_token_ids else "length"
+        self._emit_trace(
+            "request_finished",
+            request_id=request.request_id,
+            token_ids=tuple(request.generated),
+            generated_tokens=len(request.generated),
+            reason=reason,
+        )
+
+    def _trace_batch_size_changed(self) -> None:
+        if self.trace is None:
+            return
+        batch_size = len(self.scheduler.running)
+        if batch_size == self._last_traced_batch_size:
+            return
+        self._emit_trace(
+            "batch_size_changed",
+            previous_batch_size=self._last_traced_batch_size,
+            batch_size=batch_size,
+            waiting=len(self.scheduler.waiting),
+        )
+        self._last_traced_batch_size = batch_size
+
+    def _trace_throughput_sample(self, result: StepResult) -> None:
+        if self.trace is None:
+            return
+        tokens_this_step = sum(len(tokens) for tokens in result.tokens.values())
+        if tokens_this_step == 0:
+            return
+        self._trace_total_tokens += tokens_this_step
+        elapsed = max(time.perf_counter() - self._trace_start_time, 1e-12)
+        self._emit_trace(
+            "tokens_per_second_sampled",
+            tokens_emitted=tokens_this_step,
+            total_generated_tokens=self._trace_total_tokens,
+            elapsed_seconds=elapsed,
+            tokens_per_second=self._trace_total_tokens / elapsed,
+        )
+
+    def _emit_trace(self, event: TraceEventName, **fields: object) -> None:
+        if self.trace is None:
+            return
+        if self._trace_step is None:
+            raise RuntimeError("trace events can only be emitted during engine.step()")
+        self._trace_sequence += 1
+        self.trace.record(
+            TraceEvent(
+                event=event,
+                sequence=self._trace_sequence,
+                step=self._trace_step,
+                **fields,
+            )
+        )
+
+    def _trace_token_id(self, token: int | torch.Tensor) -> int:
+        if isinstance(token, torch.Tensor):
+            with self._record_host_time("cpu_gpu_sync"):
+                return int(token.cpu().item())
+        return token
 
     def _record_time(self, name: str):
         if self.profiler is None:

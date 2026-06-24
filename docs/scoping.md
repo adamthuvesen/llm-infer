@@ -102,15 +102,18 @@ kernels/
 - **Benchmark equivalence across all three systems:** same prompts, `max_new_tokens`, stop tokens, greedy decoding, warmup/measurement windows.
 - **No silent gaming.** The directional floor is naive-baseline-relative, not vLLM-relative.
 
-## KV Cache Theater (planned later — trace-driven)
+## KV Cache Theater (primary track — trace-driven)
 
-Planned as a later-stage artifact, after the core engine techniques land (it's the
-*KV-cache-theater visualizer* bullet in the primary forward track above). Build it only if it
-replays **real engine events**, not a simulation. The engine emits a trace; the visualizer is a
-debugger + proof artifact, not decoration. Separate repo / app, fed by llm-infer traces. Event
-schema:
+The engine-side trace emitter MVP lives in `llm_infer/tracing.py` and
+`InferenceEngine(trace=...)`. Build the visualizer only if it replays **real engine events**,
+not a simulation. The engine trace is the artifact; the visualizer is a debugger + proof view,
+not decoration. Separate repo / app, fed by llm-infer traces. Current MVP event schema:
 
-`request_admitted · prefill_started · block_allocated · decode_step · request_finished · block_freed · batch_size_changed · tokens_per_second_sampled`
+`request_admitted · prefill_started · prefill_progress · decode_step · request_finished · batch_size_changed · tokens_per_second_sampled`
+
+Block lifecycle remains a deliberate follow-up: `block_allocated` / `block_freed` need a clean
+allocator or block-table hook around `BlockTable.reserve()` / `BlockTable.free()`. Do not fake
+those events from higher-level request state.
 
 ## Expansion path (post-v1, engine-first)
 
@@ -139,6 +142,18 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   engine from **365.8 tok/s / $0.18 per 1k rollouts** to **411.5 tok/s / $0.16 per 1k
   rollouts**, with prompt prefill token-ops reduced from **15,416** to **3,854** (pinned:
   `bench-results/rollout-rollout-20260622T173732.json`).
+- **Chunked prefill / mixed prefill-decode.** Active decode requests now keep advancing between
+  bounded prompt chunks for not-yet-prefilled requests, preserving the cached-token path while
+  removing the old "prefill fully, then decode" split for long prompts.
+- **Speculative decoding v1 — prompt-lookup draft + greedy verifier.** The engine can use an
+  n-gram / prompt-lookup draft source and verify `last_token + draft` in one cached forward,
+  accepting only the greedy-matching prefix and falling back safely. This is correctness and
+  technique evidence only: it is off by default, greedy-only, uses no second model, and makes
+  no speed claim.
+- **KV-cache-theater trace emitter MVP.** The engine now has an opt-in typed recorder for
+  schema-versioned runtime events emitted from the real `InferenceEngine` path: request
+  admission, prefill start/progress, decode steps, request finish, batch-size changes, and
+  throughput samples. The separate visualizer is intentionally not part of this slice.
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
@@ -163,16 +178,9 @@ bound by). Absent both, the CUDA-graph axis stays closed.
 The point of the project. Each item is a canonical inference-engine technique the engine does
 not yet have, in rough dependency order:
 
-- **Chunked prefill / mixed prefill-decode** — admit and interleave prefill chunks with the
-  decode batch instead of the v1 "prefill fully, then decode" split.
-- **Speculative decoding** — draft-and-verify: propose several tokens cheaply, then verify them
-  in one forward pass. A canonical modern inference technique, a real speed lever, and very
-  teachable. The honest constraint: it needs a *draft source* — a smaller draft model, an
-  n-gram / prompt-lookup table, or self-speculation — and a single-3B frame has no obvious
-  second model, so pick the draft source that fits when the slice is designed.
-- **KV-cache-theater visualizer** — a later-stage "show how the engine works" artifact: a
-  trace-driven view of block allocation, decode steps, and batch-size changes (see the *KV Cache
-  Theater* section below for the event schema). It comes after the core techniques land.
+- **KV-cache-theater visualizer** — build a separate visualizer from the real engine traces.
+  Block allocation/free joins only after the cache has a clean lifecycle hook (see the *KV
+  Cache Theater* section above).
 - **Serving depth** — streaming, an OpenAI-compatible endpoint, metrics, and a load generator,
   so the engine is drivable as a real server rather than only through the frozen harness. This
   is the final engine piece — it makes the engine drivable as a real server.
