@@ -42,9 +42,7 @@ def flash_model() -> QwenModel:
     """The engine on the flash-attn backend, bf16 on CUDA — the fast path under test."""
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 
-    return QwenModel.load(
-        dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda"
-    )
+    return QwenModel.load(dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda")
 
 
 @pytest.fixture(scope="module")

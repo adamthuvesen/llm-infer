@@ -41,9 +41,7 @@ def normalize_at_eos(token_ids: Iterable[int], eos_token_ids: frozenset[int]) ->
     return out
 
 
-def total_output_tokens(
-    outputs: dict[str, list[int]], eos_token_ids: frozenset[int]
-) -> int:
+def total_output_tokens(outputs: dict[str, list[int]], eos_token_ids: frozenset[int]) -> int:
     """Sum of the scored continuation lengths over all requests."""
     return sum(len(normalize_at_eos(ids, eos_token_ids)) for ids in outputs.values())
 

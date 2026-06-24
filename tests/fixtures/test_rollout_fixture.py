@@ -44,9 +44,7 @@ def test_rollout_fixture_workload_shape_is_unchanged() -> None:
     assert workload.num_requests == 32
     assert workload.max_new_tokens == 1024
     assert workload.prompt_lengths == tuple(
-        length
-        for length in (251, 868, 334, 336, 359, 357, 672, 677)
-        for _ in range(4)
+        length for length in (251, 868, 334, 336, 359, 357, 672, 677) for _ in range(4)
     )
     assert workload.sampling is not None
     assert workload.sampling.temperature == 1.0

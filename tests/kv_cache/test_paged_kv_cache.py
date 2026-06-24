@@ -125,9 +125,10 @@ def test_block_table_fork_refcounts_shared_blocks_until_last_free() -> None:
 
 
 def _ramp(n: int, kv_heads: int, head_dim: int, offset: float) -> torch.Tensor:
-    return torch.arange(n * kv_heads * head_dim, dtype=torch.float32).reshape(
-        n, kv_heads, head_dim
-    ) + offset
+    return (
+        torch.arange(n * kv_heads * head_dim, dtype=torch.float32).reshape(n, kv_heads, head_dim)
+        + offset
+    )
 
 
 def test_cache_write_read_round_trip() -> None:

@@ -85,6 +85,5 @@ def test_all_cases_batched_equals_serial(model) -> None:
         cid = case["case_id"]
         div = _first_divergence(batched[cid], serial[cid])
         assert batched[cid] == serial[cid], (
-            f"{cid}: batched != serial at step {div} "
-            f"(batched={batched[cid]}, serial={serial[cid]})"
+            f"{cid}: batched != serial at step {div} (batched={batched[cid]}, serial={serial[cid]})"
         )

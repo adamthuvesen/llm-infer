@@ -266,11 +266,19 @@ def main(
 
     if command == "smoke":
         defaults = {
-            "num_prompts": 2, "num_generations": 1, "max_completion": 64, "warmup": 0, "iters": 1
+            "num_prompts": 2,
+            "num_generations": 1,
+            "max_completion": 64,
+            "warmup": 0,
+            "iters": 1,
         }
     elif command == "rollout":
         defaults = {
-            "num_prompts": 8, "num_generations": 4, "max_completion": 1024, "warmup": 1, "iters": 2
+            "num_prompts": 8,
+            "num_generations": 4,
+            "max_completion": 1024,
+            "warmup": 1,
+            "iters": 2,
         }
     else:
         raise ValueError(f"command must be 'smoke' or 'rollout', got {command!r}")
