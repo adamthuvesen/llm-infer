@@ -12,14 +12,16 @@ decoded step ``t`` from exactly the golden prefix; we recompute that step's logi
 the **reference path** — ``QwenModel.logits`` (full recompute, fp32, the trusted
 truth) — over ``prompt + golden[:t]``. Two outcomes:
 
-* The top-two reference logits are within ``tolerance`` — a genuine tie. The fast
-  kernel's fp32-reduction-order picked the other near-equal token; that is the
-  documented, acceptable flash-vs-recompute effect. The divergence is traced and
-  accepted: from a true tie the fast path is a legitimate alternate greedy continuation,
-  so we do not demand it rejoin the golden afterwards.
-* The gap is well above ``tolerance`` — under unambiguous reference math one token wins
-  and the fast kernel picked the loser. That is a real kernel/layout bug, not a tie:
-  the comparison fails and names the step.
+* Both the token the fast kernel chose AND the golden token are within ``tolerance`` of the
+  reference max — a genuine tie. The fast kernel's fp32-reduction-order picked the other
+  near-equal token; that is the documented, acceptable flash-vs-recompute effect. The
+  divergence is traced and accepted: from a true tie the fast path is a legitimate alternate
+  greedy continuation, so we do not demand it rejoin the golden afterwards.
+* Either the fast token or the golden token sits more than ``tolerance`` below the reference
+  max — under unambiguous reference math one token wins and the fast kernel picked a loser
+  (or the reference disagrees with the golden). That is a real kernel/layout bug, not a tie:
+  the comparison fails and names the step. A small top-two *gap* alone is **not** enough to
+  excuse a divergence — the chosen token itself must be in the near-tied set.
 
 There is no blanket "close enough" and no unconditional tolerance: a divergence is
 accepted only when the reference itself says the step was a coin-flip. We classify only
@@ -109,17 +111,26 @@ def compare_under_tie_tolerance(
     logits = reference.logits(prompt_ids + golden_tokens[:step])[-1].float()
     top2 = torch.topk(logits, 2).values
     gap = float((top2[0] - top2[1]).item())
+    max_logit = float(top2[0].item())
     fast_logit = float(logits[fast].item())
     golden_logit = float(logits[golden].item())
 
-    if gap > tolerance:
+    # A genuine tie requires the token the fast kernel *actually chose* to be within tolerance
+    # of the reference winner — a small top-2 gap is not enough on its own, because the kernel
+    # could have picked a third token far down the distribution while the top two happened to be
+    # close. We also require the golden token to be within tolerance, so neither a wrong fast
+    # token nor a reference-vs-golden disagreement can launder as a tie.
+    fast_below = max_logit - fast_logit
+    golden_below = max_logit - golden_logit
+    if fast_below > tolerance or golden_below > tolerance:
         return TieToleranceResult(
             ok=False,
             divergence=None,
             failure=(
-                f"step {step}: fast backend chose {fast} but reference top-2 gap is "
-                f"{gap:.6g} > tolerance {tolerance:g} — NOT a tie, a real divergence "
-                f"(fast_logit={fast_logit:.6g}, golden_logit={golden_logit:.6g})"
+                f"step {step}: fast backend chose {fast}, whose reference logit is "
+                f"{fast_below:.6g} below the reference max (golden {golden} is {golden_below:.6g} "
+                f"below); tolerance {tolerance:g} — NOT a tie, a real divergence "
+                f"(fast_logit={fast_logit:.6g}, golden_logit={golden_logit:.6g}, top2_gap={gap:.6g})"
             ),
         )
     return TieToleranceResult(
