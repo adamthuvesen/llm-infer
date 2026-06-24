@@ -76,6 +76,54 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def test_engine_step_failure_fails_streams_instead_of_hanging() -> None:
+    """If the background step loop dies, in-flight streams fail and new ones are rejected fast.
+
+    Without a fatal boundary the loop thread would die silently and every consumer would block
+    forever on its queue. The loop now contains the failure: active streams re-raise the engine
+    error, and later submissions are rejected immediately instead of hanging.
+    """
+
+    async def go() -> None:
+        engine = InferenceEngine(_tiny_qwen(), block_size=8, num_blocks=64)
+
+        def boom():
+            raise RuntimeError("engine exploded")
+
+        engine.step = boom  # the loop dies on its first real step
+        async_engine = AsyncInferenceEngine(engine)
+        async_engine.start()
+        try:
+            stream = async_engine.stream(
+                request_id="r0",
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=5,
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            with pytest.raises(RuntimeError, match="engine exploded"):
+                async for _ in stream:
+                    pass
+
+            # The loop is dead: a new submission is rejected fast, not left to hang.
+            for _ in range(200):
+                if async_engine._fatal is not None:
+                    break
+                await asyncio.sleep(0.01)
+            later = async_engine.stream(
+                request_id="r1",
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=5,
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            with pytest.raises(RuntimeError, match="no longer running"):
+                async for _ in later:
+                    pass
+        finally:
+            async_engine.stop()
+
+    _run(go())
+
+
 def test_cancellation_aborts_engine_request() -> None:
     """Dropping a stream mid-generation aborts its engine request and frees the loop.
 

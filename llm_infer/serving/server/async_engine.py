@@ -93,6 +93,9 @@ class AsyncInferenceEngine:
         self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
         self._ids = itertools.count()
+        # Set if the engine step loop dies: the engine is then unhealthy, every active stream is
+        # failed, and new submissions are rejected fast instead of hanging forever on the queue.
+        self._fatal: BaseException | None = None
         if metrics is not None:
             self._bind_gauges(metrics)
 
@@ -182,6 +185,8 @@ class AsyncInferenceEngine:
             sampling=sampling,
         )
         with self._lock:
+            if self._fatal is not None:
+                raise RuntimeError("inference engine is no longer running") from self._fatal
             self._submissions.append((request, stream))
         self._wake.set()
 
@@ -214,16 +219,40 @@ class AsyncInferenceEngine:
     # --- background thread: the only place that touches the engine ---------------------
 
     def _run_loop(self) -> None:
-        while not self._shutdown.is_set():
-            self._drain_submissions()
-            self._apply_aborts()
-            if not self._engine.scheduler.has_work():
-                # Nothing to do: block until a submission or abort wakes us, cheap and idle-quiet.
-                self._wake.wait(timeout=self._idle_sleep_s)
-                self._wake.clear()
-                continue
-            result = self._engine.step()
-            self._dispatch(result)
+        try:
+            while not self._shutdown.is_set():
+                self._drain_submissions()
+                self._apply_aborts()
+                if not self._engine.scheduler.has_work():
+                    # Nothing to do: block until a submission or abort wakes us, idle-quiet.
+                    self._wake.wait(timeout=self._idle_sleep_s)
+                    self._wake.clear()
+                    continue
+                result = self._engine.step()
+                self._dispatch(result)
+        except BaseException as exc:  # noqa: BLE001 — contain a dead loop, never hang clients
+            self._fail_all(exc)
+
+    def _fail_all(self, exc: BaseException) -> None:
+        """The step loop died: mark the engine unhealthy and fail everyone instead of hanging.
+
+        Every in-flight stream is closed carrying ``exc`` (its consumer re-raises it), every
+        queued-but-undrained submission is failed the same way, and ``_fatal`` is set so later
+        submissions are rejected fast in :meth:`stream`. Runs on the (now-exiting) loop thread,
+        the only one that touches ``_streams``; ``_submissions``/``_fatal`` are shared with handler
+        threads, so those are touched under the lock.
+        """
+        for stream in list(self._streams.values()):
+            stream.error = exc
+            self._enqueue(stream, None)
+        self._streams.clear()
+        with self._lock:
+            self._fatal = exc
+            pending = self._submissions
+            self._submissions = []
+        for _, stream in pending:
+            stream.error = exc
+            self._enqueue(stream, None)
 
     def _drain_submissions(self) -> None:
         with self._lock:
