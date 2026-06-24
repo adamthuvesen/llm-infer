@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -464,15 +464,30 @@ def _sse(chunk: ChatCompletionChunk | CompletionChunk) -> str:
     return f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
 
 
+def _template_token_ids(rendered: object) -> list[int]:
+    """Flatten ``apply_chat_template(tokenize=True)`` output into a list of int ids.
+
+    Real HF tokenizers return a ``BatchEncoding`` (``{"input_ids": [...]}``); a stand-in may
+    return a bare list. Iterating a mapping yields its *keys*, not its ids, so read
+    ``input_ids`` explicitly, drop a leading batch dimension if present, and coerce to int.
+    """
+    ids = rendered["input_ids"] if isinstance(rendered, Mapping) else rendered
+    ids = list(ids)
+    if ids and isinstance(ids[0], (list, tuple)):
+        ids = list(ids[0])
+    return [int(token) for token in ids]
+
+
 def _apply_chat_template(tokenizer: object, messages: list[ChatMessage]) -> list[int]:
     rendered = tokenizer.apply_chat_template(
         [{"role": m.role, "content": m.content} for m in messages],
         add_generation_prompt=True,
         tokenize=True,
     )
-    if not rendered:
+    ids = _template_token_ids(rendered)
+    if not ids:
         raise HTTPException(400, "chat template produced zero tokens")
-    return list(rendered)
+    return ids
 
 
 def _reject_unsupported(request: ChatCompletionRequest) -> None:
@@ -573,9 +588,10 @@ def _responses_prompt_ids(tokenizer: object, request: ResponsesRequest) -> list[
             role = "system" if item.role == "developer" else item.role
             messages.append({"role": role, "content": item.content})
     rendered = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-    if not rendered:
+    ids = _template_token_ids(rendered)
+    if not ids:
         raise HTTPException(400, "chat template produced zero tokens")
-    return list(rendered)
+    return ids
 
 
 def _reject_responses_unsupported(request: ResponsesRequest) -> None:

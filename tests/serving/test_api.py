@@ -44,11 +44,15 @@ class TinyTokenizer:
 
     def apply_chat_template(
         self, messages: list[dict], add_generation_prompt: bool = True, tokenize: bool = True
-    ) -> list[int]:
+    ) -> dict[str, list[int]]:
+        # Mirror a real HF tokenizer: tokenize=True yields a BatchEncoding-shaped mapping
+        # ({"input_ids": [...]}), NOT a bare list — so the server must read input_ids rather
+        # than iterate the mapping (which would yield its string keys). This pins that contract.
         text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         if add_generation_prompt:
             text += "\nassistant:"
-        return self.encode(text)
+        ids = self.encode(text)
+        return {"input_ids": ids, "attention_mask": [1] * len(ids)}
 
 
 def _build_app():
