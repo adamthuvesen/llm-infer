@@ -238,4 +238,14 @@ function validateEvent(event, lineNumber) {
   if (!Number.isInteger(event.step) || event.step < 0) {
     throw new Error(`Line ${lineNumber} must have a non-negative integer step.`);
   }
+  if (event.request_id !== undefined && typeof event.request_id !== "string") {
+    throw new Error(`Line ${lineNumber} request_id must be a string when present.`);
+  }
+  if (
+    event.request_ids !== undefined &&
+    (!Array.isArray(event.request_ids) ||
+      event.request_ids.some((requestId) => typeof requestId !== "string"))
+  ) {
+    throw new Error(`Line ${lineNumber} request_ids must be an array of strings when present.`);
+  }
 }

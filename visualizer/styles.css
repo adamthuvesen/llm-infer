@@ -1,18 +1,19 @@
 :root {
   color-scheme: dark;
-  --bg: #101114;
-  --panel: #171a1f;
-  --panel-strong: #1f242b;
-  --line: #303641;
-  --text: #eef2f7;
-  --muted: #a0a8b5;
-  --quiet: #687180;
+  --bg: #0a0d10;
+  --panel: #13181d;
+  --panel-strong: #1b232b;
+  --line: #2c3540;
+  --text: #f4f7fb;
+  --muted: #aab5c3;
+  --quiet: #748192;
   --green: #31c7a8;
   --amber: #f2b84b;
   --coral: #ff6f61;
   --blue: #55a7ff;
   --violet: #8e7dff;
-  --shadow: 0 20px 50px rgb(0 0 0 / 0.32);
+  --ink: #080a0d;
+  --shadow: 0 20px 60px rgb(0 0 0 / 0.42);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -27,7 +28,9 @@ body {
   width: 100%;
   max-width: 100vw;
   overflow-x: hidden;
-  background: var(--bg);
+  background:
+    linear-gradient(180deg, #11161b 0, var(--bg) 320px),
+    var(--bg);
   color: var(--text);
 }
 
@@ -43,8 +46,8 @@ input {
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto auto auto 1fr;
-  gap: 12px;
-  padding: 16px;
+  gap: 10px;
+  padding: 12px;
 }
 
 .topbar,
@@ -52,7 +55,9 @@ input {
 .metrics-band,
 .stage-panel {
   border: 1px solid var(--line);
-  background: var(--panel);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0)),
+    var(--panel);
   box-shadow: var(--shadow);
 }
 
@@ -63,7 +68,7 @@ input {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-radius: 8px;
 }
 
@@ -80,7 +85,7 @@ p {
 }
 
 h1 {
-  font-size: clamp(1.35rem, 2vw, 2rem);
+  font-size: clamp(1.4rem, 2vw, 2.15rem);
   line-height: 1.05;
   letter-spacing: 0;
 }
@@ -123,7 +128,7 @@ select {
   min-height: 36px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: var(--panel-strong);
+  background: #202934;
   color: var(--text);
 }
 
@@ -165,7 +170,7 @@ select {
   grid-template-columns: minmax(160px, 1fr) auto minmax(180px, auto);
   align-items: center;
   gap: 14px;
-  padding: 11px 14px;
+  padding: 9px 14px;
   border-radius: 8px;
 }
 
@@ -191,35 +196,61 @@ output {
 .metrics-band {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(190px, 1fr) minmax(190px, 1fr) minmax(190px, 0.75fr);
-  gap: 12px;
-  padding: 13px 14px;
+  grid-template-columns: minmax(190px, 0.78fr) minmax(210px, 1fr) minmax(210px, 1fr) minmax(210px, 0.95fr);
+  gap: 10px;
+  padding: 10px;
   border-radius: 8px;
 }
 
+.loop-card,
 .meter {
   min-width: 0;
+  padding: 10px;
+  border: 1px solid #283341;
+  border-radius: 7px;
+  background: #10151a;
+}
+
+.loop-card {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+}
+
+.loop-card span,
+.meter-head {
+  font-size: 0.82rem;
+  color: var(--muted);
 }
 
 .meter-head {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 12px;
+  gap: 8px;
   margin-bottom: 9px;
-  font-size: 0.82rem;
-  color: var(--muted);
+}
+
+.loop-card strong {
+  color: var(--green);
+  font-size: 1rem;
+  line-height: 1.15;
+  text-transform: capitalize;
+}
+
+.loop-card small {
+  color: var(--quiet);
 }
 
 .meter-head strong {
   color: var(--text);
   font-size: 0.84rem;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  text-align: right;
 }
 
 .meter-track {
-  height: 9px;
+  height: 10px;
   overflow: hidden;
   border-radius: 999px;
   background: #252a32;
@@ -240,22 +271,36 @@ output {
 .live-count {
   display: grid;
   align-content: center;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
+  padding: 10px;
+  border: 1px solid #283341;
+  border-radius: 7px;
+  background: #10151a;
 }
 
 .live-count span {
-  font-size: 1rem;
+  font-size: 0.92rem;
   font-weight: 700;
+}
+
+.live-count strong {
+  color: var(--amber);
+  font-size: 1rem;
 }
 
 .workspace {
   min-height: 0;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 0.7fr);
-  grid-template-rows: minmax(340px, 1.25fr) minmax(250px, 0.85fr);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.8fr);
+  grid-template-rows: minmax(300px, 1fr) 220px;
+  grid-template-areas:
+    "lanes inspector"
+    "signals events";
+  gap: 10px;
+  min-height: 540px;
+  height: calc(100vh - 205px);
 }
 
 .stage-panel {
@@ -267,14 +312,30 @@ output {
   flex-direction: column;
 }
 
+.lanes-panel {
+  grid-area: lanes;
+}
+
+.inspector-panel {
+  grid-area: inspector;
+}
+
+.signals-panel {
+  grid-area: signals;
+}
+
+.event-panel {
+  grid-area: events;
+}
+
 .panel-heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 14px;
-  padding: 12px 14px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--line);
-  background: #15181d;
+  background: #11161c;
 }
 
 .panel-heading p {
@@ -287,12 +348,15 @@ output {
   max-width: 100%;
   overflow: auto;
   min-height: 0;
+  background:
+    linear-gradient(90deg, rgb(49 199 168 / 0.08), transparent 32%),
+    linear-gradient(180deg, #10151a, #11161c);
 }
 
 svg {
   display: block;
   width: 100%;
-  min-width: 920px;
+  min-width: 0;
   height: auto;
 }
 
@@ -307,7 +371,7 @@ svg {
   padding: 14px;
   overflow: auto;
   color: #d7dde7;
-  background: #0d0f12;
+  background: #090c10;
   font: 0.78rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -325,8 +389,8 @@ svg {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 44px;
-  padding: 8px 12px;
+  min-height: 40px;
+  padding: 7px 12px;
   border: 0;
   border-bottom: 1px solid #242934;
   border-radius: 0;
@@ -336,7 +400,7 @@ svg {
   cursor: pointer;
 }
 
-.event-row span,
+.event-row .event-sequence,
 .event-row em {
   color: var(--quiet);
   font-style: normal;
@@ -348,7 +412,8 @@ svg {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   font-size: 0.82rem;
 }
 
@@ -367,12 +432,12 @@ svg {
 
 .grid,
 .axis {
-  stroke: var(--line);
+  stroke: #354252;
   stroke-width: 1;
 }
 
 .lane-line {
-  stroke: #3a404d;
+  stroke: #465467;
   stroke-width: 2;
 }
 
@@ -399,14 +464,17 @@ svg {
 
 .prefill {
   fill: var(--green);
+  filter: drop-shadow(0 0 8px rgb(49 199 168 / 0.35));
 }
 
 .decode {
   fill: var(--amber);
+  filter: drop-shadow(0 0 7px rgb(242 184 75 / 0.35));
 }
 
 .finish {
   fill: var(--coral);
+  filter: drop-shadow(0 0 8px rgb(255 111 97 / 0.35));
 }
 
 .future,
@@ -435,7 +503,7 @@ svg {
 .throughput-line,
 .pressure-line {
   fill: none;
-  stroke-width: 3;
+  stroke-width: 4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -483,6 +551,7 @@ svg {
   .app-shell {
     width: 100vw;
     max-width: 100vw;
+    grid-template-rows: auto auto auto auto;
     padding: 10px;
   }
 
@@ -512,18 +581,45 @@ svg {
 
   .controls {
     justify-content: flex-start;
+    width: 100%;
   }
 
   .scrub-row {
     grid-template-columns: 1fr;
   }
 
+  output,
+  .status {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   .status {
     text-align: left;
   }
 
+  .metrics-band {
+    gap: 8px;
+  }
+
+  .meter-head {
+    grid-template-columns: 1fr;
+  }
+
+  .meter-head strong {
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+
   .workspace {
+    height: auto;
+    min-height: 0;
     grid-template-rows: auto;
+    grid-template-areas:
+      "lanes"
+      "signals"
+      "inspector"
+      "events";
   }
 
   .lanes-panel,
@@ -546,7 +642,7 @@ svg {
   }
 
   svg {
-    width: 920px;
+    width: 760px;
     min-width: 0;
     max-width: none;
   }

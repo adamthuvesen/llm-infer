@@ -38,6 +38,11 @@
       </section>
 
       <section class="metrics-band" aria-label="current trace pressure">
+        <div class="loop-card phase-card">
+          <span>Current engine event</span>
+          <strong id="currentPhase">loading</strong>
+          <small id="currentStep">step 0</small>
+        </div>
         <div class="meter">
           <div class="meter-head">
             <span>Logical cache footprint</span>
@@ -53,6 +58,8 @@
           <div class="meter-track"><span id="pressureReservedFill"></span></div>
         </div>
         <div class="live-count">
+          <span id="currentBatch">0 running · 0 waiting</span>
+          <strong id="currentThroughput">no sample yet</strong>
           <span id="pressureActive">0 active requests</span>
           <small>Block allocation/free events are not emitted yet.</small>
         </div>
@@ -62,7 +69,7 @@
         <div class="stage-panel lanes-panel">
           <div class="panel-heading">
             <h2>Request Lanes</h2>
-            <p>Prefill chunks, decode emissions, finish points, and shared-prefix admissions.</p>
+            <p>Prefill chunks · decode · finish · shared prefix</p>
           </div>
           <div class="svg-scroll">
             <svg id="laneSvg" role="img" aria-label="request trace lanes"></svg>
@@ -80,7 +87,7 @@
         <div class="stage-panel signals-panel">
           <div class="panel-heading">
             <h2>Loop Signals</h2>
-            <p>Batch size, waiting queue, tokens/sec, and reserved KV pressure over engine ticks.</p>
+            <p>Batch · queue · tok/s · reserved KV</p>
           </div>
           <div class="svg-scroll">
             <svg id="signalSvg" role="img" aria-label="batch throughput and cache pressure signals"></svg>
@@ -90,7 +97,7 @@
         <aside class="stage-panel event-panel">
           <div class="panel-heading">
             <h2>Event Stream</h2>
-            <p>Schema-v2 JSONL ordered by sequence.</p>
+            <p>Schema-v2 sequence order</p>
           </div>
           <div id="eventList" class="event-list" aria-label="trace events"></div>
         </aside>

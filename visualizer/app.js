@@ -1,4 +1,5 @@
 import { buildTraceModel, eventLabel, parseJsonlTrace } from "./trace_loader.js";
+import { appendEventRowContent } from "./event_row.js";
 
 const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v2.jsonl";
 const NS = "http://www.w3.org/2000/svg";
@@ -41,6 +42,10 @@ const els = {
   pressureActive: document.querySelector("#pressureActive"),
   pressureLogicalFill: document.querySelector("#pressureLogicalFill"),
   pressureReservedFill: document.querySelector("#pressureReservedFill"),
+  currentPhase: document.querySelector("#currentPhase"),
+  currentStep: document.querySelector("#currentStep"),
+  currentBatch: document.querySelector("#currentBatch"),
+  currentThroughput: document.querySelector("#currentThroughput"),
 };
 
 init();
@@ -64,7 +69,12 @@ function bindControls() {
     if (!file) {
       return;
     }
-    await loadTraceText(await file.text(), file.name);
+    try {
+      await loadTraceText(await file.text(), file.name);
+    } catch (error) {
+      pause();
+      setStatus(`Could not load ${file.name}: ${error.message}`, true);
+    }
   });
 
   els.playButton.addEventListener("click", () => {
@@ -94,7 +104,7 @@ async function loadTraceText(text, sourceName) {
   els.scrubber.min = events[0].sequence;
   els.scrubber.max = state.model.maxSequence;
   els.scrubber.value = state.cursor;
-  els.titleMeta.textContent = `${sourceName} · ${events.length} events · ${state.model.requestList.length} requests`;
+  els.titleMeta.textContent = `${displaySourceName(sourceName)} · ${events.length} events · ${state.model.requestList.length} reqs`;
   setStatus("Trace loaded", false);
   render();
 }
@@ -135,6 +145,7 @@ function render() {
   renderEventList();
   renderInspector();
   renderPressure();
+  renderCurrentLoop();
 }
 
 function renderLanes() {
@@ -280,7 +291,7 @@ function renderEventList() {
     if (event.sequence > state.cursor) {
       button.classList.add("is-future");
     }
-    button.innerHTML = `<span>${event.sequence}</span><strong>${eventLabel(event)}</strong><em>step ${event.step}</em>`;
+    appendEventRowContent(document, button, event, eventLabel(event));
     button.addEventListener("click", () => {
       pause();
       state.cursor = event.sequence;
@@ -309,6 +320,20 @@ function renderPressure() {
   els.pressureReservedFill.style.width = `${Math.max(3, reservedPercent)}%`;
 }
 
+function renderCurrentLoop() {
+  const event = currentEvent();
+  const pressure = currentPressure();
+  const batch = currentBatchSignal();
+  const throughput = currentThroughputSignal();
+  els.currentPhase.textContent = event.event.replaceAll("_", " ");
+  els.currentStep.textContent = `step ${event.step}`;
+  els.currentBatch.textContent = `${batch.batchSize} running · ${batch.waiting} waiting`;
+  els.currentThroughput.textContent =
+    throughput === null ? "no sample yet" : `${throughput.tokensPerSecond.toFixed(1)} tok/s`;
+  els.currentPhase.dataset.event = event.event;
+  els.currentBatch.dataset.active = String(pressure.activeRequests);
+}
+
 function currentEvent() {
   return state.model.events.find((event) => event.sequence === state.cursor) ?? state.model.events[0];
 }
@@ -316,6 +341,16 @@ function currentEvent() {
 function currentPressure() {
   const samples = state.model.pressureSamples.filter((sample) => sample.sequence <= state.cursor);
   return samples.at(-1) ?? state.model.pressureSamples[0];
+}
+
+function currentBatchSignal() {
+  const signals = state.model.batchSignals.filter((signal) => signal.sequence <= state.cursor);
+  return signals.at(-1) ?? { batchSize: 0, waiting: 0 };
+}
+
+function currentThroughputSignal() {
+  const signals = state.model.throughputSignals.filter((signal) => signal.sequence <= state.cursor);
+  return signals.at(-1) ?? null;
 }
 
 function xForStep(step, maxStep, left, width, rightPad = 42) {
@@ -391,4 +426,8 @@ function legend(x, y, label, className) {
 function setStatus(message, isError) {
   els.status.textContent = message;
   els.status.classList.toggle("is-error", isError);
+}
+
+function displaySourceName(sourceName) {
+  return sourceName.split(/[\\/]/).at(-1) || sourceName;
 }
