@@ -43,7 +43,7 @@ def test_kv_trace_fixture_is_schema_v2_ordered_and_shaped() -> None:
     } <= names
     assert "block_allocated" not in names
     assert "block_freed" not in names
-    assert any(event.get("prefix_group_id") == "rollout" for event in events)
+    assert any(event.get("prefix_group_id") == "shared prompt" for event in events)
     assert any(event.get("waiting") == 2 for event in events)
     assert any(
         event["event"] == "prefill_chunk_progress" and event.get("completed") is False

@@ -218,12 +218,13 @@ def build_trace_jsonl() -> str:
 
     Six requests against twelve blocks: the first four fit at once and the last two queue,
     so the trace shows real waiting pressure, continuous-batching churn, a long chunked
-    prefill (``code-gen``), prefix-shared rollouts, and a KV wall that fills to capacity.
+    prefill (``code-gen``), two requests sharing one prompt (``sample-a``/``sample-b`` —
+    the second reuses the first's cached prefix), and a KV wall that fills to capacity.
     """
     tb = TraceBuilder()
     waiting = [
-        Req("rollout-a", prompt_len=4, max_new=5, base_token=36, group="rollout"),
-        Req("rollout-b", prompt_len=4, max_new=5, base_token=36, group="rollout"),
+        Req("sample-a", prompt_len=4, max_new=5, base_token=36, group="shared prompt"),
+        Req("sample-b", prompt_len=4, max_new=5, base_token=36, group="shared prompt"),
         Req("code-gen", prompt_len=12, max_new=8, base_token=37),
         Req("summarize", prompt_len=7, max_new=4, base_token=33),
         Req("chat-quick", prompt_len=2, max_new=6, base_token=26),

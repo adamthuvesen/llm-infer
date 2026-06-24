@@ -1,17 +1,17 @@
-{"event": "request_admitted", "max_new_tokens": 5, "prefix_group_id": "rollout", "prompt_tokens": 4, "request_id": "rollout-a", "reserved_blocks": 2, "schema_version": 2, "sequence": 1, "step": 0}
-{"event": "request_admitted", "max_new_tokens": 5, "prefix_group_id": "rollout", "prompt_tokens": 4, "request_id": "rollout-b", "reserved_blocks": 2, "schema_version": 2, "sequence": 2, "step": 0}
+{"event": "request_admitted", "max_new_tokens": 5, "prefix_group_id": "shared prompt", "prompt_tokens": 4, "request_id": "sample-a", "reserved_blocks": 2, "schema_version": 2, "sequence": 1, "step": 0}
+{"event": "request_admitted", "max_new_tokens": 5, "prefix_group_id": "shared prompt", "prompt_tokens": 4, "request_id": "sample-b", "reserved_blocks": 2, "schema_version": 2, "sequence": 2, "step": 0}
 {"event": "request_admitted", "max_new_tokens": 8, "prompt_tokens": 12, "request_id": "code-gen", "reserved_blocks": 5, "schema_version": 2, "sequence": 3, "step": 0}
 {"event": "request_admitted", "max_new_tokens": 4, "prompt_tokens": 7, "request_id": "summarize", "reserved_blocks": 3, "schema_version": 2, "sequence": 4, "step": 0}
 {"batch_size": 4, "event": "batch_size_changed", "previous_batch_size": 0, "schema_version": 2, "sequence": 5, "step": 0, "waiting": 2}
-{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "rollout-a", "schema_version": 2, "sequence": 6, "start_pos": 0, "step": 0, "total_prompt_tokens": 4}
-{"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "rollout-a", "schema_version": 2, "sequence": 7, "start_pos": 0, "step": 0, "total_prompt_tokens": 4}
+{"end_pos": 2, "event": "prefill_chunk_started", "request_id": "sample-a", "schema_version": 2, "sequence": 6, "start_pos": 0, "step": 0, "total_prompt_tokens": 4}
+{"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "sample-a", "schema_version": 2, "sequence": 7, "start_pos": 0, "step": 0, "total_prompt_tokens": 4}
 {"end_pos": 2, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 2, "sequence": 8, "start_pos": 0, "step": 0, "total_prompt_tokens": 12}
 {"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 2, "sequence": 9, "start_pos": 0, "step": 0, "total_prompt_tokens": 12}
 {"end_pos": 2, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 2, "sequence": 10, "start_pos": 0, "step": 0, "total_prompt_tokens": 7}
 {"cached_tokens": 2, "completed": false, "end_pos": 2, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 2, "sequence": 11, "start_pos": 0, "step": 0, "total_prompt_tokens": 7}
-{"end_pos": 4, "event": "prefill_chunk_started", "request_id": "rollout-a", "schema_version": 2, "sequence": 12, "start_pos": 2, "step": 1, "total_prompt_tokens": 4}
-{"cached_tokens": 4, "completed": true, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "rollout-a", "schema_version": 2, "sequence": 13, "start_pos": 2, "step": 1, "total_prompt_tokens": 4}
-{"batch_size": 2, "event": "decode_step", "request_ids": ["rollout-a", "rollout-b"], "schema_version": 2, "sequence": 14, "step": 1, "token_ids": [36, 36], "token_source": "prefill", "tokens_emitted": 2}
+{"end_pos": 4, "event": "prefill_chunk_started", "request_id": "sample-a", "schema_version": 2, "sequence": 12, "start_pos": 2, "step": 1, "total_prompt_tokens": 4}
+{"cached_tokens": 4, "completed": true, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "sample-a", "schema_version": 2, "sequence": 13, "start_pos": 2, "step": 1, "total_prompt_tokens": 4}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["sample-a", "sample-b"], "schema_version": 2, "sequence": 14, "step": 1, "token_ids": [36, 36], "token_source": "prefill", "tokens_emitted": 2}
 {"end_pos": 4, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 2, "sequence": 15, "start_pos": 2, "step": 1, "total_prompt_tokens": 12}
 {"cached_tokens": 4, "completed": false, "end_pos": 4, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 2, "sequence": 16, "start_pos": 2, "step": 1, "total_prompt_tokens": 12}
 {"end_pos": 4, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 2, "sequence": 17, "start_pos": 2, "step": 1, "total_prompt_tokens": 7}
@@ -21,25 +21,25 @@
 {"cached_tokens": 6, "completed": false, "end_pos": 6, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 2, "sequence": 21, "start_pos": 4, "step": 2, "total_prompt_tokens": 12}
 {"end_pos": 6, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 2, "sequence": 22, "start_pos": 4, "step": 2, "total_prompt_tokens": 7}
 {"cached_tokens": 6, "completed": false, "end_pos": 6, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 2, "sequence": 23, "start_pos": 4, "step": 2, "total_prompt_tokens": 7}
-{"batch_size": 2, "event": "decode_step", "request_ids": ["rollout-a", "rollout-b"], "schema_version": 2, "sequence": 24, "step": 2, "token_ids": [37, 37], "token_source": "decode", "tokens_emitted": 2}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["sample-a", "sample-b"], "schema_version": 2, "sequence": 24, "step": 2, "token_ids": [37, 37], "token_source": "decode", "tokens_emitted": 2}
 {"elapsed_seconds": 0.012, "event": "tokens_per_second_sampled", "schema_version": 2, "sequence": 25, "step": 2, "tokens_emitted": 2, "tokens_per_second": 333.3333333333333, "total_generated_tokens": 4}
 {"end_pos": 8, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 2, "sequence": 26, "start_pos": 6, "step": 3, "total_prompt_tokens": 12}
 {"cached_tokens": 8, "completed": false, "end_pos": 8, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 2, "sequence": 27, "start_pos": 6, "step": 3, "total_prompt_tokens": 12}
 {"end_pos": 7, "event": "prefill_chunk_started", "request_id": "summarize", "schema_version": 2, "sequence": 28, "start_pos": 6, "step": 3, "total_prompt_tokens": 7}
 {"cached_tokens": 7, "completed": true, "end_pos": 7, "event": "prefill_chunk_progress", "request_id": "summarize", "schema_version": 2, "sequence": 29, "start_pos": 6, "step": 3, "total_prompt_tokens": 7}
 {"batch_size": 1, "event": "decode_step", "request_ids": ["summarize"], "schema_version": 2, "sequence": 30, "step": 3, "token_ids": [33], "token_source": "prefill", "tokens_emitted": 1}
-{"batch_size": 2, "event": "decode_step", "request_ids": ["rollout-a", "rollout-b"], "schema_version": 2, "sequence": 31, "step": 3, "token_ids": [38, 38], "token_source": "decode", "tokens_emitted": 2}
+{"batch_size": 2, "event": "decode_step", "request_ids": ["sample-a", "sample-b"], "schema_version": 2, "sequence": 31, "step": 3, "token_ids": [38, 38], "token_source": "decode", "tokens_emitted": 2}
 {"elapsed_seconds": 0.018000000000000002, "event": "tokens_per_second_sampled", "schema_version": 2, "sequence": 32, "step": 3, "tokens_emitted": 3, "tokens_per_second": 388.88888888888886, "total_generated_tokens": 7}
 {"end_pos": 10, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 2, "sequence": 33, "start_pos": 8, "step": 4, "total_prompt_tokens": 12}
 {"cached_tokens": 10, "completed": false, "end_pos": 10, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 2, "sequence": 34, "start_pos": 8, "step": 4, "total_prompt_tokens": 12}
-{"batch_size": 3, "event": "decode_step", "request_ids": ["rollout-a", "rollout-b", "summarize"], "schema_version": 2, "sequence": 35, "step": 4, "token_ids": [39, 39, 34], "token_source": "decode", "tokens_emitted": 3}
+{"batch_size": 3, "event": "decode_step", "request_ids": ["sample-a", "sample-b", "summarize"], "schema_version": 2, "sequence": 35, "step": 4, "token_ids": [39, 39, 34], "token_source": "decode", "tokens_emitted": 3}
 {"elapsed_seconds": 0.024, "event": "tokens_per_second_sampled", "schema_version": 2, "sequence": 36, "step": 4, "tokens_emitted": 3, "tokens_per_second": 416.6666666666667, "total_generated_tokens": 10}
 {"end_pos": 12, "event": "prefill_chunk_started", "request_id": "code-gen", "schema_version": 2, "sequence": 37, "start_pos": 10, "step": 5, "total_prompt_tokens": 12}
 {"cached_tokens": 12, "completed": true, "end_pos": 12, "event": "prefill_chunk_progress", "request_id": "code-gen", "schema_version": 2, "sequence": 38, "start_pos": 10, "step": 5, "total_prompt_tokens": 12}
 {"batch_size": 1, "event": "decode_step", "request_ids": ["code-gen"], "schema_version": 2, "sequence": 39, "step": 5, "token_ids": [37], "token_source": "prefill", "tokens_emitted": 1}
-{"batch_size": 3, "event": "decode_step", "request_ids": ["rollout-a", "rollout-b", "summarize"], "schema_version": 2, "sequence": 40, "step": 5, "token_ids": [40, 40, 35], "token_source": "decode", "tokens_emitted": 3}
-{"event": "request_finished", "generated_tokens": 5, "reason": "length", "request_id": "rollout-a", "schema_version": 2, "sequence": 41, "step": 5, "token_ids": [36, 37, 38, 39, 40]}
-{"event": "request_finished", "generated_tokens": 5, "reason": "length", "request_id": "rollout-b", "schema_version": 2, "sequence": 42, "step": 5, "token_ids": [36, 37, 38, 39, 40]}
+{"batch_size": 3, "event": "decode_step", "request_ids": ["sample-a", "sample-b", "summarize"], "schema_version": 2, "sequence": 40, "step": 5, "token_ids": [40, 40, 35], "token_source": "decode", "tokens_emitted": 3}
+{"event": "request_finished", "generated_tokens": 5, "reason": "length", "request_id": "sample-a", "schema_version": 2, "sequence": 41, "step": 5, "token_ids": [36, 37, 38, 39, 40]}
+{"event": "request_finished", "generated_tokens": 5, "reason": "length", "request_id": "sample-b", "schema_version": 2, "sequence": 42, "step": 5, "token_ids": [36, 37, 38, 39, 40]}
 {"batch_size": 2, "event": "batch_size_changed", "previous_batch_size": 4, "schema_version": 2, "sequence": 43, "step": 5, "waiting": 2}
 {"elapsed_seconds": 0.03, "event": "tokens_per_second_sampled", "schema_version": 2, "sequence": 44, "step": 5, "tokens_emitted": 4, "tokens_per_second": 466.6666666666667, "total_generated_tokens": 14}
 {"event": "request_admitted", "max_new_tokens": 6, "prompt_tokens": 2, "request_id": "chat-quick", "reserved_blocks": 2, "schema_version": 2, "sequence": 45, "step": 6}

@@ -191,7 +191,7 @@ function renderGauges(event) {
   const tps = currentThroughputSignal();
 
   animateNumber(els.gStep, event.step, 0);
-  els.gStepFoot.textContent = `${pressure.activeRequests} active · ${state.model.maxStep + 1} total`;
+  els.gStepFoot.textContent = `${pressure.activeRequests} active · max step ${state.model.maxStep}`;
   animateNumber(els.gRunning, batch.batchSize, 0);
   animateNumber(els.gWaiting, batch.waiting, 0);
   els.occBar.style.setProperty("--occ", `${(batch.batchSize / maxBatchSize()) * 100}%`);
