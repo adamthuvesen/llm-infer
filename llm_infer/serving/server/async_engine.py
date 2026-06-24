@@ -17,6 +17,14 @@ Cancellation is cooperative: a disconnected client sets the stream's abort flag;
 sees it at the next step boundary, finishes the engine request cleanly, and frees its KV.
 The loop is the *only* thread that touches the engine, so there are no locks on engine
 state — just the two queue boundaries.
+
+Slow-consumer policy (deliberate, not an oversight): the per-request queue is unbounded, but a
+request emits at most ``max_new_tokens`` tokens before it finishes, so its queue is bounded by
+that — there is no unbounded growth. A consumer that reads slowly does **not** throttle the
+engine; the loop runs the request to completion and the tokens wait in the queue. A consumer
+that goes away entirely is the cancellation path above (its KV is freed promptly). True
+cross-thread backpressure — pausing decode for a live-but-slow reader — is out of scope for this
+engine; the bound above keeps memory finite without it.
 """
 
 from __future__ import annotations
