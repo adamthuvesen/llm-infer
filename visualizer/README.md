@@ -1,7 +1,13 @@
-# KV Trace Theater
+# KV Cache Observatory
 
 Static local visualizer for schema-v2 `InferenceEngine(trace=...)` JSONL traces. It has no
-runtime dependencies and does not fetch network assets.
+runtime dependencies and does not fetch network assets — plain HTML, CSS, and ES modules.
+
+The interface replays a trace frame by frame: a hero player with a scrubber and speed
+control, a live telemetry strip (engine step, occupancy, throughput, generated tokens), a
+per-request decode timeline, the paged KV cache wall, a current-event inspector, and the raw
+event stream. Color encodes engine semantics — blue admit/schedule, teal prefill, amber
+decode, violet speculative, green finish.
 
 ## Open Locally
 
