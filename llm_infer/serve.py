@@ -1,18 +1,14 @@
-"""Run the OpenAI-compatible server around the pinned Qwen model: ``python -m llm_infer.serve``.
-
-The heavy load — 3B weights and the tokenizer — lives inside :func:`build_qwen_app` and
-:func:`main`, never at import time, so importing this module (or the app package) costs
-nothing. Tests build the app around the tiny CPU model directly and never call this.
-"""
+"""Run the OpenAI-compatible server around a registered model backend."""
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import torch
 
-from llm_infer.model.config import MODEL_ID, MODEL_REVISION
-from llm_infer.model.qwen import QwenModel
+from llm_infer.model.interface import ModelRuntime
+from llm_infer.model.runtime import available_backends, load_model_runtime
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, ServerMetrics, create_app
 
@@ -22,62 +18,95 @@ DEFAULT_BLOCK_SIZE = 64
 DEFAULT_NUM_BLOCKS = 512
 
 
-def build_qwen_app(
+def build_app_from_runtime(
+    runtime: ModelRuntime,
     *,
+    block_size: int = DEFAULT_BLOCK_SIZE,
+    num_blocks: int = DEFAULT_NUM_BLOCKS,
+    device: str = "cpu",
+):
+    """Wire a loaded model runtime into the HTTP app."""
+    engine = InferenceEngine(
+        runtime.model,
+        block_size=block_size,
+        num_blocks=num_blocks,
+        device=device,
+    )
+    metrics = ServerMetrics()
+    async_engine = AsyncInferenceEngine(engine, metrics=metrics)
+    return create_app(
+        async_engine=async_engine,
+        tokenizer=runtime.tokenizer,
+        model_id=runtime.model_id,
+        eos_token_ids=runtime.eos_token_ids,
+        metrics=metrics,
+    )
+
+
+def build_app(
+    *,
+    backend: str = "qwen",
+    bundle: Path | None = None,
+    model_id: str | None = None,
+    revision: str | None = None,
     device: str = "cpu",
     dtype: torch.dtype = torch.float32,
     block_size: int = DEFAULT_BLOCK_SIZE,
     num_blocks: int = DEFAULT_NUM_BLOCKS,
 ):
-    """Load the pinned Qwen + tokenizer and wire the serving app around them."""
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
-    model = QwenModel.load(dtype=dtype, device=device)
-    eos_token_ids = _eos_token_ids(tokenizer)
-
-    # Sampling is per request: each client's temperature/top-p/top-k/penalties/seed are mapped
-    # to SamplingParams on its Request, so concurrent clients each decode under their own params.
-    engine = InferenceEngine(model, block_size=block_size, num_blocks=num_blocks, device=device)
-    metrics = ServerMetrics()
-    async_engine = AsyncInferenceEngine(engine, metrics=metrics)
-    return create_app(
-        async_engine=async_engine,
-        tokenizer=tokenizer,
-        model_id=MODEL_ID,
-        eos_token_ids=eos_token_ids,
-        metrics=metrics,
+    """Load a registered backend and return the serving app."""
+    runtime = load_model_runtime(
+        backend,
+        dtype=dtype,
+        device=device,
+        bundle_path=bundle,
+        model_id=model_id,
+        revision=revision,
+    )
+    return build_app_from_runtime(
+        runtime,
+        block_size=block_size,
+        num_blocks=num_blocks,
+        device=device,
     )
 
 
-def _eos_token_ids(tokenizer: object) -> frozenset[int]:
-    """Generation-stopping ids: the model's generation-config eos plus the tokenizer eos."""
-    from transformers import GenerationConfig
-
-    config = GenerationConfig.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
-    ids: set[int] = set()
-    cfg_eos = config.eos_token_id
-    if isinstance(cfg_eos, int):
-        ids.add(cfg_eos)
-    elif cfg_eos is not None:
-        ids.update(cfg_eos)
-    if tokenizer.eos_token_id is not None:
-        ids.add(tokenizer.eos_token_id)
-    return frozenset(ids)
+def _dtype(name: str) -> torch.dtype:
+    if name == "float32":
+        return torch.float32
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float16":
+        return torch.float16
+    raise argparse.ArgumentTypeError("dtype must be one of: float32, bfloat16, float16")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve Qwen2.5-Coder over an OpenAI HTTP API.")
+    parser = argparse.ArgumentParser(description="Serve a registered llm-infer backend.")
+    parser.add_argument("--backend", choices=available_backends(), default="qwen")
+    parser.add_argument("--bundle", type=Path, help="Export bundle path for bundle-backed models")
+    parser.add_argument("--model", dest="model_id", help="Optional backend-specific model id")
+    parser.add_argument("--revision", help="Optional backend-specific model revision")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--dtype", type=_dtype, default=torch.float32)
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
     parser.add_argument("--num-blocks", type=int, default=DEFAULT_NUM_BLOCKS)
     args = parser.parse_args()
 
     import uvicorn
 
-    app = build_qwen_app(device=args.device, block_size=args.block_size, num_blocks=args.num_blocks)
+    app = build_app(
+        backend=args.backend,
+        bundle=args.bundle,
+        model_id=args.model_id,
+        revision=args.revision,
+        device=args.device,
+        dtype=args.dtype,
+        block_size=args.block_size,
+        num_blocks=args.num_blocks,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

@@ -5,11 +5,11 @@ and which flows actually exist in code.
 
 ## 1. Big Picture
 
-**What this repo does.** [`README.md`](../README.md) and [`docs/scoping.md`](scoping.md) define
-llm-infer as a minimal, honest **paged LLM inference engine** for one pinned model:
-`Qwen/Qwen2.5-Coder-3B-Instruct`. It is built to be measured as an **llm-rlvr-sql GRPO rollout
-backend** — i.e., the GPU path that generates training rollouts for reinforcement learning on
-text-to-SQL, not a general-purpose chat server.
+**What this repo does.** [`README.md`](../README.md) defines llm-infer as a minimal, honest
+**paged LLM inference engine** with pluggable model backends. Qwen2.5-Coder is the pinned
+HF-oracle backend and exported llm-pretrain DenseBackbone bundles are a sibling backend.
+It is still measured on the llm-rlvr-sql GRPO rollout workload, but Qwen is no longer the
+center of the serving architecture.
 
 **Main runtime type.** This is a **Python inference library + test/benchmark harness** with an
 **OpenAI-compatible HTTP server** layered on top
@@ -31,8 +31,8 @@ don't see evidence for a packaged CLI.
 
 | Technology | Role | Why here |
 |---|---|---|
-| **PyTorch** | Forward pass, tensors, sampling | Core compute; custom Qwen forward in [`llm_infer/model/qwen.py`](../llm_infer/model/qwen.py) |
-| **Transformers (HuggingFace)** | Load weights + config only | Weights come from HF; forward is ours so the oracle tests *our* engine |
+| **PyTorch** | Forward pass, tensors, sampling | Core compute for Qwen and DenseBackbone backends |
+| **Transformers (HuggingFace)** | Qwen weights/config/tokenizer | Qwen weights come from HF; forward is ours so the oracle tests *our* engine |
 | **flash-attn** (CUDA only) | Fast attention kernel | Phase C speed swap behind [`AttentionBackend`](../llm_infer/kernels/base.py); optional, GPU-only |
 | **pytest** | Correctness oracle gate | Local CPU gate in [`tests/correctness/`](../tests/correctness/) |
 | **Modal** | Remote A100 runs | flash-attn oracle, 3-way benchmark, llm-rlvr-sql rollout timing ([`scripts/modal_*.py`](../scripts/)) |
@@ -75,9 +75,11 @@ flowchart TB
     end
 
     subgraph model [model/]
-        Qwen["QwenModel forward"]
-        Decode["greedy_decode Phase A"]
-        Config["MODEL_ID pin"]
+        Runtime["ModelRuntime registry"]
+        Interface["CausalLMBackend protocol"]
+        Qwen["Qwen backend"]
+        Dense["DenseBackbone bundle backend"]
+        Decode["greedy_decode"]
     end
 
     subgraph kernels [kernels/]
@@ -98,10 +100,15 @@ flowchart TB
     Engine --> Sampler
     Engine --> Spec
     Engine --> Trace
-    Engine --> Qwen
+    Engine --> Interface
     Engine --> PagedKV
+    Runtime --> Qwen
+    Runtime --> Dense
+    Qwen --> Interface
+    Dense --> Interface
     Qwen --> Protocol
-    Qwen --> PagedKV
+    Dense --> Protocol
+    Interface --> PagedKV
     PagedKV --> BlockTable
     BlockTable --> Allocator
     Protocol --> Naive
@@ -113,11 +120,11 @@ flowchart TB
 
 | Module | Owns | Does NOT own |
 |---|---|---|
-| [`model/`](../llm_infer/model/) | Qwen2 forward (RoPE, GQA, RMSNorm, MLP), `logits` / `prefill` / `decode_one` / `decode_many` | Scheduling, block allocation, token sampling policy |
+| [`model/`](../llm_infer/model/) | Backend protocol/registry, Qwen2 forward, DenseBackbone bundle loader, backend-independent greedy decode | Scheduling, block allocation, token sampling policy |
 | [`kernels/`](../llm_infer/kernels/) | Causal scaled dot-product attention only (`softmax(QKᵀ/√d)V`) | RoPE, GQA expansion, paging — caller prepares tensors ([`base.py`](../llm_infer/kernels/base.py)) |
 | [`kv_cache/`](../llm_infer/kv_cache/) | Physical K/V tensor pool, block ids, scatter/gather | Attention math, admission policy |
 | [`scheduler/`](../llm_infer/scheduler/) | Waiting queue, running set, **block budget reservation** | Physical block allocation (lazy via `BlockTable.reserve`) |
-| [`serving/`](../llm_infer/serving/) | Request lifecycle, step loop, sampler | Model weights, kernel choice (injected at `QwenModel.load`) |
+| [`serving/`](../llm_infer/serving/) | Request lifecycle, step loop, sampler | Model weights, backend choice (injected through `ModelRuntime`) |
 | [`tracing.py`](../llm_infer/tracing.py) | Opt-in schema-versioned engine events for JSONL replay, including block lifecycle | Faking block events from request state; they come from the allocator boundary |
 | [`visualizer/`](../visualizer/) | Static local schema-v3 trace viewer, parser smoke tests, playback UI | Network assets, faked block allocation/free events |
 | [`benchmarks/`](../llm_infer/benchmarks/) | Shared workload + timing wrappers for HF / llm-infer / vLLM | Engine correctness (gated by oracle first) |

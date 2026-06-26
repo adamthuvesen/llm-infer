@@ -1,1 +1,1 @@
-"""Model loaders and token-id greedy decode paths."""
+"""Model backend interfaces, runtime registry, and token-id decode paths."""

@@ -1,10 +1,10 @@
 # llm-infer
 
-A from-scratch paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**, built to do the
+A from-scratch paged LLM inference engine with **pluggable model backends**, built to do the
 core things a real inference engine does — paged KV cache, continuous batching, chunked
 prefill, prefix caching, speculative decoding, honest benchmarking, and trace-driven
-observability — and to stay legible while doing them. The goal is an **excellent, complete,
-honest engine**: something to learn from and to read.
+observability — and to stay legible while doing them. Qwen2.5-Coder is the pinned HF-oracle
+backend; exported llm-pretrain DenseBackbone bundles are a sibling backend.
 
 The methodology is the differentiator, not a tok/s number. Every backend is proven **exact
 against HuggingFace greedy decoding before it reports a single tok/s**; every speed claim is
@@ -45,7 +45,8 @@ and diagrams.
 - `kernels/` — the `AttentionBackend` protocol, a slow readable `torch_naive` reference
   (the truth every other backend is validated against), and `flash_attn_paged` (the fast
   GPU-only backend).
-- `model/` — minimal Qwen2.5-Coder loading + greedy decode + cached prefill/decode.
+- `model/` — backend interface/registry, Qwen loading, DenseBackbone bundle loading, and
+  backend-independent greedy decode.
 - `kv_cache/` — block allocator, block tables, paged page store.
 - `scheduler/` + `serving/` — continuous-batching admission and the decode loop, plus a
   seeded sampler (temperature 0 == the proven greedy oracle).
@@ -192,8 +193,9 @@ unsupported features (tools, logprobs, `n>1`, server-side state) return an hones
 
 ```bash
 uv sync --extra serving
-python -m llm_infer.serve            # loads the pinned Qwen, serves on 127.0.0.1:8000
-# --host / --port / --device / --block-size / --num-blocks to tune it
+python -m llm_infer.serve            # default: --backend qwen on 127.0.0.1:8000
+python -m llm_infer.serve --backend dense --bundle exports/pretrain-214m-b200
+# --backend / --bundle / --host / --port / --device / --dtype / --block-size / --num-blocks
 ```
 
 ### Chat completions — `curl`
@@ -329,8 +331,11 @@ needed), so the visualizer ships on its own. The KV wall is driven by real `bloc
 `block_freed` events emitted from the allocator boundary — filled blocks are physically held,
 prefix-shared blocks are counted once, and a block frees only when its last owner releases it.
 
-## Model pin
+## Model backends
 
-`Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
-`488639f1ff808d1d3d0ba301aef8c11461451ec5` (the Instruct variant — see
-`llm_infer/model/config.py`). Plain `-3B` is a different model and would be wrong.
+- `qwen`: `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
+  `488639f1ff808d1d3d0ba301aef8c11461451ec5` (the Instruct variant — see
+  `llm_infer/model/config.py`). Plain `-3B` is a different model and would be wrong.
+- `dense`: `llm_pretrain_dense_v1` export bundles from `llm-pretrain`, loaded through
+  `llm_infer/model/runtime.py`. The v1 DenseBackbone path is correctness-first and full
+  recompute under the shared serving engine; it is not yet the optimized paged-KV path.

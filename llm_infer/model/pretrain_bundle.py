@@ -12,6 +12,9 @@ import torch
 
 from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
+from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.profiling import TimingProfiler
 
 BUNDLE_FORMAT = "llm_pretrain_dense_v1"
 _MISSING = object()
@@ -106,8 +109,11 @@ class PretrainDenseConfig:
 class PretrainBundleModel:
     """Full-recompute inference for ``llm_pretrain_dense_v1`` bundles.
 
-    This is a correctness bridge for exported llm-pretrain DenseBackbone weights. It
-    deliberately does not implement paged KV-cache, serving, or text tokenization.
+    This is a correctness bridge for exported llm-pretrain DenseBackbone weights. The
+    cached methods participate in the serving engine's block accounting, but they keep
+    request token history and recompute logits rather than writing real K/V pages. That
+    makes DenseBackbone usable through the same runtime path as optimized backends
+    without pretending this v1 path is fast.
     """
 
     def __init__(
@@ -133,6 +139,8 @@ class PretrainBundleModel:
         self.tie_word_embeddings = config.tie_word_embeddings
         self.qk_norm = config.qk_norm
         self.device = self.w["embed_tokens.weight"].device
+        self.profiler: TimingProfiler | None = None
+        self._history_by_table: dict[int, list[int]] = {}
 
     @classmethod
     def load(
@@ -205,6 +213,98 @@ class PretrainBundleModel:
             if next_id in eos_token_ids:
                 break
         return generated
+
+    @torch.no_grad()
+    def prefill(
+        self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
+    ) -> torch.Tensor:
+        """Correctness-first prefill: reserve blocks, remember prompt ids, recompute logits."""
+        del cache
+        self._validate_token_ids(prompt_ids)
+        if table.length != 0:
+            raise PretrainBundleError(f"prefill expected an empty table; got length {table.length}")
+        table.reserve(len(prompt_ids))
+        table.length = len(prompt_ids)
+        self._history_by_table[id(table)] = list(prompt_ids)
+        return self.logits(prompt_ids)[-1]
+
+    @torch.no_grad()
+    def prefill_chunk(
+        self,
+        prompt_ids: list[int],
+        cache: PagedKVCache,
+        table: BlockTable,
+        *,
+        start_pos: int,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        """Correctness-first chunked prefill over remembered token history."""
+        del cache
+        self._validate_token_ids(prompt_ids)
+        if not 0 <= start_pos < len(prompt_ids):
+            raise ValueError(f"start_pos must be in [0, {len(prompt_ids)}); got {start_pos}")
+        if chunk_size < 1:
+            raise ValueError(f"chunk_size must be >= 1; got {chunk_size}")
+        if table.length != start_pos:
+            raise ValueError(
+                f"chunk start {start_pos} must equal cached prompt length {table.length}"
+            )
+        history = self._history_for(table)
+        if len(history) != start_pos:
+            raise PretrainBundleError(
+                f"cached token history length {len(history)} does not match "
+                f"table length {start_pos}"
+            )
+        end_pos = min(len(prompt_ids), start_pos + chunk_size)
+        chunk = list(prompt_ids[start_pos:end_pos])
+        table.reserve(len(chunk))
+        history.extend(chunk)
+        table.length = end_pos
+        return self.logits(history)[-1]
+
+    @torch.no_grad()
+    def decode_one(
+        self, cache: PagedKVCache, table: BlockTable, token_id: int | torch.Tensor
+    ) -> torch.Tensor:
+        """Correctness-first one-token decode by full recompute over remembered ids."""
+        del cache
+        token = self._scalar_token(token_id)
+        self._validate_token_ids([token])
+        history = self._history_for(table)
+        table.reserve(1)
+        history.append(token)
+        table.length = len(history)
+        return self.logits(history)[-1]
+
+    @torch.no_grad()
+    def decode_many(
+        self,
+        cache: PagedKVCache,
+        tables: list[BlockTable],
+        token_ids: list[int] | torch.Tensor,
+    ) -> torch.Tensor:
+        """Correctness-first batched decode; loops per request and stacks logits rows."""
+        ids = torch.as_tensor(token_ids, dtype=torch.long, device=self.device).reshape(-1)
+        if len(tables) != int(ids.numel()):
+            raise ValueError(f"tables/token_ids length mismatch: {len(tables)} vs {ids.numel()}")
+        rows = [
+            self.decode_one(cache, table, token) for table, token in zip(tables, ids, strict=True)
+        ]
+        return torch.stack(rows)
+
+    @torch.no_grad()
+    def decode_tokens(
+        self,
+        cache: PagedKVCache,
+        table: BlockTable,
+        token_ids: list[int] | torch.Tensor,
+    ) -> torch.Tensor:
+        """Correctness-first speculative verification path."""
+        ids = torch.as_tensor(token_ids, dtype=torch.long, device=self.device).reshape(-1)
+        if ids.numel() < 1:
+            raise ValueError("decode_tokens needs at least one token")
+        rows = [self.decode_one(cache, table, token) for token in ids]
+        return torch.stack(rows)
 
     def _decoder_layer(
         self, hidden: torch.Tensor, layer: int, cos: torch.Tensor, sin: torch.Tensor
@@ -294,6 +394,29 @@ class PretrainBundleModel:
             raise ValueError(
                 f"token_ids must be ints in [0, {self.config.vocab_size}); got {bad[:3]}"
             )
+
+    def _history_for(self, table: BlockTable) -> list[int]:
+        history = self._history_by_table.get(id(table))
+        if history is not None:
+            return history
+        if table.length == 0:
+            history = []
+            self._history_by_table[id(table)] = history
+            return history
+        raise PretrainBundleError(
+            "dense pretrain backend cannot reconstruct token history for this block table; "
+            "disable prefix caching for dense bundles until a real KV-cache path exists"
+        )
+
+    def _scalar_token(self, token_id: int | torch.Tensor) -> int:
+        if isinstance(token_id, bool):
+            raise ValueError("token_id must be an integer token id, not bool")
+        if isinstance(token_id, int):
+            return token_id
+        tensor = torch.as_tensor(token_id, device=self.device)
+        if tensor.numel() != 1:
+            raise ValueError(f"token_id must be scalar; got shape {tuple(tensor.shape)}")
+        return int(tensor.item())
 
 
 def _required_file(root: Path, name: str) -> Path:

@@ -1,4 +1,4 @@
-"""Single-request greedy decode: the end-to-end path the oracle validates.
+"""Single-request greedy decode: the backend-independent oracle path.
 
 No batching, no KV-cache — each step re-runs the full forward over the growing
 sequence and takes the argmax. Slow, but exact and obviously correct, which is the
@@ -7,17 +7,13 @@ whole point of Phase A.
 
 from __future__ import annotations
 
-from typing import Protocol
-
 import torch
 
-
-class LogitsModel(Protocol):
-    def logits(self, token_ids: list[int]) -> torch.Tensor: ...
+from llm_infer.model.interface import CausalLMBackend
 
 
 def greedy_decode(
-    model: LogitsModel,
+    model: CausalLMBackend,
     prompt_ids: list[int],
     *,
     max_new_tokens: int,

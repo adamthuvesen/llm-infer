@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 import torch
 
 from llm_infer.benchmarks.workload import Workload
-from llm_infer.model.qwen import QwenModel
+from llm_infer.model.interface import CausalLMBackend
 from llm_infer.profiling import TimingProfiler
 from llm_infer.serving import GREEDY, InferenceEngine, Request, SamplingParams
 
@@ -99,7 +99,7 @@ def time_system(
 
 
 def run_llm_infer(
-    model: QwenModel,
+    model: CausalLMBackend,
     workload: Workload,
     *,
     num_blocks: int,

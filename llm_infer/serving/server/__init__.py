@@ -5,7 +5,7 @@ The engine and KV-cache are unchanged; this package only carries token ids over 
 bridges per-request token streams to asyncio; :func:`create_app` wraps it in a FastAPI app
 whose handlers speak the OpenAI chat/completions wire format and map each request's sampling
 fields to per-request params. The app is built around an injected engine + tokenizer so tests
-drive the tiny CPU model and production drives the pinned Qwen through the same code.
+and production backends drive the same code.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 [project]
 name = "llm-infer"
 version = "0.1.0"
-description = "A minimal, honest paged LLM inference engine for Qwen2.5-Coder-3B-Instruct."
+description = "A minimal, honest paged LLM inference engine with pluggable model backends."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

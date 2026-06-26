@@ -62,7 +62,9 @@ def _write_tiny_bundle(root: Path, *, qk_norm: bool = False) -> Path:
                 "model": {
                     "type": "WordLevel",
                     "vocab": {f"tok_{idx}": idx for idx in range(VOCAB_SIZE)},
+                    "unk_token": "tok_0",
                 },
+                "pre_tokenizer": {"type": "Whitespace"},
             }
         ),
         encoding="utf-8",
@@ -210,6 +212,40 @@ def test_loads_bundle_manifest_config_weights_and_tokenizer(tmp_path: Path) -> N
     assert model.tie_word_embeddings is True
     assert model.config.qk_norm is False
     assert "lm_head.weight" not in model.w
+
+
+def test_dense_bundle_runs_through_engine_cached_contract(tmp_path: Path) -> None:
+    from llm_infer.serving import InferenceEngine, Request
+
+    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path))
+    engine = InferenceEngine(model, block_size=8, num_blocks=32)
+    engine.add_request(Request("dense-req", [1, 4, 7], max_new_tokens=3, eos_token_ids=frozenset()))
+
+    outputs = engine.run()
+
+    assert len(outputs["dense-req"]) == 3
+    assert all(isinstance(token, int) for token in outputs["dense-req"])
+
+
+def test_dense_bundle_chunked_prefill_uses_same_logits(tmp_path: Path) -> None:
+    from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+
+    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path))
+    cache = PagedKVCache(
+        num_layers=model.num_layers,
+        num_blocks=16,
+        block_size=4,
+        num_kv_heads=model.num_kv_heads,
+        head_dim=model.head_dim,
+        dtype=model.dtype,
+    )
+    table = cache.new_request()
+
+    first = model.prefill_chunk([1, 4, 7], cache, table, start_pos=0, chunk_size=2)
+    final = model.prefill_chunk([1, 4, 7], cache, table, start_pos=2, chunk_size=2)
+
+    assert first.shape == (VOCAB_SIZE,)
+    torch.testing.assert_close(final, model.logits([1, 4, 7])[-1])
 
 
 def test_qk_norm_loads_and_affects_logits(tmp_path: Path) -> None:
