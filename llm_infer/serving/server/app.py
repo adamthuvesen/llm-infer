@@ -1,7 +1,7 @@
-"""The FastAPI app: OpenAI-shaped HTTP over the async engine. Transport only.
+"""The FastAPI app: OpenAI-shaped HTTP over an injected model runtime. Transport only.
 
-Built by :func:`create_app` around an injected engine + tokenizer, so a test wires the tiny
-CPU model and production wires the real Qwen through the same code. The handlers tokenize
+Built by :func:`create_app` around an injected engine + tokenizer, so tests, Qwen, and exported
+DenseBackbone bundles all use the same request path. The handlers tokenize
 (chat template for ``/v1/chat/completions``, raw encode for ``/v1/completions``), stream
 tokens off the one background batching loop, detokenize incrementally, and shape the result
 as OpenAI responses. No decoding logic lives here — token ids come straight from the engine.

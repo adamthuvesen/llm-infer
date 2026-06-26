@@ -1,4 +1,4 @@
-"""Single-request greedy decode: the end-to-end path the oracle validates.
+"""Single-request greedy decode: the backend-independent oracle path.
 
 No batching, no KV-cache — each step re-runs the full forward over the growing
 sequence and takes the argmax. Slow, but exact and obviously correct, which is the
@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import torch
 
-from llm_infer.model.qwen import QwenModel
+from llm_infer.model.interface import CausalLMBackend
 
 
 def greedy_decode(
-    model: QwenModel,
+    model: CausalLMBackend,
     prompt_ids: list[int],
     *,
     max_new_tokens: int,

@@ -28,7 +28,7 @@ import torch
 
 from llm_infer.kv_cache.block_allocator import BlockPoolEvent, OutOfBlocksError
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
-from llm_infer.model.qwen import QwenModel
+from llm_infer.model.interface import CausalLMBackend
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import (
     Scheduler,
@@ -56,7 +56,7 @@ class InferenceEngine:
 
     def __init__(
         self,
-        model: QwenModel,
+        model: CausalLMBackend,
         *,
         block_size: int,
         num_blocks: int,

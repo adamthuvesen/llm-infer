@@ -1,32 +1,35 @@
 # AGENTS.md — llm-infer
 
-A minimal, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**,
-built to be benchmarked as an llm-rlvr-sql GRPO rollout backend. Full scope and build
-order live in [`docs/scoping.md`](docs/scoping.md). Read it before proposing work.
+A minimal, honest paged LLM inference engine with pluggable model backends. Qwen2.5-Coder
+is the pinned HF-oracle backend; exported llm-pretrain DenseBackbone bundles are a sibling
+backend. Full scope and build order live in [`docs/scoping.md`](docs/scoping.md). Read it
+before proposing work.
 
 ## Core doctrine: the correctness oracle comes first
 
 The project is sequenced so the **trusted reference comes before anything fast**.
-Every attention backend — now and later — is validated token-for-token against
-HuggingFace greedy decoding by the oracle in `tests/correctness/`. A backend that
-fails the oracle reports no throughput. There is no "correct-ish": exact token ids
-on the single-request unit path, or a divergence traced to a numerical tie and
-documented (see the honesty bar below).
+Every optimized path is validated against a trusted greedy reference before it reports a
+single tok/s. For Qwen, that reference is HuggingFace greedy decoding at the pinned revision.
+For exported DenseBackbone bundles, the reference is the source bundle logits/generation
+contract. There is no "correct-ish": exact token ids on the single-request unit path, or a
+divergence traced to a numerical tie and documented.
 
-## Model — pinned, do not substitute
+## Backends
 
-- `Qwen/Qwen2.5-Coder-3B-Instruct`
-- HF revision `488639f1ff808d1d3d0ba301aef8c11461451ec5`
-- Use the **Instruct** variant and its chat template. Plain `-3B` is a different
-  model and would be wrong.
+- `qwen`: `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
+  `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the **Instruct** variant and its
+  chat template. Plain `-3B` is a different model and would invalidate the Qwen oracle.
+- `dense`: `llm_pretrain_dense_v1` export bundles from `llm-pretrain`, loaded from
+  `manifest.json`, `config.json`, `tokenizer.json`, and `weights.pt`.
 
-Pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
+Qwen's default pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
+Backend selection lives in `llm_infer/model/runtime.py`.
 
 ## Layout
 
 ```
 llm_infer/
-  model/        # Qwen loading, weights, config + greedy decode + cached prefill/decode  [A,B]
+  model/        # backend interface/registry, Qwen backend, DenseBackbone bundle backend [A,B]
   kernels/      # AttentionBackend protocol, torch_naive reference, flash_attn_paged     [A,C]
   kv_cache/     # block allocator, block tables, paged page store                        [B]
   scheduler/    # prefill/decode admission, continuous batching                          [B]
@@ -37,10 +40,8 @@ docs/                # scoping.md (source of truth for scope) + architecture.md 
 scripts/             # golden generation + the Modal A100 flash oracle harness
 ```
 
-Implemented: `model/`, `kernels/` (both backends), `kv_cache/`, `scheduler/`,
-`serving/` (the Phase B vertical-slice runner — streaming and an OpenAI-compatible
-surface remain Phase E), and the oracle. `benchmarks/` is still an empty stub whose
-docstring names the phase that fills it.
+Implemented: `model/`, `kernels/`, `kv_cache/`, `scheduler/`, `serving` (OpenAI-compatible
+routes, streaming, metrics, loadgen), `benchmarks`, and the correctness oracles.
 
 ## The honesty bar (Phase A)
 
