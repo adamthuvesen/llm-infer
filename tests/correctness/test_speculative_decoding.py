@@ -308,7 +308,7 @@ def test_sampled_request_skips_the_speculative_path() -> None:
     """A non-greedy request never takes the greedy-verifier speculative path; it samples per-row.
 
     The guard is per request, not engine-wide: with speculation enabled and the engine default
-    sampling (temperature > 0), the verifier (`decode_tokens`) is never called. The toy logits are
+    sampling (temperature > 0), the verifier (`decode_tokens`) is never called. The fixed logits are
     one-hot, so the sampled draw still follows the script — output equals the greedy baseline.
     """
     prompt = [1, 2, 3, 1, 2]
