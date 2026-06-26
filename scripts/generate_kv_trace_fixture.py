@@ -505,7 +505,7 @@ def build_trace_jsonl() -> str:
     genuinely exhausted as requests decode. When a running request then needs a block, the
     engine evicts the most-recently-admitted one (LIFO) — freeing its KV honestly and keeping
     its tokens — then later resumes it by recompute, replaying its prefill. The scenario stays
-    rich: a long chunked prefill (``code-gen``), two requests sharing one prompt
+    varied: a long chunked prefill (``code-gen``), two requests sharing one prompt
     (``sample-a``/``sample-b``), continuous-batching churn, a KV wall that fills and drains, and
     now at least one real preemption + resume cycle. Every request still finishes with all its
     tokens, and the block lifecycle stays honest throughout.

@@ -14,7 +14,7 @@ from llm_infer.serving import (
 )
 
 
-class ScriptedToyModel:
+class ScriptedModel:
     """Model-shaped object whose greedy path follows a per-prompt token script."""
 
     def __init__(self, scripts: dict[tuple[int, ...], list[int]]) -> None:
@@ -26,7 +26,7 @@ class ScriptedToyModel:
         self.device = torch.device("cpu")
         self.profiler = None
         self.decode_tokens_calls = 0
-        self._states: dict[int, _ToyState] = {}
+        self._states: dict[int, _ScriptedState] = {}
 
     def prefill(
         self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
@@ -35,7 +35,7 @@ class ScriptedToyModel:
         self._write(cache, table, start_pos=0, count=len(prompt_ids))
         table.length = len(prompt_ids)
         script = self.scripts[tuple(prompt_ids)]
-        self._states[id(table)] = _ToyState(prompt_ids=list(prompt_ids), script=script)
+        self._states[id(table)] = _ScriptedState(prompt_ids=list(prompt_ids), script=script)
         return self._logits(script[0])
 
     def prefill_chunk(
@@ -48,7 +48,7 @@ class ScriptedToyModel:
         chunk_size: int,
     ) -> torch.Tensor:
         if start_pos == 0:
-            self._states[id(table)] = _ToyState(
+            self._states[id(table)] = _ScriptedState(
                 prompt_ids=list(prompt_ids),
                 script=self.scripts[tuple(prompt_ids)],
             )
@@ -96,7 +96,7 @@ class ScriptedToyModel:
             logits.append(self._logits(state.next_token()))
         return torch.stack(logits)
 
-    def _sync(self, table: BlockTable) -> _ToyState:
+    def _sync(self, table: BlockTable) -> _ScriptedState:
         state = self._states[id(table)]
         prompt_len = len(state.prompt_ids)
         state.cached_generated = table.length - prompt_len
@@ -114,7 +114,7 @@ class ScriptedToyModel:
         return logits
 
 
-class _ToyState:
+class _ScriptedState:
     def __init__(self, *, prompt_ids: list[int], script: list[int]) -> None:
         self.prompt_ids = prompt_ids
         self.script = script
@@ -127,7 +127,7 @@ class _ToyState:
         return self.script[self.cached_generated]
 
 
-class NoSpecVerifierToyModel:
+class NoSpecVerifierModel:
     """Small prefix/chunk model that fails if speculative verification is called."""
 
     def __init__(self) -> None:
@@ -196,8 +196,8 @@ def _run(
     script: list[int],
     eos: frozenset[int] = frozenset({63}),
     speculative: bool,
-) -> tuple[list[int], ScriptedToyModel]:
-    model = ScriptedToyModel({tuple(prompt): script})
+) -> tuple[list[int], ScriptedModel]:
+    model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
         model,
         block_size=4,
@@ -261,7 +261,7 @@ def test_speculative_rejection_frees_rejected_draft_blocks() -> None:
     prompt = [1, 2, 3, 1, 2]
     script = [3, 8, 9, 8, 9, 8, 9]  # the [1,2,3]-lookup draft mismatches 8/9 → repeated rejection
     block_size = 2  # small blocks so a rejected draft's reserve crosses a boundary (a real leak)
-    model = ScriptedToyModel({tuple(prompt): script})
+    model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
         model,
         block_size=block_size,
@@ -315,7 +315,7 @@ def test_sampled_request_skips_the_speculative_path() -> None:
     script = [3, 1, 2, 9]
     baseline, _ = _run(prompt=prompt, script=script, speculative=False)
 
-    model = ScriptedToyModel({tuple(prompt): script})
+    model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
         model,
         block_size=4,
@@ -335,7 +335,7 @@ def test_greedy_request_still_speculates_under_a_sampled_default() -> None:
     prompt = [1, 2, 3, 1, 2]
     script = [3, 1, 2, 9]
 
-    model = ScriptedToyModel({tuple(prompt): script})
+    model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
         model,
         block_size=4,
@@ -353,7 +353,7 @@ def test_greedy_request_still_speculates_under_a_sampled_default() -> None:
 
 
 def test_default_chunked_prefix_caching_does_not_call_speculative_verifier() -> None:
-    model = NoSpecVerifierToyModel()
+    model = NoSpecVerifierModel()
     engine = InferenceEngine(model, block_size=4, num_blocks=24, prefill_chunk_size=2)
     requests = [
         Request(f"p0-g{idx}", [11, 12, 13, 14, 15, 16], 3, frozenset({31}), "p0")

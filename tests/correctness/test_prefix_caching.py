@@ -17,7 +17,7 @@ EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
 CASE = FIXTURE["cases"][0]
 
 
-class CountingToyModel:
+class CountingModel:
     """Small model-shaped object for proving engine scheduling without loading 3B weights."""
 
     def __init__(self) -> None:
@@ -69,8 +69,8 @@ class CountingToyModel:
         return torch.roll(base, shifts=offset)
 
 
-def _toy_run(*, prefix_group_id: str | None) -> tuple[dict[str, list[int]], int]:
-    model = CountingToyModel()
+def _prefix_cache_run(*, prefix_group_id: str | None) -> tuple[dict[str, list[int]], int]:
+    model = CountingModel()
     engine = InferenceEngine(
         model,
         block_size=4,
@@ -91,8 +91,8 @@ def _toy_run(*, prefix_group_id: str | None) -> tuple[dict[str, list[int]], int]
 
 
 def test_shared_prefix_sampling_matches_prefill_per_sibling_baseline() -> None:
-    baseline, baseline_prefills = _toy_run(prefix_group_id=None)
-    shared, shared_prefills = _toy_run(prefix_group_id="p0")
+    baseline, baseline_prefills = _prefix_cache_run(prefix_group_id=None)
+    shared, shared_prefills = _prefix_cache_run(prefix_group_id="p0")
 
     assert shared == baseline
     assert baseline_prefills == 4

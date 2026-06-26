@@ -11,7 +11,7 @@ from llm_infer.serving import InferenceEngine, Request
 from llm_infer.tracing import TRACE_SCHEMA_VERSION, TraceRecorder
 
 
-class TraceToyModel:
+class TraceModel:
     """Small model-shaped object that writes real KV rows while producing scripted logits."""
 
     def __init__(self) -> None:
@@ -72,7 +72,7 @@ class TraceToyModel:
 
 
 def test_tracing_is_off_by_default() -> None:
-    engine = InferenceEngine(TraceToyModel(), block_size=4, num_blocks=8)
+    engine = InferenceEngine(TraceModel(), block_size=4, num_blocks=8)
     engine.add_request(Request("r", [1, 2], 2, frozenset({63})))
 
     assert engine.trace is None
@@ -82,7 +82,7 @@ def test_tracing_is_off_by_default() -> None:
 def test_trace_recorder_captures_real_engine_events() -> None:
     recorder = TraceRecorder()
     engine = InferenceEngine(
-        TraceToyModel(),
+        TraceModel(),
         block_size=4,
         num_blocks=8,
         prefill_chunk_size=2,
@@ -206,7 +206,7 @@ def test_preemption_emits_honest_preempt_and_resume_events() -> None:
     # block_size 4, pool 3: three prompt-3 requests admit on footprint (1 block each), then must
     # evict as they grow past one block — a genuine forced preemption.
     engine = InferenceEngine(
-        TraceToyModel(), block_size=4, num_blocks=3, preemption=True, trace=recorder
+        TraceModel(), block_size=4, num_blocks=3, preemption=True, trace=recorder
     )
     engine.add_request(Request("a", [1, 2, 3], 6, frozenset({63})))
     engine.add_request(Request("b", [4, 5, 6], 6, frozenset({63})))
@@ -251,7 +251,7 @@ def test_block_lifecycle_is_honest_for_shared_prefix() -> None:
     when the second sibling frees does the block truly return to the pool and get traced.
     """
     recorder = TraceRecorder()
-    engine = InferenceEngine(TraceToyModel(), block_size=4, num_blocks=8, trace=recorder)
+    engine = InferenceEngine(TraceModel(), block_size=4, num_blocks=8, trace=recorder)
     engine.add_request(Request("sib-a", [1, 2, 3, 4], 3, frozenset({63}), prefix_group_id="g"))
     engine.add_request(Request("sib-b", [1, 2, 3, 4], 3, frozenset({63}), prefix_group_id="g"))
     engine.run()

@@ -12,8 +12,8 @@ from llm_infer.model.qwen import QwenModel
 from llm_infer.serving import InferenceEngine, Request
 
 
-class ChunkedToyModel:
-    """Tiny model-shaped object for proving engine scheduling without loading 3B weights."""
+class ChunkedModel:
+    """Small model-shaped object for proving engine scheduling without loading 3B weights."""
 
     def __init__(self) -> None:
         self.num_layers = 1
@@ -118,7 +118,7 @@ def _tiny_qwen() -> QwenModel:
 
 
 def test_active_decode_advances_between_prefill_chunks() -> None:
-    model = ChunkedToyModel()
+    model = ChunkedModel()
     engine = InferenceEngine(model, block_size=4, num_blocks=8, prefill_chunk_size=2)
     active = Request("active", [1], 4, frozenset({63}))
     long = Request("long", [2, 3, 4, 5, 6], 2, frozenset({63}))
@@ -191,7 +191,7 @@ def test_chunked_engine_tokens_match_full_prefill_engine() -> None:
 
 
 def test_chunked_prefix_group_shares_full_prompt_blocks_then_cow_partial_block() -> None:
-    model = ChunkedToyModel()
+    model = ChunkedModel()
     engine = InferenceEngine(model, block_size=4, num_blocks=24, prefill_chunk_size=2)
     requests = [
         Request(f"p0-g{idx}", [11, 12, 13, 14, 15, 16], 3, frozenset({63}), "p0")
