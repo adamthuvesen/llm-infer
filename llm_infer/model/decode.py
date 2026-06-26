@@ -7,13 +7,17 @@ whole point of Phase A.
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import torch
 
-from llm_infer.model.qwen import QwenModel
+
+class LogitsModel(Protocol):
+    def logits(self, token_ids: list[int]) -> torch.Tensor: ...
 
 
 def greedy_decode(
-    model: QwenModel,
+    model: LogitsModel,
     prompt_ids: list[int],
     *,
     max_new_tokens: int,
