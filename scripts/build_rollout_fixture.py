@@ -1,6 +1,6 @@
 """Freeze the 8-prompt llm-rlvr-sql GRPO rollout slice as a committed, reproducible fixture.
 
-Phase E's rollout-timing comparison replays llm-rlvr-sql's *actual* GRPO rollout shape, not a
+rollout's rollout-timing comparison replays llm-rlvr-sql's *actual* GRPO rollout shape, not a
 synthetic microbench. One GRPO rollout batch is 8 prompts × G=4 = 32 completions
 (``per_device_batch_size=8``, ``num_generations=4`` in llm-rlvr-sql's GrpoHyperparams). The
 prompts must be byte-identical to llm-rlvr-sql's eval path, so this builds them through

@@ -1,8 +1,8 @@
-# Keeping the GPU busy — the llm-rlvr-sql rollout-timing hook (Phase E)
+# Keeping the GPU Busy — llm-rlvr-sql Rollout Timing
 
 This is the differentiator: the one number that makes `llm-infer` an *llm-rlvr-sql rollout
-backend* rather than a generic vLLM clone. Phase D proved the engine decodes a synthetic
-workload correctly and beats naive HF (`docs/benchmark.md`). Phase E points it at the
+backend* rather than a generic vLLM clone. The benchmark suite proves the engine decodes a synthetic
+workload correctly and beats naive HF (`docs/benchmark.md`). This rollout benchmark points it at the
 **real** thing it exists to serve — one frozen llm-rlvr-sql GRPO rollout batch — and times it
 against vLLM (llm-rlvr-sql's current rollout backend, the ceiling) and naive HF (the floor).
 
@@ -46,7 +46,7 @@ against the pin before merging — a wrong base would silently corrupt every num
 
 Why bf16: it is Qwen2.5's **native** dtype (the model is trained and shipped in bf16, and
 llm-rlvr-sql's GRPO run was bf16), it is the dtype the engine's greedy oracle already validates,
-and it is the dtype Phase D uses — so all three systems and the engine run **one uniform
+and it is the dtype the greedy benchmark uses — so all three systems and the engine run **one uniform
 precision**, with no mixed fp16/bf16 path to reason about. All three produce coherent SQL
 (sampled completions reason in `<think>…</think>` then emit a ` ```sql ` query), confirmed on
 a smoke before the timed run.
@@ -61,7 +61,7 @@ a smoke before the timed run.
 
 ## Methodology — honest about sampling
 
-- **No cross-engine token equivalence.** Phase D adjudicated every system against fp32 truth
+- **No cross-engine token equivalence.** The greedy benchmark adjudicated every system against fp32 truth
   because greedy decoding is deterministic. Under sampling, llm-infer, vLLM, and HF use
   *different* RNG, so identical tokens are neither expected nor honest to require. The
   rollout is **timing-only**. (The sampler's correctness is pinned separately and exactly:
@@ -109,7 +109,7 @@ per completion on average, far short of the 1024 cap.)
 
 **The engine beats the naive floor on the real rollout.** `llm_infer` (65.9 tok/s) decodes
 the GRPO rollout batch **1.67× faster** than naive sequential HF (39.4 tok/s) and at **1.9×
-lower $/1k** ($1.00 vs $1.85) — the same win as Phase D's stop #4, now on llm-rlvr-sql's actual
+lower $/1k** ($1.00 vs $1.85) — the same kind of measured speedup, now on llm-rlvr-sql's actual
 workload rather than the synthetic one. The fused batched decode (`decode_many`) is what earns
 it: all 32 completions advance in one forward per step instead of one-at-a-time generate.
 
@@ -203,4 +203,4 @@ modal run scripts/modal_rollout.py --command rollout
 The raw record lands in `bench-results/rollout-*.json` (git-ignored); the curated table and
 pinned config are folded into the **Result** section above at land time. The sampler
 correctness gate (`tests/correctness/test_sampler.py`, temperature 0 == greedy) and the
-Phase A–D greedy oracle run locally with zero spend and must be green first.
+The greedy oracle and benchmark gates run locally with zero spend and must be green first.

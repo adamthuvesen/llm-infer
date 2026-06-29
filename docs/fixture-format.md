@@ -69,7 +69,7 @@ default, where these ties near-vanish.
 ## HF truth = full-recompute greedy, not `generate()`
 
 The golden truth is computed by **full-recompute greedy**: one `forward` over the
-whole sequence per step, `argmax`, append — the *same algorithm class* as the Phase A
+whole sequence per step, `argmax`, append — the *same algorithm class* as the oracle
 engine (which has no KV-cache and recomputes the full sequence each step). It is
 deliberately **not** `model.generate`.
 
@@ -109,7 +109,7 @@ full-recompute math the winner is unambiguous and the engine matches HF exactly.
 only reason `generate` picks the other token is its different fused-kernel reduction
 order nudging a near-tie at an *earlier* step that cascades. Using full-recompute as
 the truth, the engine matches HF **token-for-token on every case with zero
-divergences** — so no bf16-style tie waiver is needed at all in Phase A.
+divergences** — so no bf16-style tie waiver is needed at all in oracle.
 
 ## What the oracle proves
 
@@ -119,13 +119,13 @@ greedy on the pinned Instruct model, under the pinned dtype and decoding config,
 the exact llm-rlvr-sql `cot` prompt. That is the trusted reference every future backend
 (paged, flash, …) must reproduce.
 
-## The flash-attn backend and the tie-tolerance bar (Phase C)
+## The flash-attn backend and the tie-tolerance bar (flash-attn)
 
 `flash_attn_paged` is the first backend that runs a **fused** kernel in **bf16**, so
 its fp32 reduction order differs from `torch_naive`'s materialized softmax. That is the
 same class of effect as the `generate`-vs-recompute split above: at a *genuine*
 numerical tie — two top tokens whose logits are equal to within tiny noise — the fused
-reduction order can flip the argmax. Unlike Phase A (full-recompute fp32, where ties
+reduction order can flip the argmax. Unlike oracle (full-recompute fp32, where ties
 near-vanish and the bar is bit-exact), the flash backend therefore needs a principled
 tie waiver. The bar stays falsifiable:
 
@@ -142,7 +142,7 @@ tie waiver. The bar stays falsifiable:
   is a real kernel/layout bug, not a tie. There is no blanket "close enough" and no
   unconditional tolerance.
 
-This mirrors the Phase A discipline exactly: the *non*-tie gap traced above was 0.397
+This mirrors the oracle discipline exactly: the *non*-tie gap traced above was 0.397
 logits (~7000× the cross-path logit noise of 5.3e-5) and was correctly classified as
 **not** a tie. The 1e-3 tolerance sits well above that observed numerical noise yet
 hundreds of times below a real decision margin like 0.397, so it can launder genuine
@@ -165,5 +165,5 @@ tie-tolerance bar above — recompute the contested step with the `torch_naive` 
 reference, accept only if the top-2 logit gap ≤ `1e-3` — was never exercised. It stays
 in place as the principled safety net for any future case where a genuine near-tie does
 flip: such a step would be accepted only on proof it is a numerical tie, and a non-tie
-divergence would still FAIL the oracle. This mirrors Phase A, where full-recompute fp32
+divergence would still FAIL the oracle. This mirrors oracle, where full-recompute fp32
 also matched HF token-for-token with zero divergences and no waiver was needed.

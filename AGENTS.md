@@ -2,7 +2,7 @@
 
 A minimal, honest paged LLM inference engine with pluggable model backends. Qwen2.5-Coder
 is the pinned HF-oracle backend; exported llm-pretrain DenseBackbone bundles are a
-correctness-only sibling backend. Full scope and build order live in [`docs/scoping.md`](docs/scoping.md).
+correctness-only sibling backend. Full scope and current evidence boundaries live in [`docs/scoping.md`](docs/scoping.md).
 Read it before proposing work.
 
 ## Core doctrine: the correctness oracle comes first
@@ -45,8 +45,9 @@ scripts/             # generate_goldens, modal_oracle, modal_benchmark, modal_ro
 visualizer/          # schema-v3 KV trace replay UI
 ```
 
-Implemented through Phases A–E plus prefix caching, chunked prefill, speculative decode v1,
-request preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/loadgen.
+Implemented features include the greedy oracle, paged KV cache, continuous batching,
+chunked prefill, prefix caching, flash-attn backend, speculative decode v1, request
+preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/loadgen.
 
 ## The honesty bar
 

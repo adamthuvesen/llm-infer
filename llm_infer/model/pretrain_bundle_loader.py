@@ -100,14 +100,14 @@ class PretrainDenseConfig:
         )
 
 
-def _required_file(root: Path, name: str) -> Path:
+def required_file(root: Path, name: str) -> Path:
     path = root / name
     if not path.is_file():
         raise PretrainBundleError(f"bundle is missing required file {name}")
     return path
 
 
-def _read_json_object(path: Path) -> Mapping[str, object]:
+def read_json_object(path: Path) -> Mapping[str, object]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -117,7 +117,7 @@ def _read_json_object(path: Path) -> Mapping[str, object]:
     return raw
 
 
-def _require_manifest_format(manifest: Mapping[str, object], path: Path) -> None:
+def require_manifest_format(manifest: Mapping[str, object], path: Path) -> None:
     candidates = [
         _string_at(manifest, "format"),
         _string_at(manifest, "bundle_format"),
@@ -133,7 +133,7 @@ def _require_manifest_format(manifest: Mapping[str, object], path: Path) -> None
         )
 
 
-def _resolve_tokenizer_path(root: Path, manifest: Mapping[str, object]) -> Path:
+def resolve_tokenizer_path(root: Path, manifest: Mapping[str, object]) -> Path:
     tokenizer_path = _string_at(manifest, "tokenizer_path")
     tokenizer_entry = manifest.get("tokenizer")
     if isinstance(tokenizer_entry, str):
@@ -155,7 +155,7 @@ def _resolve_tokenizer_path(root: Path, manifest: Mapping[str, object]) -> Path:
     return path
 
 
-def _read_weights(
+def read_weights(
     path: Path, device: torch.device | str
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, object]]:
     try:
@@ -203,7 +203,7 @@ def _is_tensor_state_dict(value: Mapping[object, object]) -> bool:
     )
 
 
-def _require_weight_key_format(metadata: Mapping[str, object], path: Path) -> None:
+def require_weight_key_format(metadata: Mapping[str, object], path: Path) -> None:
     fields = ("key_format", "dense_key_format", "state_dict_format", "weights_format", "format")
     candidates = [metadata.get(field) for field in fields]
     if BUNDLE_FORMAT not in {value for value in candidates if isinstance(value, str)}:
@@ -215,7 +215,7 @@ def _require_weight_key_format(metadata: Mapping[str, object], path: Path) -> No
         )
 
 
-def _normalize_state_dict(
+def normalize_state_dict(
     state_dict: Mapping[str, torch.Tensor],
     config: PretrainDenseConfig,
     *,
@@ -418,7 +418,7 @@ def _copy_projection(
         dtype=dtype,
         device=device,
     )
-    _copy_optional_weight(
+    _copy_weight(
         weights,
         f"layers.{layer}.{target}.bias",
         state_dict,
@@ -426,6 +426,7 @@ def _copy_projection(
         (shape[0],),
         dtype=dtype,
         device=device,
+        required=False,
     )
 
 
@@ -438,30 +439,15 @@ def _copy_weight(
     *,
     dtype: torch.dtype,
     device: torch.device | str,
+    required: bool = True,
 ) -> None:
     for alias in aliases:
         tensor = state_dict.get(alias)
         if tensor is not None:
             weights[target] = _validated_tensor(alias, tensor, shape, dtype=dtype, device=device)
             return
-    raise PretrainBundleError(f"weights.pt is missing required tensor for {target}")
-
-
-def _copy_optional_weight(
-    weights: dict[str, torch.Tensor],
-    target: str,
-    state_dict: Mapping[str, torch.Tensor],
-    aliases: Iterable[str],
-    shape: tuple[int, ...],
-    *,
-    dtype: torch.dtype,
-    device: torch.device | str,
-) -> None:
-    for alias in aliases:
-        tensor = state_dict.get(alias)
-        if tensor is not None:
-            weights[target] = _validated_tensor(alias, tensor, shape, dtype=dtype, device=device)
-            return
+    if required:
+        raise PretrainBundleError(f"weights.pt is missing required tensor for {target}")
 
 
 def _validated_tensor(

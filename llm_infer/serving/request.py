@@ -2,7 +2,7 @@
 
 Created by the caller with its prompt, stop config, and :class:`SamplingParams`; the engine
 fills in the block table on admission and grows ``generated`` one token per step. Stop
-semantics mirror the Phase A ``greedy_decode`` exactly (EOS token included, capped at
+semantics mirror the oracle ``greedy_decode`` exactly (EOS token included, capped at
 ``max_new_tokens``) so the cached/paged path reproduces the full-recompute reference
 token-for-token.
 

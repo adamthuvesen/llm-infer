@@ -33,7 +33,7 @@ don't see evidence for a packaged CLI.
 |---|---|---|
 | **PyTorch** | Forward pass, tensors, sampling | Core compute for Qwen and DenseBackbone backends |
 | **Transformers (HuggingFace)** | Qwen weights/config/tokenizer | Qwen weights come from HF; forward is ours so the oracle tests *our* engine |
-| **flash-attn** (CUDA only) | Fast attention kernel | Phase C speed swap behind [`AttentionBackend`](../llm_infer/kernels/base.py); optional, GPU-only |
+| **flash-attn** (CUDA only) | Fast attention kernel | Optional GPU backend behind [`AttentionBackend`](../llm_infer/kernels/base.py) |
 | **pytest** | Correctness oracle gate | Local CPU gate in [`tests/correctness/`](../tests/correctness/) |
 | **Modal** | Remote A100 runs | flash-attn oracle, 3-way benchmark, llm-rlvr-sql rollout timing ([`scripts/modal_*.py`](../scripts/)) |
 | **uv** | Dependency management | [`pyproject.toml`](../pyproject.toml), Python 3.11+ |
@@ -170,7 +170,7 @@ Do not unify without re-benchmarking — both values are pinned in their respect
 
 Only flows that exist in this repo.
 
-### Flow A — Phase A greedy decode (correctness oracle path)
+### Flow A — Greedy Decode (Correctness Oracle Path)
 
 Used by [`greedy_decode`](../llm_infer/model/decode.py) and
 [`test_greedy_oracle.py`](../tests/correctness/test_greedy_oracle.py). **No KV cache, no
@@ -185,7 +185,7 @@ batching.**
 6. Compare output to committed golden `continuation_ids` in
    [`tests/correctness/goldens/`](../tests/correctness/goldens/).
 
-### Flow B — Continuous-batching engine step (Phase B+ core loop)
+### Flow B — Continuous-Batching Engine Step
 
 Implemented in [`InferenceEngine.step`](../llm_infer/serving/engine.py). This is the **main
 production inference path** for multi-request work.
@@ -260,7 +260,7 @@ the post-change pool `pool_used` / `pool_free` totals.
 uv run pytest tests/correctness -q
 ```
 
-- [`test_greedy_oracle.py`](../tests/correctness/test_greedy_oracle.py): Phase A
+- [`test_greedy_oracle.py`](../tests/correctness/test_greedy_oracle.py): greedy oracle
   full-recompute vs golden HF tokens.
 - [`test_paged_decode.py`](../tests/correctness/test_paged_decode.py): cached/batched paths
   vs golden and vs each other.
@@ -276,7 +276,7 @@ modal run scripts/modal_oracle.py --command oracle
 Validates `FlashAttnPagedAttention` on A100 with tie-tolerance for bf16 numerical ties
 ([`docs/fixture-format.md`](fixture-format.md)).
 
-### Flow D — Phase D three-way benchmark (Modal)
+### Flow D — Three-Way Benchmark (Modal)
 
 [`scripts/modal_benchmark.py`](../scripts/modal_benchmark.py) +
 [`llm_infer/benchmarks/runners.py`](../llm_infer/benchmarks/runners.py):
@@ -286,7 +286,7 @@ Validates `FlashAttnPagedAttention` on A100 with tie-tolerance for bf16 numerica
 3. **Adjudicate tokens** against fp32 reference (exact or traced tie).
 4. Only correct systems get tok/s; print pinned config table ([`docs/benchmark.md`](benchmark.md)).
 
-### Flow E — Phase E llm-rlvr-sql rollout timing (Modal)
+### Flow E — llm-rlvr-sql Rollout Timing (Modal)
 
 [`scripts/modal_rollout.py`](../scripts/modal_rollout.py):
 
@@ -349,7 +349,7 @@ sequenceDiagram
     alt to_decode non-empty
         Engine->>Model: decode_many(cache, tables, last_tokens)
         Model->>Cache: write + gather per request
-        Model->>Backend: forward_decode_batch
+        Model->>Backend: forward_decode_batch_packed
         Backend-->>Model: batched attention
         Model-->>Engine: (B, vocab) logits
         Engine->>Samp: sample_many(logits)
@@ -403,25 +403,25 @@ flowchart LR
 K/V stored **after RoPE, before GQA expansion**
 ([`paged_kv_cache.py`](../llm_infer/kv_cache/paged_kv_cache.py)).
 
-### Dependency / phase diagram
+### Dependency Diagram
 
 ```mermaid
 flowchart TB
-    PhaseA["Phase A: logits + torch_naive + greedy oracle"]
-    PhaseB["Phase B: PagedKVCache + Scheduler + InferenceEngine"]
-    PhaseC["Phase C: flash_attn_paged backend swap"]
-    PhaseD["Phase D: benchmarks vs HF + vLLM"]
-    PhaseE["Phase E: llm-rlvr-sql rollout timing + sampled Sampler"]
+    Oracle["logits + torch_naive + greedy oracle"]
+    Engine["PagedKVCache + Scheduler + InferenceEngine"]
+    Flash["flash_attn_paged backend"]
+    Benchmark["benchmarks vs HF + vLLM"]
+    Rollout["llm-rlvr-sql rollout timing + sampled Sampler"]
 
-    PhaseA --> PhaseB
-    PhaseB --> PhaseC
-    PhaseC --> PhaseD
-    PhaseB --> PhaseD
-    PhaseD --> PhaseE
-    PhaseC --> PhaseE
+    Oracle --> Engine
+    Engine --> Flash
+    Flash --> Benchmark
+    Engine --> Benchmark
+    Benchmark --> Rollout
+    Flash --> Rollout
 ```
 
-All phases marked complete in [`README.md`](../README.md).
+Core engine milestones are complete in [`README.md`](../README.md).
 
 ---
 
@@ -442,7 +442,7 @@ prefill in bounded chunks so already-prefilled requests keep decoding between ch
 
 **AttentionBackend protocol.** Narrow interface: given already-RoPE'd, GQA-expanded Q/K/V
 tensors, compute causal attention ([`kernels/base.py`](../llm_infer/kernels/base.py)).
-`forward_decode_batch` fuses B single-token decodes with ragged histories.
+`forward_decode_batch_packed` fuses B single-token decodes over packed ragged histories.
 
 **GQA (Grouped Query Attention).** Fewer KV heads than query heads; KV heads are repeated
 before attention ([`_expand_kv`](../llm_infer/model/qwen.py)).
@@ -457,7 +457,7 @@ calling HF ([`docs/fixture-format.md`](fixture-format.md)).
 only if traced to equal-within-tolerance logits — never "close enough."
 
 **llm-rlvr-sql / GRPO.** llm-rlvr-sql is the parent RL text-to-SQL project; GRPO (Group Relative
-Policy Optimization) needs many sampled completions per prompt. Phase E measures this rollout
+Policy Optimization) needs many sampled completions per prompt. The rollout benchmark measures this
 pattern ([`docs/keeping-the-gpu-busy.md`](keeping-the-gpu-busy.md)).
 
 **Naive HF baseline (`hf_sequential`).** Per-request `model.generate()`, one at a time — the
@@ -472,8 +472,8 @@ from chunk ranges rather than assuming one prefill event per request.
 - Custom forward with HF weights — oracle validates *our* stack, not HF's.
 - `Sampler` at temperature 0 wraps argmax so greedy oracle and engine share one path
   ([`sampler.py`](../llm_infer/serving/sampler.py)).
-- `torch_naive` intentionally loops in `forward_decode_batch` — correctness reference, not
-  performance.
+- `torch_naive` intentionally loops per request in its batched decode — correctness
+  reference, not performance.
 
 ---
 
@@ -490,7 +490,7 @@ from chunk ranges rather than assuming one prefill event per request.
 | 7 | [`tests/correctness/test_paged_decode.py`](../tests/correctness/test_paged_decode.py) | What correctness properties must hold? |
 | 8 | [`llm_infer/benchmarks/runners.py`](../llm_infer/benchmarks/runners.py) | How is llm-infer wired for benchmarking vs HF/vLLM? |
 | 9 | [`docs/fixture-format.md`](fixture-format.md) | How are goldens structured and regenerated? |
-| 10 | [`scripts/modal_rollout.py`](../scripts/modal_rollout.py) | How does Phase E connect to llm-rlvr-sql economics? |
+| 10 | [`scripts/modal_rollout.py`](../scripts/modal_rollout.py) | How does rollout timing connect to llm-rlvr-sql economics? |
 
 ---
 
@@ -500,7 +500,7 @@ from chunk ranges rather than assuming one prefill event per request.
 - **OpenAI-compatible HTTP server** in [`llm_infer/serving/server/`](../llm_infer/serving/server/);
   **no auth or database** — not in scope, no code found.
 - **No packaged CLI** — `pyproject.toml` has no scripts section.
-- **v1 complete (Phases A–E)** per [`README.md`](../README.md) status table.
+- **v1 complete** per [`README.md`](../README.md) status table.
 - Model pin: [`llm_infer/model/config.py`](../llm_infer/model/config.py) — Instruct variant only.
 
 ---
@@ -527,8 +527,8 @@ GRPO rollout economics.
    engine ([`kernels/base.py`](../llm_infer/kernels/base.py)).
 3. **`InferenceEngine.step()` is the heart** — admit → prefill/decode_many → free
    ([`engine.py`](../llm_infer/serving/engine.py)).
-4. **Two decode paths in `QwenModel`** — `logits` (Phase A truth) vs `prefill`/`decode_many`
-   (Phase B+ cached) must agree ([`qwen.py`](../llm_infer/model/qwen.py)).
+4. **Two decode paths in `QwenModel`** — `logits` (oracle truth) vs `prefill`/`decode_many`
+   (paged-cache and later cached) must agree ([`qwen.py`](../llm_infer/model/qwen.py)).
 5. **A library + harness with an OpenAI-compatible server on top** — entry is tests, Python
    imports, `python -m llm_infer.serve`, or Modal scripts.
 

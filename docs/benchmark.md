@@ -1,7 +1,7 @@
-# Three-way benchmark (Phase D)
+# Three-way Benchmark
 
-The evidence behind hard-stops **#3** (compare naive HF vs llm-infer vs vLLM on one pinned
-GPU) and **#4** (the optimized path beats the naive baseline by an honest margin). The
+The benchmark evidence compares naive HF, `llm-infer`, and vLLM on one pinned
+GPU, and reports whether the optimized path beats the naive baseline by an honest margin. The
 benchmark measures **decode throughput on an identical workload** — same prompts, same stop
 config, same greedy decoding — so the tokens/s numbers compare equal work, not different
 work. vLLM is the ceiling, never the thing we beat.
@@ -33,10 +33,10 @@ batched forward rather than from a tight loop.
   byte-identical to the correctness oracle — cycled up to `num_requests`. Replication is
   fair because vLLM **prefix caching is pinned off**: every system recomputes every prefill.
 - **Agreement vs fp32 truth (the throughput gate).** The reference is the **fp32
-  full-recompute oracle truth** (Phase A) — *not* bf16 HF `generate`, which itself diverges
+  full-recompute oracle truth** — *not* bf16 HF `generate`, which itself diverges
   from truth at real margins (the documented step-32 case), so using it as the reference
   wrongly fails any backend that is *more* faithful to fp32. Truth is computed by running each
-  unique prompt through the engine on the fp32 model (cached fp32 == full-recompute, Phase B).
+  unique prompt through the engine on the fp32 model (cached fp32 == full-recompute).
   Each system's bf16 output is compared to truth under a **bf16-sized tolerance (~0.1**, not
   the fp32 1e-3: bf16 noise at these logit magnitudes is ~0.05–0.1). The result reports each
   system's agreement profile — exact / genuine-tie / non-tie divergence. Per the project

@@ -11,17 +11,24 @@ from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.model.layers import (
+    expand_grouped_kv,
+    linear_projection,
+    merge_attention_heads,
+    rope_tables_for_positions,
+    swiglu_mlp,
+)
 from llm_infer.model.pretrain_bundle_loader import (
     BUNDLE_FORMAT,
     PretrainBundleError,
     PretrainDenseConfig,
-    _normalize_state_dict,
-    _read_json_object,
-    _read_weights,
-    _require_manifest_format,
-    _require_weight_key_format,
-    _required_file,
-    _resolve_tokenizer_path,
+    normalize_state_dict,
+    read_json_object,
+    read_weights,
+    require_manifest_format,
+    require_weight_key_format,
+    required_file,
+    resolve_tokenizer_path,
 )
 from llm_infer.model.rope_utils import apply_rope, rms_norm
 from llm_infer.profiling import TimingProfiler
@@ -79,19 +86,19 @@ class PretrainBundleModel:
         if not root.is_dir():
             raise PretrainBundleError(f"bundle path must be a directory: {root}")
 
-        manifest_path = _required_file(root, "manifest.json")
-        config_path = _required_file(root, "config.json")
-        weights_path = _required_file(root, "weights.pt")
+        manifest_path = required_file(root, "manifest.json")
+        config_path = required_file(root, "config.json")
+        weights_path = required_file(root, "weights.pt")
 
-        manifest = _read_json_object(manifest_path)
-        _require_manifest_format(manifest, manifest_path)
-        tokenizer_path = _resolve_tokenizer_path(root, manifest)
-        _read_json_object(tokenizer_path)
+        manifest = read_json_object(manifest_path)
+        require_manifest_format(manifest, manifest_path)
+        tokenizer_path = resolve_tokenizer_path(root, manifest)
+        read_json_object(tokenizer_path)
 
-        config = PretrainDenseConfig.from_json(_read_json_object(config_path))
-        state_dict, metadata = _read_weights(weights_path, device)
-        _require_weight_key_format(metadata, weights_path)
-        weights = _normalize_state_dict(state_dict, config, dtype=dtype, device=device)
+        config = PretrainDenseConfig.from_json(read_json_object(config_path))
+        state_dict, metadata = read_weights(weights_path, device)
+        require_weight_key_format(metadata, weights_path)
+        weights = normalize_state_dict(state_dict, config, dtype=dtype, device=device)
 
         return cls(
             weights=weights,
@@ -250,25 +257,23 @@ class PretrainBundleModel:
         return q, k, v
 
     def _expand_kv(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        repeat = self.num_heads // self.num_kv_heads
-        return k.repeat_interleave(repeat, dim=0), v.repeat_interleave(repeat, dim=0)
+        return expand_grouped_kv(
+            k,
+            v,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_axis=0,
+        )
 
     def _output_proj(self, attn: torch.Tensor, prefix: str) -> torch.Tensor:
-        seq_len = attn.shape[1]
-        merged = attn.transpose(0, 1).reshape(seq_len, self.num_heads * self.head_dim)
+        merged = merge_attention_heads(attn, num_heads=self.num_heads, head_dim=self.head_dim)
         return self._linear(merged, prefix + "attn.o_proj")
 
     def _mlp(self, x: torch.Tensor, prefix: str) -> torch.Tensor:
-        gate = self._linear(x, prefix + "mlp.gate_proj")
-        up = self._linear(x, prefix + "mlp.up_proj")
-        return self._linear(torch.nn.functional.silu(gate) * up, prefix + "mlp.down_proj")
+        return swiglu_mlp(self.w, x, prefix, self.dtype)
 
     def _linear(self, x: torch.Tensor, name: str) -> torch.Tensor:
-        out = x @ self.w[name + ".weight"].to(self.dtype).T
-        bias = self.w.get(name + ".bias")
-        if bias is not None:
-            out = out + bias.to(self.dtype)
-        return out
+        return linear_projection(self.w, x, name, self.dtype)
 
     def _lm_head(self) -> torch.Tensor:
         if self.tie_word_embeddings:
@@ -277,14 +282,9 @@ class PretrainBundleModel:
 
     def _rope_tables(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         positions = torch.arange(seq_len, dtype=torch.float32, device=self.device)
-        half = self.head_dim // 2
-        inv_freq = 1.0 / (
-            self.rope_theta
-            ** (torch.arange(0, half, dtype=torch.float32, device=self.device) / half)
+        return rope_tables_for_positions(
+            positions, head_dim=self.head_dim, rope_theta=self.rope_theta
         )
-        freqs = torch.outer(positions, inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        return emb.cos(), emb.sin()
 
     def _validate_token_ids(self, token_ids: list[int]) -> None:
         if not token_ids:

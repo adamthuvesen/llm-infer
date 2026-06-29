@@ -1,6 +1,6 @@
 """The fast attention backend: flash-attn's fused varlen kernel behind the protocol.
 
-This is the Phase C speed swap. It implements the same
+This is the flash-attn speed swap. It implements the same
 :class:`~llm_infer.kernels.base.AttentionBackend` protocol as ``torch_naive`` — same
 per-request, already-RoPE'd, already-GQA-expanded ``(num_heads, q_len, head_dim)``
 tensors in, same attention output out — so the model forward, scheduler, and paged
@@ -98,54 +98,6 @@ class FlashAttnPagedAttention:
         )
         # Back to head-major in the query's original dtype.
         return out.transpose(0, 1).contiguous().to(out_dtype)
-
-    def forward_decode_batch(
-        self,
-        queries: torch.Tensor,
-        keys: list[torch.Tensor],
-        values: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """Fused batched decode: one ragged varlen kernel call over all ``B`` requests.
-
-        This is where batched continuous-batching decode pays off — ``B`` single-token
-        queries and their ragged histories are packed into one ``flash_attn_varlen_func``
-        call instead of ``B`` separate ones. Each request contributes exactly one query token
-        (``cu_seqlens_q`` is ``[0, 1, 2, ..., B]``) and ``kv_len_i`` key tokens
-        (``cu_seqlens_k`` is the cumulative history lengths), so ``causal=True`` lets each
-        query attend over its own full history and nothing else.
-        """
-        if not (len(keys) == len(values) == queries.shape[0]):
-            raise ValueError(
-                f"queries/keys/values count mismatch: "
-                f"{queries.shape[0]}, {len(keys)}, {len(values)}"
-            )
-        batch, _num_heads, head_dim = queries.shape
-        out_dtype = queries.dtype
-        # queries is already token-major: B query tokens, one per request -> (B, heads, head_dim).
-        q = queries.contiguous().to(_KERNEL_DTYPE)
-        # Each history is head-major (heads, kv_len_i, head_dim); to token-major and concat.
-        kv_lens = [k.shape[1] for k in keys]
-        k = torch.cat([h.transpose(0, 1) for h in keys], dim=0).contiguous().to(_KERNEL_DTYPE)
-        v = torch.cat([h.transpose(0, 1) for h in values], dim=0).contiguous().to(_KERNEL_DTYPE)
-
-        cu_seqlens_q = torch.arange(batch + 1, dtype=torch.int32, device=q.device)
-        cu_seqlens_k = torch.zeros(batch + 1, dtype=torch.int32, device=k.device)
-        cu_seqlens_k[1:] = torch.tensor(kv_lens, dtype=torch.int32, device=k.device).cumsum(0)
-
-        out = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=1,
-            max_seqlen_k=max(kv_lens),
-            dropout_p=0.0,
-            softmax_scale=1.0 / math.sqrt(head_dim),
-            causal=True,
-        )
-        # out is (B, num_heads, head_dim) — one query token per request.
-        return out.to(out_dtype)
 
     def forward_decode_batch_packed(
         self,

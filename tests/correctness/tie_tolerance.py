@@ -1,11 +1,11 @@
 """The tie-tolerance comparison: how a fast backend is allowed to differ from the golden.
 
-The Phase A oracle holds the fused-kernel backends to the same bar as the reference: a
+The oracle oracle holds the fused-kernel backends to the same bar as the reference: a
 fast backend's greedy tokens must match the committed HF full-recompute golden
 token-for-token, EXCEPT at a genuine numerical tie. This module decides, for each
 divergence, whether it is such a tie — and refuses to wave anything else off.
 
-The mechanism mirrors the Phase A divergence trace in docs/fixture-format.md. We walk
+The mechanism mirrors the oracle divergence trace in docs/fixture-format.md. We walk
 the fast backend's greedy tokens against the golden and stop at the **first** step ``t``
 where they differ. Up to ``t`` the two sequences are identical, so the fast backend
 decoded step ``t`` from exactly the golden prefix; we recompute that step's logits with
@@ -40,7 +40,7 @@ import torch
 from llm_infer.model.qwen import QwenModel
 
 # The top-2 reference-logit gap at or below which a divergence counts as a genuine tie.
-# Sized from the Phase A trace: the *non*-tie gap there was 0.397 logits (~7000x the
+# Sized from the oracle trace: the *non*-tie gap there was 0.397 logits (~7000x the
 # engine-vs-HF logit noise of 5.3e-5), and that was correctly classified as NOT a tie.
 # A genuine tie is a gap at the scale of that numerical noise, not of a real margin.
 # 1e-3 sits ~20x above the worst observed cross-path logit noise yet ~400x below the

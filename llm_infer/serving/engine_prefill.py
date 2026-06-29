@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from llm_infer.scheduler.scheduler import blocks_for_footprint, max_blocks_for
+from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
 
 
-class EnginePrefillMixin:
+class EnginePrefillMixin(EngineMixinHost):
     def _reserved_blocks(self, request: Request) -> int:
         """Blocks the admit event reports reserved — footprint under preemption, else worst case."""
         if self.preemption:
@@ -38,9 +39,8 @@ class EnginePrefillMixin:
 
             group = [
                 candidate
-                for candidate in requests
+                for candidate in self._live_running(requests)
                 if candidate.prefix_group_id == request.prefix_group_id
-                and (not self.preemption or self._is_running(candidate))
             ]
             if len(group) == 1:
                 self._prefill_one(request, result)
@@ -82,7 +82,7 @@ class EnginePrefillMixin:
         # members before forking/sampling — forking onto a preempted sibling would resurrect it
         # out of the waiting queue with a live block table and a sampled token. It re-prefills
         # next step instead. The leader is never its own victim, so it always survives.
-        members = [leader, *(r for r in requests if r is not leader and self._is_running(r))]
+        members = [leader, *(r for r in self._live_running(requests) if r is not leader)]
 
         leader.prefilled = True
         leader.prompt_cached_tokens = len(prompt_ids)

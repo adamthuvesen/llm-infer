@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from llm_infer.kv_cache.block_allocator import OutOfBlocksError
+from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
 
 
-class EnginePreemptionMixin:
+class EnginePreemptionMixin(EngineMixinHost):
     # --- preemption (recompute) ---------------------------------------------------------
     #
     # Trigger points: the two places a running request needs the allocator to hand out a
@@ -84,6 +86,17 @@ class EnginePreemptionMixin:
         """
         return any(candidate is request for candidate in self.scheduler.running)
 
+    def _live_running(self, requests: Iterable[Request]) -> list[Request]:
+        """Filter a candidate list against live running membership under preemption.
+
+        Without preemption, a step's request lists stay valid for the whole step. With
+        preemption, an earlier operation can evict a later candidate, so loops that act
+        after allocation pressure re-check membership at the point of use.
+        """
+        if not self.preemption:
+            return list(requests)
+        return [request for request in requests if self._is_running(request)]
+
     def _resume_requests(self, requests: list[Request], result: StepResult) -> None:
         """Rebuild each preempted request's KV by recompute before it decodes again.
 
@@ -92,12 +105,7 @@ class EnginePreemptionMixin:
         evicted in. No token is sampled — the request already owns its generated ids — so on the
         next step it decodes its next token, identical to the uninterrupted run.
         """
-        for request in requests:
-            # A queued resume can be preempted again while making room for an earlier one this
-            # step; check membership live (see _is_running) so a request evicted mid-loop is
-            # skipped and re-picked once it is re-admitted, never resumed out of the waiting queue.
-            if not self._is_running(request):
-                continue
+        for request in self._live_running(requests):
             self._recompute_prefill(request)
             self._emit_trace(
                 "request_resumed",

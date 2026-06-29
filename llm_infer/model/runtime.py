@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from llm_infer.model.interface import (
     ModelRuntime,
 )
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
+from llm_infer.model.pretrain_bundle_loader import read_json_object
 from llm_infer.model.qwen import QwenModel
 
 RuntimeLoader = Callable[..., ModelRuntime]
@@ -187,7 +187,7 @@ def _load_dense_runtime(
         backend=attention_backend,
         device=device,
     )
-    manifest = _read_json_object(root / "manifest.json")
+    manifest = read_json_object(root / "manifest.json")
     tokenizer_metadata = _dense_tokenizer_metadata(manifest)
     tokenizer = TokenizersJsonTokenizer(
         model.tokenizer_path,
@@ -229,13 +229,6 @@ def _generation_eos_ids(
     if tokenizer_eos is not None:
         ids.add(int(tokenizer_eos))
     return frozenset(ids)
-
-
-def _read_json_object(path: Path) -> Mapping[str, object]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ModelRegistryError(f"{path.name} must contain a JSON object")
-    return raw
 
 
 def _dense_model_id(manifest: Mapping[str, object], root: Path) -> str:

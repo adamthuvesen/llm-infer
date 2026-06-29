@@ -1,1 +1,1 @@
-"""AttentionBackend protocol + implementations. torch_naive reference lands in Phase A."""
+"""AttentionBackend protocol + implementations. torch_naive reference lands in oracle."""

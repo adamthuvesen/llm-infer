@@ -180,26 +180,12 @@ class PagedKVCache:
         value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
         return key, value
 
-    def read_many(
-        self,
-        tables: list[BlockTable],
-        layer: int,
-        lengths: list[int],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Gather ragged histories for several requests with one indexed read per side.
-
-        Returns packed token-major K/V plus ``cu_seqlens`` for varlen attention:
-        K/V ``(sum(lengths), num_kv_heads, head_dim)``, ``cu_seqlens`` ``(B + 1,)``.
-        """
-        plan = self.plan_read_many(tables, lengths)
-        return (*self.read_many_plan(layer, plan), plan.cu_seqlens, plan.max_len)
-
     def plan_read_many(self, tables: list[BlockTable], lengths: list[int]) -> KVReadPlan:
         """Build reusable packed-read indices for a batched decode step."""
         if len(tables) != len(lengths):
             raise ValueError(f"tables/lengths mismatch: {len(tables)} vs {len(lengths)}")
         if not tables:
-            raise ValueError("read_many needs at least one table")
+            raise ValueError("a batched read needs at least one table")
         if any(length < 1 for length in lengths):
             raise ValueError(f"lengths must be positive; got {lengths}")
 

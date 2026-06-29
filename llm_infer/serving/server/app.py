@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -16,15 +15,11 @@ from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStr
 from llm_infer.serving.server.metrics import ServerMetrics
 from llm_infer.serving.server.protocol import (
     ChatCompletionChoice,
-    ChatCompletionChunk,
-    ChatCompletionChunkChoice,
-    ChatCompletionDelta,
     ChatCompletionMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
     CompletionChoice,
-    CompletionChunk,
     CompletionRequest,
     CompletionResponse,
     ModelCard,
@@ -38,6 +33,11 @@ from llm_infer.serving.server.protocol import (
     Usage,
 )
 from llm_infer.serving.server.stop import StopSequenceDetokenizer
+from llm_infer.serving.server.streaming import (
+    drain_token_stream,
+    stream_openai_sse,
+    stream_responses_sse,
+)
 
 # Bounds on the OpenAI `stop` field. Beyond these we 400 rather than do unbounded buffering work
 # per token; OpenAI itself caps stop at 4 sequences, which is plenty for a from-scratch engine.
@@ -138,7 +138,7 @@ def create_app(
             sampling=_sampling_params(request),
         )
         if request.stream:
-            sse = _stream_responses_sse(
+            sse = stream_responses_sse(
                 token_stream=token_stream,
                 detok=StopSequenceDetokenizer(tokenizer, stop),
                 response_id=response_id,
@@ -183,7 +183,7 @@ def create_app(
             sampling=sampling,
         )
         if stream:
-            sse = _stream_sse(
+            sse = stream_openai_sse(
                 request_kind=request_kind,
                 token_stream=token_stream,
                 detok=StopSequenceDetokenizer(tokenizer, stop),
@@ -224,28 +224,18 @@ async def _collect(
     """Drain the token stream and assemble a single non-streaming response.
 
     A stop string truncates the text before the stop, sets ``finish_reason="stop"``, and aborts
-    the engine request so no compute is wasted past the stop (see :func:`_finish_on_stop`).
+    the engine request so no compute is wasted past the stop.
     """
-    text_parts: list[str] = []
-    finish_reason = "length"
-    completion_tokens = 0
-    async for item in token_stream:
-        completion_tokens += 1
-        fed = detok.feed(item.token_id)
-        text_parts.append(fed.text)
-        if fed.stopped:
-            finish_reason = "stop"
-            await _finish_on_stop(token_stream, metrics, arrival)
-            break
-        if item.finish_reason is not None:
-            finish_reason = item.finish_reason
-    else:
-        text_parts.append(detok.finalize())
-    text = "".join(text_parts)
+    drained = await drain_token_stream(
+        token_stream=token_stream,
+        detok=detok,
+        metrics=metrics,
+        arrival=arrival,
+    )
     usage = Usage(
         prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
+        completion_tokens=drained.token_count,
+        total_tokens=prompt_tokens + drained.token_count,
     )
     if request_kind == "chat":
         return ChatCompletionResponse(
@@ -254,7 +244,8 @@ async def _collect(
             model=model,
             choices=[
                 ChatCompletionChoice(
-                    message=ChatCompletionMessage(content=text), finish_reason=finish_reason
+                    message=ChatCompletionMessage(content=drained.text),
+                    finish_reason=drained.finish_reason,
                 )
             ],
             usage=usage,
@@ -263,7 +254,7 @@ async def _collect(
         id=completion_id,
         created=created,
         model=model,
-        choices=[CompletionChoice(text=text, finish_reason=finish_reason)],
+        choices=[CompletionChoice(text=drained.text, finish_reason=drained.finish_reason)],
         usage=usage,
     )
 
@@ -280,195 +271,26 @@ async def _collect_response(
     arrival: float | None = None,
 ):
     """Drain the stream into one Responses ``response`` object (a single assistant message)."""
-    text_parts: list[str] = []
-    output_tokens = 0
-    async for item in token_stream:
-        output_tokens += 1
-        fed = detok.feed(item.token_id)
-        text_parts.append(fed.text)
-        if fed.stopped:
-            await _finish_on_stop(token_stream, metrics, arrival)
-            break
-    else:
-        text_parts.append(detok.finalize())
-    text = "".join(text_parts)
+    drained = await drain_token_stream(
+        token_stream=token_stream,
+        detok=detok,
+        metrics=metrics,
+        arrival=arrival,
+    )
     return Response(
         id=response_id,
         created_at=created,
         model=model,
         output=[
-            ResponseOutputMessage(content=[ResponseOutputText(text=text)]),
+            ResponseOutputMessage(content=[ResponseOutputText(text=drained.text)]),
         ],
-        output_text=text,
+        output_text=drained.text,
         usage=ResponseUsage(
             input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=input_tokens + output_tokens,
+            output_tokens=drained.token_count,
+            total_tokens=input_tokens + drained.token_count,
         ),
     )
-
-
-async def _stream_responses_sse(
-    *,
-    token_stream: AsyncIterator[TokenStreamItem],
-    detok: StopSequenceDetokenizer,
-    response_id: str,
-    created: int,
-    model: str,
-    input_tokens: int,
-    metrics: ServerMetrics | None = None,
-    arrival: float | None = None,
-) -> AsyncIterator[str]:
-    """Emit the Responses semantic SSE events, not chat chunks.
-
-    The minimal text-generation lifecycle: ``response.created`` once, a
-    ``response.output_text.delta`` per decodable text chunk (carrying ``delta``), then a
-    terminal ``response.completed`` whose payload includes the assembled ``response`` object. A
-    stop string truncates the text before the stop and halts generation; the stop string is never
-    present in any emitted delta or in the completed payload.
-    """
-    created_response = {
-        "id": response_id,
-        "object": "response",
-        "created_at": created,
-        "model": model,
-        "status": "in_progress",
-    }
-    yield _sse_event("response.created", {"response": created_response})
-
-    text_parts: list[str] = []
-    output_tokens = 0
-    async for item in token_stream:
-        output_tokens += 1
-        fed = detok.feed(item.token_id)
-        if fed.text:
-            text_parts.append(fed.text)
-            yield _sse_event(
-                "response.output_text.delta",
-                {"response_id": response_id, "delta": fed.text},
-            )
-        if fed.stopped:
-            await _finish_on_stop(token_stream, metrics, arrival)
-            break
-    else:
-        tail = detok.finalize()
-        if tail:
-            text_parts.append(tail)
-            yield _sse_event(
-                "response.output_text.delta", {"response_id": response_id, "delta": tail}
-            )
-
-    text = "".join(text_parts)
-    completed = Response(
-        id=response_id,
-        created_at=created,
-        model=model,
-        output=[ResponseOutputMessage(content=[ResponseOutputText(text=text)])],
-        output_text=text,
-        usage=ResponseUsage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=input_tokens + output_tokens,
-        ),
-    )
-    yield _sse_event("response.completed", {"response": completed.model_dump()})
-
-
-def _sse_event(event: str, payload: dict) -> str:
-    """A named SSE event (``event:``/``data:`` pair) for the Responses semantic stream."""
-    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
-
-
-async def _stream_sse(
-    *,
-    request_kind: str,
-    token_stream: AsyncIterator[TokenStreamItem],
-    detok: StopSequenceDetokenizer,
-    completion_id: str,
-    created: int,
-    model: str,
-    metrics: ServerMetrics | None = None,
-    arrival: float | None = None,
-) -> AsyncIterator[str]:
-    """Emit OpenAI SSE chunks: per-token deltas, a finish chunk, then ``[DONE]``.
-
-    A stop string truncates the deltas before the stop, sets ``finish_reason="stop"``, and halts
-    generation. The hold-back buffer guarantees the stop string never appears in any delta, even
-    when it straddles two tokens, so the concatenated deltas equal the non-streaming text exactly.
-    """
-    if request_kind == "chat":
-        first = ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=model,
-            choices=[ChatCompletionChunkChoice(delta=ChatCompletionDelta(role="assistant"))],
-        )
-        yield _sse(first)
-
-    finish_reason: str | None = None
-    async for item in token_stream:
-        fed = detok.feed(item.token_id)
-        if item.finish_reason is not None:
-            finish_reason = item.finish_reason
-        if fed.text:
-            yield _sse(_delta_chunk(request_kind, completion_id, created, model, fed.text))
-        if fed.stopped:
-            finish_reason = "stop"
-            await _finish_on_stop(token_stream, metrics, arrival)
-            break
-    else:
-        tail = detok.finalize()
-        if tail:
-            yield _sse(_delta_chunk(request_kind, completion_id, created, model, tail))
-
-    yield _sse(
-        _finish_chunk(request_kind, completion_id, created, model, finish_reason or "length")
-    )
-    yield "data: [DONE]\n\n"
-
-
-def _delta_chunk(
-    request_kind: str, completion_id: str, created: int, model: str, text: str
-) -> ChatCompletionChunk | CompletionChunk:
-    if request_kind == "chat":
-        return ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=model,
-            choices=[ChatCompletionChunkChoice(delta=ChatCompletionDelta(content=text))],
-        )
-    return CompletionChunk(
-        id=completion_id,
-        created=created,
-        model=model,
-        choices=[CompletionChoice(text=text, finish_reason=None)],
-    )
-
-
-def _finish_chunk(
-    request_kind: str, completion_id: str, created: int, model: str, finish_reason: str
-) -> ChatCompletionChunk | CompletionChunk:
-    if request_kind == "chat":
-        return ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=model,
-            choices=[
-                ChatCompletionChunkChoice(delta=ChatCompletionDelta(), finish_reason=finish_reason)
-            ],
-        )
-    return CompletionChunk(
-        id=completion_id,
-        created=created,
-        model=model,
-        choices=[CompletionChoice(text="", finish_reason=finish_reason)],
-    )
-
-
-def _sse(chunk: ChatCompletionChunk | CompletionChunk) -> str:
-    # exclude_none keeps delta chunks faithful to OpenAI's streaming shape — a role-only or
-    # finish-only chunk carries no null content key, so consumers concatenate deltas cleanly.
-    return f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
 
 
 def _template_token_ids(rendered: object) -> list[int]:
@@ -560,31 +382,6 @@ def _stop_sequences(stop: str | list[str] | None) -> list[str]:
                 400, f"each 'stop' sequence may be at most {_MAX_STOP_LENGTH} characters"
             )
     return sequences
-
-
-async def _finish_on_stop(
-    token_stream: AsyncIterator[TokenStreamItem],
-    metrics: ServerMetrics | None = None,
-    arrival: float | None = None,
-) -> None:
-    """Halt generation on a stop hit, then record it as a completed request.
-
-    Closing the async generator fires its ``finally``, which flags the stream aborted; the
-    background loop sees it at the next step boundary and calls ``engine.abort`` — freeing the
-    request's KV so no compute is spent past the stop. This reuses the exact disconnect path, so
-    a stop hit and a client disconnect halt the engine identically.
-
-    Because the consumer breaks out here, the async engine never sees this request reach a
-    ``finish_reason``, so its completion is counted *here* rather than in the stream wrapper —
-    otherwise a stop-truncated request would be served but vanish from the completed/latency
-    metrics, under-reporting successful traffic. (A genuine disconnect passes no ``metrics`` and
-    is therefore not counted as completed, which is correct: it never finished.)
-    """
-    await token_stream.aclose()
-    if metrics is not None:
-        metrics.requests_completed_total.inc(finish_reason="stop")
-        if arrival is not None:
-            metrics.request_latency_seconds.observe(time.perf_counter() - arrival)
 
 
 def _sampling_params(request: SamplingRequestBody | ResponsesRequest) -> SamplingParams:

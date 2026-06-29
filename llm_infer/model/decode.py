@@ -2,7 +2,7 @@
 
 No batching, no KV-cache — each step re-runs the full forward over the growing
 sequence and takes the argmax. Slow, but exact and obviously correct, which is the
-whole point of Phase A.
+whole point of oracle.
 """
 
 from __future__ import annotations

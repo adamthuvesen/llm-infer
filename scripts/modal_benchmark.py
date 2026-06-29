@@ -1,6 +1,6 @@
 """Modal A100 three-way benchmark: naive HF vs llm-infer vs vLLM, config fully pinned.
 
-Phase D evidence. Two GPU functions on the project's target A100-80GB:
+benchmark evidence. Two GPU functions on the project's target A100-80GB:
 
 * ``bench_engine_and_hf`` (flash-attn image, shared with the oracle) runs the two naive
   HF baselines and this engine's flash backend, then adjudicates cross-system token
@@ -191,11 +191,11 @@ def bench_engine_and_hf(
         collect_profile=profile,
     )
 
-    # The equivalence REFERENCE is the fp32 full-recompute oracle truth (Phase A), NOT bf16 HF
+    # The equivalence REFERENCE is the fp32 full-recompute oracle truth (oracle), NOT bf16 HF
     # generate. generate() itself diverges from truth at real margins (the documented step-32
     # case), so using it as the reference wrongly fails any backend that is *more* faithful to
     # fp32. Compute truth by running each UNIQUE prompt through the engine on the fp32 model —
-    # cached fp32 decode == fp32 full-recompute (Phase B), the same tokens at O(n) not O(n^2).
+    # cached fp32 decode == fp32 full-recompute (paged-cache), the same tokens at O(n) not O(n^2).
     fp32_model = QwenModel.load(dtype=torch.float32, device="cuda")
     truth_by_prompt: dict[tuple, list[int]] = {}
     for req in workload.requests:

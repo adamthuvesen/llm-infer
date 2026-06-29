@@ -1,6 +1,6 @@
-"""Phase D batch-correctness suite: N-way batching stays token-for-token correct.
+"""benchmark batch-correctness suite: N-way batching stays token-for-token correct.
 
-Phase B proved the two-request slice; the benchmark batches the whole case set at once, so
+paged-cache proved the two-request slice; the benchmark batches the whole case set at once, so
 this is the gate that the *full* batch the benchmark times is still exactly correct. Same
 ``torch_naive`` backend (materialized softmax, no fast kernel), so the bar is EXACT — a
 divergence is a batching/position/block bug, not FP noise. Two claims:

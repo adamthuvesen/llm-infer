@@ -40,10 +40,6 @@ class SamplingConfig:
     top_p: float
     seed: int
 
-    @property
-    def is_greedy(self) -> bool:
-        return self.temperature == 0.0
-
 
 @dataclass(frozen=True)
 class BenchRequest:
@@ -59,8 +55,8 @@ class Workload:
     """The full benchmark input every system runs, plus its provenance for the result.
 
     ``model_id``/``model_revision`` name the *served* weights — the pinned base for the
-    Phase D greedy benchmark, or a local merged-adapter path (revision ``None``) for the
-    Phase E rollout. ``sampling`` is ``None`` for greedy decoding and set for the rollout.
+    benchmark greedy benchmark, or a local merged-adapter path (revision ``None``) for the
+    rollout rollout. ``sampling`` is ``None`` for greedy decoding and set for the rollout.
     """
 
     requests: tuple[BenchRequest, ...]

@@ -8,7 +8,7 @@ is a swap validated by the same oracle.
 
 Two decode paths share one layer stack:
 
-* :meth:`logits` — full recompute over the whole sequence, no cache. The Phase A
+* :meth:`logits` — full recompute over the whole sequence, no cache. The oracle
   reference and the oracle's path; left bit-for-bit intact.
 * :meth:`prefill` / :meth:`prefill_chunk` / :meth:`decode_one` / :meth:`decode_tokens` —
   the paged/cached path. Prefill writes prompt K/V into the paged store, either all at once
@@ -20,6 +20,7 @@ Two decode paths share one layer stack:
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -29,6 +30,13 @@ from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+from llm_infer.model.layers import (
+    expand_grouped_kv,
+    linear_projection,
+    merge_attention_heads,
+    rope_tables_for_positions,
+    swiglu_mlp,
+)
 from llm_infer.model.rope_utils import apply_rope, rms_norm
 from llm_infer.profiling import TimingProfiler
 
@@ -80,8 +88,8 @@ class QwenModel:
         Defaults to the pinned base on fp32 CPU (where greedy tie-breaks near-vanish) and the
         ``torch_naive`` reference backend. Pass ``device="cuda"`` to place the weights on
         the GPU for the flash-attn backend; the CPU default keeps the reference path
-        bit-identical to Phase A/B. ``revision`` is ``None`` for a local ``model_id`` path
-        (the Phase E merged grpo-s0 weights), which carries no git revision.
+        bit-identical to oracle/cached. ``revision`` is ``None`` for a local ``model_id`` path
+        (the rollout merged grpo-s0 weights), which carries no git revision.
         """
         config = AutoConfig.from_pretrained(model_id, revision=revision)
         hf = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype)
@@ -98,7 +106,7 @@ class QwenModel:
     def logits(self, token_ids: list[int]) -> torch.Tensor:
         """Next-token logits for every position. Shape ``(seq_len, vocab_size)``.
 
-        Full recompute over the whole sequence — no cache. The Phase A reference path.
+        Full recompute over the whole sequence — no cache. The oracle reference path.
         """
         if not token_ids:
             raise ValueError("token_ids must be non-empty")
@@ -349,7 +357,7 @@ class QwenModel:
     def _attention(
         self, x: torch.Tensor, p: str, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
-        """Full-recompute attention over the whole sequence (Phase A path)."""
+        """Full-recompute attention over the whole sequence (oracle path)."""
         with self._profile("projections_mlp"):
             q, k, v = self._project_heads(x, p)
         q = apply_rope(q, cos, sin)
@@ -525,26 +533,33 @@ class QwenModel:
 
     def _expand_kv(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """GQA: repeat each KV head over its group of query heads (done before the backend)."""
-        repeat = self.num_heads // self.num_kv_heads
-        return k.repeat_interleave(repeat, dim=0), v.repeat_interleave(repeat, dim=0)
+        return expand_grouped_kv(
+            k,
+            v,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_axis=0,
+        )
 
     def _expand_kv_token_major(
         self, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """GQA for packed token-major histories: ``(tokens, kv_heads, head_dim)``."""
-        repeat = self.num_heads // self.num_kv_heads
-        return k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
+        return expand_grouped_kv(
+            k,
+            v,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_axis=1,
+        )
 
     def _output_proj(self, attn: torch.Tensor, p: str) -> torch.Tensor:
         """Merge heads ``(heads, seq, head_dim)`` -> ``(seq, hidden)`` and apply o_proj."""
-        seq_len = attn.shape[1]
-        merged = attn.transpose(0, 1).reshape(seq_len, self.num_heads * self.head_dim)
+        merged = merge_attention_heads(attn, num_heads=self.num_heads, head_dim=self.head_dim)
         return self._linear(merged, p + "self_attn.o_proj")
 
     def _mlp(self, x: torch.Tensor, p: str) -> torch.Tensor:
-        gate = self._linear(x, p + "mlp.gate_proj")
-        up = self._linear(x, p + "mlp.up_proj")
-        return self._linear(torch.nn.functional.silu(gate) * up, p + "mlp.down_proj")
+        return swiglu_mlp(self.w, x, p, self.dtype)
 
     def _linear(self, x: torch.Tensor, name: str) -> torch.Tensor:
         """``x @ Wᵀ (+ b)`` for the weight (and optional bias) stored under ``name``.
@@ -552,16 +567,11 @@ class QwenModel:
         Qwen2 carries a bias on the attention q/k/v projections and none elsewhere; the
         bias is applied only when the weight dict actually holds one.
         """
-        d = self.dtype
-        out = x @ self.w[name + ".weight"].to(d).T
-        bias = self.w.get(name + ".bias")
-        if bias is not None:
-            out = out + bias.to(d)
-        return out
+        return linear_projection(self.w, x, name, self.dtype)
 
     def _profile(self, name: str):
         if self.profiler is None:
-            return _NullTimer()
+            return nullcontext()
         return self.profiler.record(name)
 
     def _lm_head(self) -> torch.Tensor:
@@ -585,14 +595,9 @@ class QwenModel:
         Decode passes a single per-request position here so each request is rotated by
         its own sequence length, not a batch-row index.
         """
-        half = self.head_dim // 2
-        inv_freq = 1.0 / (
-            self.rope_theta
-            ** (torch.arange(0, half, dtype=torch.float32, device=self.device) / half)
+        return rope_tables_for_positions(
+            positions, head_dim=self.head_dim, rope_theta=self.rope_theta
         )
-        freqs = torch.outer(positions, inv_freq)  # (len, half)
-        emb = torch.cat([freqs, freqs], dim=-1)  # (len, head_dim)
-        return emb.cos(), emb.sin()
 
 
 def _rope_theta(config: object) -> float:
@@ -605,14 +610,6 @@ def _rope_theta(config: object) -> float:
     if params is not None:
         rope_type = params.get("rope_type", "default")
         if rope_type != "default":
-            raise ValueError(f"unsupported rope_type {rope_type!r}; Phase A handles 'default' only")
+            raise ValueError(f"unsupported rope_type {rope_type!r}; oracle handles 'default' only")
         return float(params["rope_theta"])
     return float(config.rope_theta)
-
-
-class _NullTimer:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *args: object) -> None:
-        return None

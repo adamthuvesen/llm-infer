@@ -9,8 +9,8 @@ property: a sampled request produces the **identical** sequence run alone or bat
 others (proved by the batched==serial-under-sampling test).
 
 ``temperature == 0`` is a hard special case that returns the argmax — token-for-token
-identical to :func:`greedy`, the path the Phase A/B greedy oracle already proves — so a
-greedy request stays exactly the proven path, with no RNG drawn. Penalties, temperature
+the path the oracle/cached greedy oracle already proves — so a greedy request stays exactly
+the proven path, with no RNG drawn. Penalties, temperature
 scaling, and the softmax run in fp32 regardless of model dtype, so sampling stays
 numerically stable under the bf16 weights it serves. The per-row order matches the
 standard decode surface: penalties → temperature → top-k → top-p → softmax → sample.
@@ -22,13 +22,6 @@ import math
 from dataclasses import dataclass
 
 import torch
-
-
-def greedy(logits: torch.Tensor) -> int:
-    """The argmax token id from a 1-D ``(vocab_size,)`` logit row."""
-    if logits.ndim != 1:
-        raise ValueError(f"expected 1-D logits, got shape {tuple(logits.shape)}")
-    return int(torch.argmax(logits).item())
 
 
 @dataclass(frozen=True)

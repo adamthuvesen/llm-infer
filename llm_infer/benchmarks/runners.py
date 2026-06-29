@@ -317,7 +317,7 @@ def run_vllm(
 ) -> RunResult:
     """vLLM offline generate, bf16, prefix caching off, flags pinned and recorded.
 
-    Greedy on the base weights for the Phase D benchmark; the rollout passes the merged
+    Greedy on the base weights for the benchmark benchmark; the rollout passes the merged
     grpo-s0 path as ``workload.model_id`` plus ``workload.sampling``. Either way vLLM runs
     bf16 — the model's native dtype. The ``vllm`` import is local so the rest of the benchmark
     loads on the flash image (which has no vLLM); this runner only runs on the vLLM image.
@@ -337,7 +337,7 @@ def run_vllm(
         max_model_len=max_model_len,
         tensor_parallel_size=1,
     )
-    # Greedy (Phase D) → temperature 0, one shared deterministic params. Rollout → the pinned
+    # Greedy (benchmark) → temperature 0, one shared deterministic params. Rollout → the pinned
     # temperature/top-p with a **per-completion seed** (base_seed + index): a *list* of params,
     # one per prompt, so the G completions of a prompt are independent draws, not G identical
     # copies under a single shared seed. n=1 because the G replication is already expanded into

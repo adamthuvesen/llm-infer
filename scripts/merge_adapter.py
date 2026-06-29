@@ -1,6 +1,6 @@
 """Merge the llm-rlvr-sql GRPO LoRA adapter into the base model, once, as a served artifact.
 
-Phase E serves a *merged* checkpoint so the engine stays LoRA-free: the llm-rlvr-sql GRPO run
+rollout serves a *merged* checkpoint so the engine stays LoRA-free: the llm-rlvr-sql GRPO run
 (`grpo-s0`, the shipped main result) saved a rank-32 PEFT LoRA adapter over the pinned base
 ``Qwen/Qwen2.5-Coder-3B-Instruct``. This script loads that base, applies the adapter with
 PEFT ``merge_and_unload``, and writes the merged bf16 weights to a Modal volume that the

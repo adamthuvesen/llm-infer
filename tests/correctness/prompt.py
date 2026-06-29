@@ -91,7 +91,7 @@ def build_cot_messages(
     """The llm-rlvr-sql ``cot`` chat messages with no few-shot exemplars.
 
     Mirrors ``build_messages(..., style="cot")`` with ``exemplars=()`` — the system
-    instruction followed by the single target user turn. Phase A fixtures use the
+    instruction followed by the single target user turn. oracle fixtures use the
     zero-shot path; few-shot exemplars are a later concern.
     """
     return [

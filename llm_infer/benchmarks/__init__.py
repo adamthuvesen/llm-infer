@@ -1,4 +1,4 @@
-"""Phase D evidence: the three-way benchmark (naive HF vs llm-infer vs vLLM).
+"""benchmark evidence: the three-way benchmark (naive HF vs llm-infer vs vLLM).
 
 The workload and report helpers are pure and CPU-importable; the per-system runners pull in
 torch/transformers (and, only inside ``run_vllm``, vLLM). The GPU runs live in

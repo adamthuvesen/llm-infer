@@ -14,6 +14,7 @@ from llm_infer.serving.server.app import create_app
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
 from llm_infer.serving.server.metrics import ServerMetrics
+from llm_infer.serving.server.webui import register_webui
 
 __all__ = [
     "AsyncInferenceEngine",
@@ -21,4 +22,5 @@ __all__ = [
     "ServerMetrics",
     "TokenStreamItem",
     "create_app",
+    "register_webui",
 ]

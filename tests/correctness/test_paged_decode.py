@@ -1,4 +1,4 @@
-"""Phase B correctness: the paged/cached/batched path reproduces the Phase A truth.
+"""paged-cache correctness: the paged/cached/batched path reproduces the oracle truth.
 
 Same model weights, same ``torch_naive`` backend (materialized softmax over gathered
 K/V — no fast kernel), so this must be EXACT. The four claims:

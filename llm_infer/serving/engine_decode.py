@@ -8,6 +8,7 @@ import torch
 
 from llm_infer.kv_cache.block_allocator import OutOfBlocksError
 from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row
 
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
 
 
-class EngineDecodeMixin:
+class EngineDecodeMixin(EngineMixinHost):
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
         if self.preemption:

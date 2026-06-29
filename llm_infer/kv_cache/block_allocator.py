@@ -47,7 +47,7 @@ class BlockAllocator:
     """Allocates and frees physical block ids from a fixed pool.
 
     Freed blocks return to the pool and are re-handed-out (LIFO) to later requests —
-    the reallocation path the Phase B vertical slice exercises when one request
+    the reallocation path the paged-cache vertical slice exercises when one request
     finishes and a queued one is admitted.
     """
 

@@ -9,7 +9,7 @@ across engines, since llm-infer and vLLM use different RNG). What *is* asserted 
   rejected loudly;
 * the integration bar — the engine driven entirely through ``SamplingParams(temperature=0)``
   (prefill + batched decode) reproduces the committed HF greedy goldens token-for-token. That
-  ties the per-row sampling code path back to the Phase A/B oracle.
+  ties the per-row sampling code path back to the oracle/cached oracle.
 
 CPU-runnable, fp32 — the same exact bar the greedy oracle holds.
 """
@@ -23,7 +23,7 @@ import pytest
 import torch
 
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
-from llm_infer.serving.sampler import _apply_top_p, greedy, sample_row
+from llm_infer.serving.sampler import _apply_top_p, sample_row
 
 GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
 FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -44,14 +44,14 @@ def test_temperature_zero_equals_argmax_per_row() -> None:
     for row in logits:
         token = sample_row(row, params, generated=[], generator=_gen())
         assert token.ndim == 0
-        assert int(token) == greedy(row) == int(torch.argmax(row).item())
+        assert int(token) == int(torch.argmax(row).item())
 
 
 def test_temperature_zero_breaks_ties_like_argmax() -> None:
-    """On an exact tie, temperature 0 picks the first max index, exactly as ``greedy``."""
+    """On an exact tie, temperature 0 picks the first max index, exactly as argmax."""
     logits = torch.tensor([1.0, 1.0, 0.5])
     token = sample_row(logits, SamplingParams(temperature=0.0), generated=[], generator=_gen())
-    assert int(token) == greedy(logits) == 0
+    assert int(token) == int(torch.argmax(logits).item()) == 0
 
 
 def test_top_p_truncates_to_the_nucleus() -> None:

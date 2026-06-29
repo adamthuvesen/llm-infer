@@ -1,4 +1,4 @@
-"""Phase D batched-decode correctness: the fused batch decode equals the serial path.
+"""benchmark batched-decode correctness: the fused batch decode equals the serial path.
 
 ``decode_many`` advances ``B`` running requests in one forward (the throughput win). It is
 correct only if each request gets *exactly* the token it would get decoded alone — same

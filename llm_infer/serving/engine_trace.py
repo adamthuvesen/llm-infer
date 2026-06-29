@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import torch
 
 from llm_infer.kv_cache.block_allocator import BlockPoolEvent
+from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 from llm_infer.tracing import FinishReason, TokenSource, TraceEvent, TraceEventName
 
@@ -14,7 +16,7 @@ if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
 
 
-class EngineTraceMixin:
+class EngineTraceMixin(EngineMixinHost):
     def _trace_decode_step(
         self,
         requests: list[Request],
@@ -124,18 +126,10 @@ class EngineTraceMixin:
 
     def _record_time(self, name: str):
         if self.profiler is None:
-            return _NullTimer()
+            return nullcontext()
         return self.profiler.record(name)
 
     def _record_host_time(self, name: str):
         if self.profiler is None:
-            return _NullTimer()
+            return nullcontext()
         return self.profiler.host(name)
-
-
-class _NullTimer:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *args: object) -> None:
-        return None

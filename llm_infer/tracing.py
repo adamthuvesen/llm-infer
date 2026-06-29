@@ -99,8 +99,5 @@ class TraceRecorder:
     def record(self, event: TraceEvent) -> None:
         self._events.append(event)
 
-    def to_dicts(self) -> list[dict[str, object]]:
-        return [event.to_dict() for event in self._events]
-
     def to_jsonl(self) -> str:
         return "\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in self._events)
