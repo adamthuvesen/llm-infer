@@ -1,4 +1,4 @@
-"""Prefill/decode admission and continuous batching (Phase B systems milestone)."""
+"""Prefill/decode admission and continuous batching."""
 
 from __future__ import annotations
 

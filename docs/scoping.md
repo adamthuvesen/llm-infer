@@ -59,15 +59,16 @@ One frozen workload replaying llm-rlvr-sql's *actual* inference call pattern (it
 
 Without this, the timing number won't connect to GRPO economics.
 
-## v1 non-goals (the scope firewall)
+## v1 non-goals (historical scope firewall)
 
-Explicitly **out** of v1 — naming them keeps the spec from quietly expanding:
+These were explicit **v1** out-of-scope items. Several are now implemented; this section
+is kept so old planning docs do not look like current truth:
 
-- no custom Triton/CUDA kernel · no quantization · no prefix caching · no chunked prefill
-- no OpenAI-compatible server · no streaming API · no multi-GPU
-- no production-readiness claim
+- ~~no prefix caching · no chunked prefill · no OpenAI-compatible server~~ — **done**
+- still out: custom Triton/CUDA kernel · quantization · multi-GPU · production-readiness claim
 
-**v1 continuous batching, narrowly:** at decode-step boundaries, finished requests leave and queued requests may enter. v1 does **not** require chunked prefill or mixed prefill/decode optimization.
+**Original v1 continuous batching (narrow):** at decode-step boundaries, finished requests
+leave and queued requests may enter. Chunked prefill and mixed prefill/decode are now implemented.
 
 ## Architecture (modular from day one; borrowed parts behind narrow adapters)
 
@@ -227,12 +228,10 @@ not yet have, in rough dependency order:
   token-for-token identity with the uninterrupted run; the visualizer renders the eviction and
   recompute resume, and the bundled fixture shows one. Default behavior (preemption off) is the
   unchanged strict-reservation scheduler.
-- **Serving depth** — streaming token output, an OpenAI-compatible endpoint, metrics, and a load
-  generator, so the engine is drivable as a real server rather than only through the frozen
-  harness. The release-defining piece — it turns the engine from a harness into something you
-  can `curl`.
-- **Sampling completeness** — top-k, repetition/frequency penalties, and stop-strings, to round
-  out the decode surface beyond greedy / temperature / top-p.
+- **Serving depth** *(done)* — OpenAI-compatible HTTP (`python -m llm_infer.serve`), streaming,
+  `/metrics`, and `scripts/loadgen.py`.
+- **Sampling completeness** *(partial)* — `top_k`, frequency/presence penalties, and HTTP-layer
+  stop strings are done; `repetition_penalty` and engine-level stop remain open.
 - **Expand *Keeping the GPU Busy*** — grow the writeup into a narration of the architecture and
   the honest dead-ends (the v2 ceiling and the decode-graph rejection above), so the doc
   teaches the engine, not just the one rollout number.
@@ -274,4 +273,4 @@ Anchored to $130 for GRPO+RLVR (~$1.5/hr spot). v1 retrains nothing — runs on 
 - FlexAttention path: flex-nano-vllm (github.com/changjonathanc/flex-nano-vllm).
 - Concepts: Inside vLLM anatomy (blog.vllm.ai/2025/09/05/anatomy-of-vllm.html); KV cache from scratch — Raschka (magazine.sebastianraschka.com/p/coding-the-kv-cache-in-llms).
 - Latency/quant reference: gpt-fast (github.com/pytorch-labs/gpt-fast).
-- Model: Qwen2.5-Coder-3B (huggingface.co/Qwen/Qwen2.5-Coder-3B).
+- Model: [Qwen2.5-Coder-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct).

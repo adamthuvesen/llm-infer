@@ -10,6 +10,7 @@ import torch
 
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
+from tests.support.fake_causal_lm import FakeCausalLMBase
 
 GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
 FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -17,7 +18,7 @@ EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
 CASE = FIXTURE["cases"][0]
 
 
-class CountingModel:
+class CountingModel(FakeCausalLMBase):
     """Small model-shaped object for proving engine scheduling without loading 3B weights."""
 
     def __init__(self) -> None:

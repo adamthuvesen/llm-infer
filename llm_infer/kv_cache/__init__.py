@@ -1,4 +1,4 @@
-"""Paged KV-cache: block allocator, per-request block tables, and the K/V store (Phase B)."""
+"""Paged KV-cache: block allocator, per-request block tables, and the K/V store."""
 
 from __future__ import annotations
 

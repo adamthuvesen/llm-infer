@@ -1,21 +1,4 @@
-"""The FastAPI app: OpenAI-shaped HTTP over an injected model runtime. Transport only.
-
-Built by :func:`create_app` around an injected engine + tokenizer, so tests, Qwen, and exported
-DenseBackbone bundles all use the same request path. The handlers tokenize
-(chat template for ``/v1/chat/completions``, raw encode for ``/v1/completions``), stream
-tokens off the one background batching loop, detokenize incrementally, and shape the result
-as OpenAI responses. No decoding logic lives here — token ids come straight from the engine.
-
-Sampling is **per request**: each request's ``temperature``/``top_p``/``top_k``/penalties/
-``seed`` are mapped to :class:`SamplingParams` and carried on its engine request, so concurrent
-clients each decode under their own params off the one shared batching loop.
-
-``stop`` sequences are an **output-text** stop layered here, where the text is available: the
-:class:`StopSequenceDetokenizer` truncates the output before the first stop string (never
-leaking it or anything after it, even across token boundaries under streaming), reports
-``finish_reason="stop"``, and we abort the engine request so no compute runs past the stop. The
-engine's token-level EOS / max-tokens stopping is untouched.
-"""
+"""OpenAI-shaped HTTP routes over an injected engine and tokenizer — transport only."""
 
 from __future__ import annotations
 
@@ -27,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from llm_infer.model.interface import TokenizerLike
 from llm_infer.serving.sampler import SamplingParams
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.metrics import ServerMetrics
@@ -64,7 +48,7 @@ _MAX_STOP_LENGTH = 256
 def create_app(
     *,
     async_engine: AsyncInferenceEngine,
-    tokenizer: object,
+    tokenizer: TokenizerLike,
     model_id: str,
     eos_token_ids: frozenset[int],
     metrics: ServerMetrics | None = None,

@@ -8,9 +8,10 @@ from llm_infer.benchmarks.runners import run_llm_infer
 from llm_infer.benchmarks.workload import BenchRequest, Workload
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from tests.support.fake_causal_lm import FakeCausalLMBase
 
 
-class TinyModel:
+class TinyModel(FakeCausalLMBase):
     """Small stand-in for QwenModel that exposes whether profiling is attached."""
 
     def __init__(self) -> None:

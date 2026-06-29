@@ -9,8 +9,13 @@ from pathlib import Path
 import torch
 
 from llm_infer.kernels.base import AttentionBackend
+from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
-from llm_infer.model.interface import ModelRuntime
+from llm_infer.model.interface import (
+    DENSE_CAPABILITIES,
+    BackendCapabilities,
+    ModelRuntime,
+)
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.qwen import QwenModel
 
@@ -106,6 +111,13 @@ def _load_qwen_runtime(
         model_id=resolved_model_id,
         revision=resolved_revision,
     )
+    resolved_backend = attention_backend or model.backend
+    capabilities = BackendCapabilities(
+        paged_kv=True,
+        prefix_caching=True,
+        speculative=True,
+        flash_attention=isinstance(resolved_backend, FlashAttnPagedAttention),
+    )
     eos_token_ids = _generation_eos_ids(
         model_id=resolved_model_id,
         revision=resolved_revision,
@@ -118,6 +130,7 @@ def _load_qwen_runtime(
         model=model,
         tokenizer=tokenizer,
         eos_token_ids=eos_token_ids,
+        capabilities=capabilities,
         metadata={
             "revision": resolved_revision,
             "source": "huggingface",
@@ -161,6 +174,7 @@ def _load_dense_runtime(
         model=model,
         tokenizer=tokenizer,
         eos_token_ids=_dense_eos_ids(manifest),
+        capabilities=DENSE_CAPABILITIES,
         metadata={
             "source": "llm-pretrain-export",
             "format": "llm_pretrain_dense_v1",

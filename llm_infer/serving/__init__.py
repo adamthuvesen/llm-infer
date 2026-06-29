@@ -1,11 +1,4 @@
-"""Request queue, per-request token sampling, and the continuous-batching decode loop.
-
-Phase B filled the minimal vertical-slice runner here (engine + request + greedy
-selection). Sampling is **per request**: each :class:`Request` carries its own
-:class:`SamplingParams` (temperature, top-p, top-k, presence/frequency penalties, seed) and
-draws from its own seeded generator, so a sampled request reproduces its tokens identically
-run alone or batched. Greedy stays the default and the proven oracle path.
-"""
+"""Request queue, per-request sampling, and the continuous-batching decode loop."""
 
 from __future__ import annotations
 

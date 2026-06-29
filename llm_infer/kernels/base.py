@@ -70,3 +70,19 @@ class AttentionBackend(Protocol):
             request ``i``'s output, identical to ``forward(queries[i:i+1]..., keys[i], values[i])``.
         """
         ...
+
+    def forward_decode_batch_packed(
+        self,
+        queries: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Batched decode over token-major packed K/V histories.
+
+        ``key``/``value`` are ``(total_kv_tokens, num_heads, head_dim)``; ``cu_seqlens_k``
+        indexes each request's ragged history. Default backends split and delegate to
+        :meth:`forward_decode_batch`.
+        """
+        ...

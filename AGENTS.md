@@ -1,9 +1,9 @@
 # AGENTS.md — llm-infer
 
 A minimal, honest paged LLM inference engine with pluggable model backends. Qwen2.5-Coder
-is the pinned HF-oracle backend; exported llm-pretrain DenseBackbone bundles are a sibling
-backend. Full scope and build order live in [`docs/scoping.md`](docs/scoping.md). Read it
-before proposing work.
+is the pinned HF-oracle backend; exported llm-pretrain DenseBackbone bundles are a
+correctness-only sibling backend. Full scope and build order live in [`docs/scoping.md`](docs/scoping.md).
+Read it before proposing work.
 
 ## Core doctrine: the correctness oracle comes first
 
@@ -19,8 +19,11 @@ divergence traced to a numerical tie and documented.
 - `qwen`: `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
   `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the **Instruct** variant and its
   chat template. Plain `-3B` is a different model and would invalidate the Qwen oracle.
-- `dense`: `llm_pretrain_dense_v1` export bundles from `llm-pretrain`, loaded from
-  `manifest.json`, `config.json`, `tokenizer.json`, and `weights.pt`.
+  Full paged KV, prefix caching, speculative decode, preemption, and flash-attn.
+- `dense`: `llm_pretrain_dense_v1` export bundles from `llm-pretrain`. Correctness bridge
+  only — full recompute through the engine API, no real paged KV. Rejects prefix caching,
+  speculative decode, and preemption at init/add_request. See `BackendCapabilities` in
+  `llm_infer/model/interface.py`.
 
 Qwen's default pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
 Backend selection lives in `llm_infer/model/runtime.py`.
@@ -29,52 +32,47 @@ Backend selection lives in `llm_infer/model/runtime.py`.
 
 ```
 llm_infer/
-  model/        # backend interface/registry, Qwen backend, DenseBackbone bundle backend [A,B]
-  kernels/      # AttentionBackend protocol, torch_naive reference, flash_attn_paged     [A,C]
-  kv_cache/     # block allocator, block tables, paged page store                        [B]
-  scheduler/    # prefill/decode admission, continuous batching                          [B]
-  serving/      # request queue, greedy sampler, continuous-batching decode loop         [B]
-  benchmarks/   # naive HF vs llm-infer vs vLLM                                          [Phase D]
-tests/correctness/   # the HF-exact greedy oracle + committed golden fixtures + the flash tie bar
-docs/                # scoping.md (source of truth for scope) + architecture.md + fixture-format spec
-scripts/             # golden generation + the Modal A100 flash oracle harness
+  model/        # backend interface/registry, Qwen, DenseBackbone loader, rope utils
+  kernels/      # AttentionBackend protocol, torch_naive reference, flash_attn_paged
+  kv_cache/     # block allocator, block tables, paged page store
+  scheduler/    # prefill/decode admission, continuous batching, optional preemption
+  serving/      # InferenceEngine step loop, sampler, OpenAI HTTP server, metrics
+  benchmarks/   # shared workload + runners (Modal harnesses in scripts/)
+tests/correctness/   # HF-exact greedy oracle + batch/prefix/preemption/speculative suites
+docs/                # scoping.md, architecture.md, fixture-format.md, benchmark.md
+scripts/             # generate_goldens, modal_oracle, modal_benchmark, modal_rollout,
+                     # merge_adapter, build_rollout_fixture, loadgen, kv trace fixture
+visualizer/          # schema-v3 KV trace replay UI
 ```
 
-Implemented: `model/`, `kernels/`, `kv_cache/`, `scheduler/`, `serving` (OpenAI-compatible
-routes, streaming, metrics, loadgen), `benchmarks`, and the correctness oracles.
+Implemented through Phases A–E plus prefix caching, chunked prefill, speculative decode v1,
+request preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/loadgen.
 
-## The honesty bar (Phase A)
+## The honesty bar
 
 Exact token ids on the single-request unit path is the bar. bf16 greedy can diverge
 from HF on a genuine tie-break step; that is acceptable **only** when each divergence
 is traced to a numerical tie (logits equal within tolerance) and documented — never
 waved off as "close enough." The oracle runs in **fp32** by default, where ties
-near-vanish. See `docs/fixture-format.md`.
-
-## Scope firewall — NOT in Phase A
-
-No paged KV-cache, no scheduler/continuous batching, no flash-attn or any fast
-kernel, no batch-correctness suite, no benchmarks, no vLLM comparison, no llm-rlvr-sql
-rollout hook, no LoRA, no quantization, no server/streaming, no multi-GPU. If a
-change touches these, it belongs to a later phase.
+near-vanish. See `docs/fixture-format.md`. A backend that fails the oracle reports no tok/s.
 
 ## Development
 
 Managed with [`uv`](https://docs.astral.sh/uv/). Python 3.11+.
 
 ```bash
-uv sync --extra dev          # create .venv and install deps
-uv run ruff check            # lint (must be clean)
-uv run pytest tests/correctness -q   # the oracle (runs against committed goldens)
+uv sync --extra dev --extra serving   # dev tests + HTTP server deps
+uv run ruff check                     # lint (must be clean)
+uv run pytest tests/correctness -q    # fast CPU oracle gate (slow 3B oracles deselected)
+uv run pytest -q                      # full fast suite before merge
+uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU oracle
 ```
 
-The CPU oracle is the local gate and is **CPU-runnable by design**: the
-`torch_naive` reference path runs against small committed golden token-id fixtures
-and needs no GPU. Regenerating goldens loads the 3B model in fp32 on CPU — fine for a
-few short greedy generations. The flash-attn backend is the **one** GPU-only path:
-flash-attn needs a CUDA build, so its oracle (`tests/correctness/test_flash_attn_paged.py`,
-auto-skipped off CUDA) runs on the target GPU via `scripts/modal_oracle.py`. Keep
-Modal runs short — the flash oracle is a few seconds on an A100.
+The local gate is **CPU-runnable by design** — no GPU required, and the slow 3B
+oracles are opt-in because they load the pinned Qwen model and can take minutes on CPU.
+The flash-attn backend is GPU-only; its oracle runs on the target GPU via
+`scripts/modal_oracle.py`. Benchmark and rollout harnesses use Modal A100-80GB
+(`scripts/modal_benchmark.py`, `scripts/modal_rollout.py`).
 
 ## Conventions
 

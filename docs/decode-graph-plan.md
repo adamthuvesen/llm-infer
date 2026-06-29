@@ -1,5 +1,15 @@
 # Decode Graph Execution Plan
 
+> **Historical — measured dead-end. Do not implement.** The static decode-graph / 32-slot
+> bucket path was built and rejected: slower than eager (256 vs 299 tok/s) and it shifted
+> sampled token counts (3036 vs 3026). See [`docs/scoping.md`](scoping.md) § "Measured dead-end".
+
+This document is kept for context only.
+
+---
+
+# Decode Graph Execution Plan (archived)
+
 This is the design-first tranche after the local speed loop reached a clean best of
 365.8 tok/s on the frozen llm-rlvr-sql rollout. It deliberately does not implement CUDA
 graphs, a new scheduler, or a new kernel. The goal is to make the next implementation

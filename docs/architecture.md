@@ -120,7 +120,7 @@ flowchart TB
 
 | Module | Owns | Does NOT own |
 |---|---|---|
-| [`model/`](../llm_infer/model/) | Backend protocol/registry, Qwen2 forward, DenseBackbone bundle loader, backend-independent greedy decode | Scheduling, block allocation, token sampling policy |
+| [`model/`](../llm_infer/model/) | Backend protocol/registry, capabilities, Qwen2 forward, DenseBackbone loader | Scheduling, block allocation, token sampling policy |
 | [`kernels/`](../llm_infer/kernels/) | Causal scaled dot-product attention only (`softmax(QKᵀ/√d)V`) | RoPE, GQA expansion, paging — caller prepares tensors ([`base.py`](../llm_infer/kernels/base.py)) |
 | [`kv_cache/`](../llm_infer/kv_cache/) | Physical K/V tensor pool, block ids, scatter/gather | Attention math, admission policy |
 | [`scheduler/`](../llm_infer/scheduler/) | Waiting queue, running set, **block budget reservation** | Physical block allocation (lazy via `BlockTable.reserve`) |
@@ -152,6 +152,17 @@ code.
   [`block_table.py`](../llm_infer/kv_cache/block_table.py)).
 - llm-rlvr-sql prompts are a **verbatim copy** in [`tests/correctness/prompt.py`](../tests/correctness/prompt.py),
   not an import — goldens freeze on exact bytes.
+- **`dense` backend limits** are enforced via `BackendCapabilities` on `ModelRuntime` and
+  `InferenceEngine` — no prefix caching, speculative decode, or preemption on the recompute path.
+
+### Paging defaults (intentional mismatch)
+
+| Context | `block_size` | Source |
+|---|---|---|
+| Demo HTTP server | 64 | [`llm_infer/serve.py`](../llm_infer/serve.py) |
+| Benchmarks / Modal rollout | 128 | [`llm_infer/benchmarks/runners.py`](../llm_infer/benchmarks/runners.py) |
+
+Do not unify without re-benchmarking — both values are pinned in their respective harnesses.
 
 ---
 
@@ -529,11 +540,8 @@ GRPO rollout economics.
   ([`tests/correctness/tie_tolerance.py`](../tests/correctness/tie_tolerance.py))?
 - Where is the biggest gap to vLLM — kernel, scheduler, or lack of CUDA graphs
   ([`docs/keeping-the-gpu-busy.md`](keeping-the-gpu-busy.md))?
-- Where should request-aware block lifecycle tracing hook into
-  [`block_table.py`](../llm_infer/kv_cache/block_table.py) and
-  [`paged_kv_cache.py`](../llm_infer/kv_cache/paged_kv_cache.py)?
 - How do rollout fixtures differ from benchmark goldens
   ([`rollout_grpo_s0_spider_dev.json`](../tests/fixtures/rollout_grpo_s0_spider_dev.json) vs
   [`goldens/`](../tests/correctness/goldens/))?
-- What would Phase F (OpenAI-compatible serving) require on top of
-  [`InferenceEngine`](../llm_infer/serving/engine.py)?
+- What would bringing the dense backend onto the real paged-KV path require in
+  [`pretrain_bundle.py`](../llm_infer/model/pretrain_bundle.py)?

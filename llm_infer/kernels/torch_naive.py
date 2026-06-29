@@ -67,6 +67,21 @@ class TorchNaiveAttention:
         ]
         return torch.stack(outs, dim=0)
 
+    def forward_decode_batch_packed(
+        self,
+        queries: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Split packed histories and run the reference per-request decode loop."""
+        del max_seqlen_k
+        lengths = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).tolist()
+        keys = [chunk.transpose(0, 1).contiguous() for chunk in key.split(lengths)]
+        values = [chunk.transpose(0, 1).contiguous() for chunk in value.split(lengths)]
+        return self.forward_decode_batch(queries, keys, values)
+
 
 def _causal_mask(q_len: int, kv_len: int, device: torch.device) -> torch.Tensor:
     """Additive mask: 0 where attention is allowed, -inf where it is forbidden.

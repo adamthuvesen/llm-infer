@@ -12,9 +12,10 @@ from llm_infer.serving import (
     SamplingParams,
     SpeculativeDecodingConfig,
 )
+from tests.support.fake_causal_lm import FakeCausalLMBase
 
 
-class ScriptedModel:
+class ScriptedModel(FakeCausalLMBase):
     """Model-shaped object whose greedy path follows a per-prompt token script."""
 
     def __init__(self, scripts: dict[tuple[int, ...], list[int]]) -> None:
@@ -96,6 +97,9 @@ class ScriptedModel:
             logits.append(self._logits(state.next_token()))
         return torch.stack(logits)
 
+    def release_table(self, table: BlockTable) -> None:
+        self._states.pop(id(table), None)
+
     def _sync(self, table: BlockTable) -> _ScriptedState:
         state = self._states[id(table)]
         prompt_len = len(state.prompt_ids)
@@ -127,7 +131,7 @@ class _ScriptedState:
         return self.script[self.cached_generated]
 
 
-class NoSpecVerifierModel:
+class NoSpecVerifierModel(FakeCausalLMBase):
     """Small prefix/chunk model that fails if speculative verification is called."""
 
     def __init__(self) -> None:

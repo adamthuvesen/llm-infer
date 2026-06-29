@@ -1,31 +1,4 @@
-"""Bridge the synchronous step loop to asyncio so one batching loop serves many clients.
-
-The engine's ``step()`` runs a model forward; that must never run on the asyncio event
-loop or it would stall every other connection. So the forward stays on a dedicated
-**background thread** that owns the engine exclusively, and HTTP handlers talk to it
-through two queues:
-
-* a thread-safe **submission queue** the handlers push new requests onto, drained at the
-  top of each step (so a request that arrives mid-step is admitted next step, exactly the
-  continuous-batching behavior we want);
-* one **per-request asyncio queue** the loop pushes generated tokens onto, via
-  ``loop.call_soon_threadsafe`` so the push lands on the event loop thread. A handler
-  ``async for``-s its own queue, fully concurrent with every other handler — many clients
-  stream off the single ``step()`` loop, which is the whole point.
-
-Cancellation is cooperative: a disconnected client sets the stream's abort flag; the loop
-sees it at the next step boundary, finishes the engine request cleanly, and frees its KV.
-The loop is the *only* thread that touches the engine, so there are no locks on engine
-state — just the two queue boundaries.
-
-Slow-consumer policy (deliberate, not an oversight): the per-request queue is unbounded, but a
-request emits at most ``max_new_tokens`` tokens before it finishes, so its queue is bounded by
-that — there is no unbounded growth. A consumer that reads slowly does **not** throttle the
-engine; the loop runs the request to completion and the tokens wait in the queue. A consumer
-that goes away entirely is the cancellation path above (its KV is freed promptly). True
-cross-thread backpressure — pausing decode for a live-but-slow reader — is out of scope for this
-engine; the bound above keeps memory finite without it.
-"""
+"""Run InferenceEngine.step on a background thread; handlers stream per-request tokens."""
 
 from __future__ import annotations
 

@@ -31,6 +31,7 @@ def build_app_from_runtime(
         block_size=block_size,
         num_blocks=num_blocks,
         device=device,
+        capabilities=runtime.capabilities,
     )
     metrics = ServerMetrics()
     async_engine = AsyncInferenceEngine(engine, metrics=metrics)

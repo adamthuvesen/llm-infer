@@ -10,9 +10,10 @@ from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving import InferenceEngine, Request
+from tests.support.fake_causal_lm import FakeCausalLMBase
 
 
-class ChunkedModel:
+class ChunkedModel(FakeCausalLMBase):
     """Small model-shaped object for proving engine scheduling without loading 3B weights."""
 
     def __init__(self) -> None:

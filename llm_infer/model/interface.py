@@ -14,6 +14,31 @@ from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.profiling import TimingProfiler
 
 
+@dataclass(frozen=True)
+class BackendCapabilities:
+    """Feature flags for a loaded backend — engine rejects unsupported combos up front."""
+
+    paged_kv: bool
+    prefix_caching: bool
+    speculative: bool
+    flash_attention: bool
+
+
+QWEN_CAPABILITIES = BackendCapabilities(
+    paged_kv=True,
+    prefix_caching=True,
+    speculative=True,
+    flash_attention=False,
+)
+
+DENSE_CAPABILITIES = BackendCapabilities(
+    paged_kv=False,
+    prefix_caching=False,
+    speculative=False,
+    flash_attention=False,
+)
+
+
 class CausalLMBackend(Protocol):
     """Minimal causal-LM surface the scheduler/serving stack needs."""
 
@@ -57,6 +82,17 @@ class CausalLMBackend(Protocol):
     ) -> torch.Tensor:
         """Append one token per request and return one logits row per request."""
 
+    def decode_tokens(
+        self,
+        cache: PagedKVCache,
+        table: BlockTable,
+        token_ids: list[int] | torch.Tensor,
+    ) -> torch.Tensor:
+        """Verify a token prefix in one cached forward; one logits row per input token."""
+
+    def release_table(self, table: BlockTable) -> None:
+        """Release backend-specific per-table state when a block table is freed."""
+
 
 class TokenizerLike(Protocol):
     """Tokenizer methods used by the OpenAI-compatible server."""
@@ -86,5 +122,6 @@ class ModelRuntime:
     model: CausalLMBackend
     tokenizer: TokenizerLike
     eos_token_ids: frozenset[int]
+    capabilities: BackendCapabilities
     metadata: dict[str, object] = field(default_factory=dict)
     bundle_path: Path | None = None

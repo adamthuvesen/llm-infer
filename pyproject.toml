@@ -38,6 +38,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not slow'"
 markers = [
     "slow: loads the 3B model and runs a forward pass (CPU-runnable but heavy)",
 ]

@@ -8,8 +8,7 @@ without ever re-running HF.
 
 HF truth is computed by **full-recompute greedy** — one ``forward`` over the whole
 sequence per step, ``argmax``, append — *not* ``model.generate``. This matches the
-llm-infer engine's algorithm class exactly (the Phase A engine has no KV-cache and
-recomputes the full sequence each step). ``generate`` runs a fused/cached attention
+llm-infer unit oracle's full-recompute algorithm class. ``generate`` runs a fused/cached attention
 kernel whose fp32 reduction order differs from token-by-token recompute; on a genuine
 near-tie step those two HF paths themselves pick different tokens, so pinning the
 oracle to ``generate`` would test "do you replicate HF's kernel fusion," not "do you

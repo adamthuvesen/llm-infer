@@ -30,9 +30,9 @@ synthetic microbench. (Serving llm-rlvr-sql rollouts is a fun applied benchmark,
 
 The engine itself is the goal — a small, legible paged inference engine to learn from and show.
 Speed and the llm-rlvr-sql hook are the fun side-quest. The forward plan is **engine-first**:
-block-lifecycle trace hooks → request preemption/eviction (done) → serving depth (streaming + an
-OpenAI-compatible endpoint) → sampling completeness → an architecture writeup, with quantization
-as a later speed lever.
+sampling completeness (partial — see [`docs/scoping.md`](docs/scoping.md)) → expand
+*Keeping the GPU Busy* → quantization as a later speed lever. Serving, preemption, prefix
+caching, chunked prefill, speculative decode v1, and the KV trace visualizer are **done**.
 The decode-graph / static-bucket idea was built and rejected (a measured dead-end — see
 [`docs/scoping.md`](docs/scoping.md)). See [`docs/scoping.md`](docs/scoping.md) for the
 full plan and non-goals.
@@ -170,9 +170,12 @@ legibility**. Speed is a side-quest with its own track, last.
 uv sync --extra dev
 uv run ruff check
 uv run pytest tests/correctness -q
+uv run pytest tests/correctness -q -m slow  # optional 3B CPU oracle
 ```
 
-The CPU oracle is the local gate and needs no GPU — it checks committed golden token ids.
+The default local gate needs no GPU and keeps the slow 3B CPU oracles deselected; those
+oracles load the pinned Qwen model and are available with `-m slow` when you need the full
+HF-golden check.
 The flash-attn backend is the one GPU-only path; its oracle runs on the target GPU via
 `scripts/modal_oracle.py`. The benchmark and rollout harnesses (`scripts/modal_benchmark.py`,
 `scripts/modal_rollout.py`) run on Modal A100-80GB. Regenerating goldens
@@ -287,9 +290,10 @@ llm_infer_ttft_seconds_bucket{le="0.25"} 14
 ### Load generator
 
 `scripts/loadgen.py` fires N concurrent requests at a running server's OpenAI endpoint
-(async `httpx`, streaming by default) and reports per-request and aggregate tokens/s, TTFT
-(p50/p99), end-to-end latency (p50/p99), total throughput, and an error count — the numbers
-that make continuous batching visible under load.
+(async `httpx`, streaming by default) and reports TTFT (p50/p99), end-to-end latency
+(p50/p99), and an aggregate output rate. In **streaming** mode the rate is **deltas/s** (SSE
+content chunks), not tokens/s — see `scripts/loadgen.py` for why. Use `--no-stream` for
+blocking calls where usage block token counts are available.
 
 ```bash
 uv run python scripts/loadgen.py \

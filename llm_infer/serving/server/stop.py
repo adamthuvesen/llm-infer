@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from llm_infer.model.interface import TokenizerLike
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
 
 
@@ -46,7 +47,7 @@ class StopSequenceDetokenizer:
     when a stop straddles token or chunk boundaries.
     """
 
-    def __init__(self, tokenizer: object, stop: list[str]) -> None:
+    def __init__(self, tokenizer: TokenizerLike, stop: list[str]) -> None:
         # Empty stop strings can never match meaningfully (and a 0-length hold-back is a no-op),
         # so drop them; the server validates the count/length before we get here.
         self._stop = [s for s in stop if s]

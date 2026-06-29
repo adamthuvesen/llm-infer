@@ -1,22 +1,4 @@
-"""A tiny hand-rolled Prometheus registry — counters, gauges, histograms, and a renderer.
-
-No ``prometheus_client`` dependency: the exposition format is a few lines of text, and a
-serving demo does not need a metrics library's full surface. Three instrument types cover
-what this server reports:
-
-* :class:`Counter` — monotonically increasing totals (requests, tokens, preemptions), with
-  optional label sets (``finish_reason``) tracked as separate child series.
-* :class:`Gauge` — a point-in-time value read from a callback at scrape time, so KV-pool and
-  scheduler gauges reflect real engine state the instant ``/metrics`` is hit, never a stale
-  copy pushed on some earlier event.
-* :class:`Histogram` — cumulative bucket counts plus sum/count, for latency distributions
-  (time-to-first-token, end-to-end). Buckets are explicit upper bounds in seconds.
-
-Every value rendered here is read from real server/engine state; nothing is fabricated. The
-counters are incremented at the request/token choke points, and the gauges pull live numbers
-off the engine when scraped. :func:`Registry.render` emits the standard ``# HELP`` / ``# TYPE``
-text exposition so ``curl /metrics`` is scrapeable by a real Prometheus.
-"""
+"""Hand-rolled Prometheus counters, gauges, and histograms for ``GET /metrics``."""
 
 from __future__ import annotations
 

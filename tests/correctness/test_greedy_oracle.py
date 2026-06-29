@@ -7,8 +7,8 @@ must produce the identical token ids. No re-running HF: the goldens are the froz
 HF truth (regenerate with ``scripts/generate_goldens.py``).
 
 The model load is module-scoped (one 3B fp32 load for the whole suite) and marked
-``slow`` so it can be deselected, but it is part of the default ``tests/correctness``
-run — the oracle is the gate.
+``slow`` so the default local gate stays quick. Run this suite explicitly with
+``uv run pytest tests/correctness -q -m slow`` when the full 3B oracle is needed.
 """
 
 from __future__ import annotations

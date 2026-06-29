@@ -14,11 +14,13 @@ emits broken UTF-8.
 
 from __future__ import annotations
 
+from llm_infer.model.interface import TokenizerLike
+
 
 class IncrementalDetokenizer:
     """Decode an append-only token stream into UTF-8-safe text deltas, one request's worth."""
 
-    def __init__(self, tokenizer: object) -> None:
+    def __init__(self, tokenizer: TokenizerLike) -> None:
         self._tokenizer = tokenizer
         self._token_ids: list[int] = []
         self._emitted_len = 0

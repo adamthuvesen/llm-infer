@@ -9,9 +9,10 @@ import torch
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.tracing import TRACE_SCHEMA_VERSION, TraceRecorder
+from tests.support.fake_causal_lm import FakeCausalLMBase
 
 
-class TraceModel:
+class TraceModel(FakeCausalLMBase):
     """Small model-shaped object that writes real KV rows while producing scripted logits."""
 
     def __init__(self) -> None:

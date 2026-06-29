@@ -29,6 +29,7 @@ from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+from llm_infer.model.rope_utils import apply_rope, rms_norm
 from llm_infer.profiling import TimingProfiler
 
 # The closure each decoder layer calls for its attention block: (x, prefix, layer) -> out.
@@ -111,7 +112,7 @@ class QwenModel:
             )
 
         with self._profile("logits"):
-            hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return hidden @ self._lm_head().T
 
     @torch.no_grad()
@@ -143,7 +144,7 @@ class QwenModel:
         table.length = seq_len
 
         with self._profile("logits"):
-            last = _rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
+            last = rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
             return (last @ self._lm_head().T)[-1]
 
     @torch.no_grad()
@@ -196,7 +197,7 @@ class QwenModel:
         table.length = end_pos
 
         with self._profile("logits"):
-            last = _rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
+            last = rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
             return (last @ self._lm_head().T)[-1]
 
     @torch.no_grad()
@@ -230,7 +231,7 @@ class QwenModel:
         table.length = new_length
 
         with self._profile("logits"):
-            hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return (hidden @ self._lm_head().T)[-1]
 
     @torch.no_grad()
@@ -280,7 +281,7 @@ class QwenModel:
             table.length = new_length
 
         with self._profile("logits"):
-            hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return hidden @ self._lm_head().T  # (B, vocab)
 
     @torch.no_grad()
@@ -320,8 +321,12 @@ class QwenModel:
         table.length = end_pos
 
         with self._profile("logits"):
-            hidden = _rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return hidden @ self._lm_head().T
+
+    def release_table(self, table: BlockTable) -> None:
+        """No-op — real K/V lives in the paged cache, not per-table backend state."""
+        del table
 
     def _apply_decoder_layer(
         self, hidden: torch.Tensor, layer: int, attention: _AttentionFn
@@ -333,11 +338,11 @@ class QwenModel:
         """
         p = f"model.layers.{layer}."
         residual = hidden
-        x = _rms_norm(hidden, self.w[p + "input_layernorm.weight"], self.rms_eps)
+        x = rms_norm(hidden, self.w[p + "input_layernorm.weight"], self.rms_eps)
         hidden = residual + attention(x, p, layer)
 
         residual = hidden
-        x = _rms_norm(hidden, self.w[p + "post_attention_layernorm.weight"], self.rms_eps)
+        x = rms_norm(hidden, self.w[p + "post_attention_layernorm.weight"], self.rms_eps)
         with self._profile("projections_mlp"):
             return residual + self._mlp(x, p)
 
@@ -347,8 +352,8 @@ class QwenModel:
         """Full-recompute attention over the whole sequence (Phase A path)."""
         with self._profile("projections_mlp"):
             q, k, v = self._project_heads(x, p)
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
         with self._profile("gqa_expand"):
             k, v = self._expand_kv(k, v)
         with self._profile("attention"):
@@ -374,8 +379,8 @@ class QwenModel:
         """
         with self._profile("projections_mlp"):
             q, k, v = self._project_heads(x, p)
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
         # Store pre-GQA K/V as (seq, num_kv_heads, head_dim) at positions 0..seq-1.
         with self._profile("kv_write"):
             cache.write(
@@ -403,8 +408,8 @@ class QwenModel:
         """Chunked prefill attention over cached prefix plus the current prompt chunk."""
         with self._profile("projections_mlp"):
             q, k, v = self._project_heads(x, p)
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
         with self._profile("kv_write"):
             cache.write(
                 table,
@@ -442,8 +447,8 @@ class QwenModel:
         """
         with self._profile("projections_mlp"):
             q, k, v = self._project_heads(x, p)
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
         with self._profile("kv_write"):
             cache.write(
                 table, layer, pos, k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous()
@@ -480,8 +485,8 @@ class QwenModel:
         with self._profile("projections_mlp"):
             q, k, v = self._project_heads(x, p)
         # q/k/v shapes: (heads, B, hd), (kv_heads, B, hd), (kv_heads, B, hd).
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
 
         with self._profile("kv_write"):
             cache.write_many(
@@ -499,20 +504,9 @@ class QwenModel:
             k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
 
         with self._profile("attention"):
-            packed_forward = getattr(self.backend, "forward_decode_batch_packed", None)
-            if packed_forward is not None:
-                attn = packed_forward(
-                    queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
-                )
-            else:
-                keys: list[torch.Tensor] = []
-                values: list[torch.Tensor] = []
-                for k_chunk, v_chunk in zip(
-                    k_exp.split(read_plan.lengths), v_exp.split(read_plan.lengths), strict=True
-                ):
-                    keys.append(k_chunk.transpose(0, 1).contiguous())
-                    values.append(v_chunk.transpose(0, 1).contiguous())
-                attn = self.backend.forward_decode_batch(queries, keys, values)
+            attn = self.backend.forward_decode_batch_packed(
+                queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
+            )
         with self._profile("projections_mlp"):
             return self._output_proj(attn.transpose(0, 1).contiguous(), p)  # (B, hidden)
 
@@ -614,29 +608,6 @@ def _rope_theta(config: object) -> float:
             raise ValueError(f"unsupported rope_type {rope_type!r}; Phase A handles 'default' only")
         return float(params["rope_theta"])
     return float(config.rope_theta)
-
-
-def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """RMSNorm in fp32, matching Qwen2 (normalize in fp32, then cast back, then scale)."""
-    dtype = x.dtype
-    xf = x.float()
-    variance = xf.pow(2).mean(dim=-1, keepdim=True)
-    xf = xf * torch.rsqrt(variance + eps)
-    return (weight.to(torch.float32) * xf).to(dtype)
-
-
-def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Rotary position embedding, the HF Qwen2 (rotate-half) layout.
-
-    ``x`` is ``(heads, seq, head_dim)``; ``cos``/``sin`` are ``(seq, head_dim)`` and
-    broadcast across heads.
-    """
-    cos = cos.to(x.dtype).unsqueeze(0)
-    sin = sin.to(x.dtype).unsqueeze(0)
-    half = x.shape[-1] // 2
-    x1, x2 = x[..., :half], x[..., half:]
-    rotated = torch.cat([-x2, x1], dim=-1)
-    return x * cos + rotated * sin
 
 
 class _NullTimer:

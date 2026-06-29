@@ -23,9 +23,15 @@ NUM_HEADS = 2
 NUM_KV_HEADS = 1
 
 
-def _write_tiny_bundle(root: Path, *, qk_norm: bool = False) -> Path:
+def _write_tiny_bundle(
+    root: Path,
+    *,
+    qk_norm: bool = False,
+    logit_soft_cap: float | None = 7.5,
+) -> Path:
     bundle = root / "tiny_pretrain_bundle"
-    bundle.mkdir()
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    bundle.mkdir(exist_ok=True)
     (bundle / "manifest.json").write_text(
         json.dumps(
             {
@@ -50,11 +56,14 @@ def _write_tiny_bundle(root: Path, *, qk_norm: bool = False) -> Path:
                 "tie_embeddings": True,
                 "qk_norm": qk_norm,
                 "z_loss_weight": 1e-4,
-                "logit_soft_cap": 7.5,
             }
         ),
         encoding="utf-8",
     )
+    if logit_soft_cap is not None:
+        config = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
+        config["logit_soft_cap"] = logit_soft_cap
+        (bundle / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (bundle / "tokenizer.json").write_text(
         json.dumps(
             {
@@ -249,7 +258,7 @@ def test_dense_bundle_chunked_prefill_uses_same_logits(tmp_path: Path) -> None:
 
 
 def test_qk_norm_loads_and_affects_logits(tmp_path: Path) -> None:
-    bundle = _write_tiny_bundle(tmp_path, qk_norm=True)
+    bundle = _write_tiny_bundle(tmp_path, qk_norm=True, logit_soft_cap=None)
     state_dict = torch.load(bundle / "weights.pt", weights_only=True)["state_dict"]
     model = PretrainBundleModel.load(bundle)
 
@@ -340,7 +349,7 @@ def test_rejects_malformed_weight_shapes(tmp_path: Path) -> None:
 
 
 def test_logits_match_tiny_golden_tensor(tmp_path: Path) -> None:
-    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path))
+    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path, logit_soft_cap=None))
 
     logits = model.logits([1, 4, 7])
 
@@ -367,7 +376,6 @@ def test_logits_match_tiny_golden_tensor(tmp_path: Path) -> None:
 def test_greedy_generation_for_token_ids(tmp_path: Path) -> None:
     model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path))
 
-    assert model.generate_ids([1, 4, 7], max_new_tokens=4) == [7, 7, 7, 7]
     assert greedy_decode(model, [1, 4, 7], max_new_tokens=4, eos_token_ids=set()) == [
         7,
         7,
