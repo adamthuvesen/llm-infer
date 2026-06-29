@@ -244,8 +244,9 @@ def _admit(tb: TraceBuilder, waiting: list[Req], running: list[Req], pool: Block
     """Footprint admission against the free pool, mirroring the preemption scheduler.
 
     Admits while each request's *current* footprint (prompt, plus generated for a resume) fits
-    in the blocks actually free right now. This deliberately over-commits — admission no longer
-    reserves worst-case decode budget — so the pool can be exhausted and the engine must preempt.
+    in the blocks actually free right now. This deliberately over-commits — admission tracks the
+    current footprint, not worst-case decode budget — so the pool can be exhausted and the engine
+    must preempt.
     A re-admitted request is not re-announced with ``request_admitted``; its later
     ``request_resumed`` marks its return.
     """
@@ -507,7 +508,7 @@ def build_trace_jsonl() -> str:
     its tokens — then later resumes it by recompute, replaying its prefill. The scenario stays
     varied: a long chunked prefill (``code-gen``), two requests sharing one prompt
     (``sample-a``/``sample-b``), continuous-batching churn, a KV wall that fills and drains, and
-    now at least one real preemption + resume cycle. Every request still finishes with all its
+    at least one real preemption + resume cycle. Every request finishes with all its
     tokens, and the block lifecycle stays honest throughout.
     """
     tb = TraceBuilder()

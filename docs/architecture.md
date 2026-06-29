@@ -8,8 +8,8 @@ and which flows actually exist in code.
 **What this repo does.** [`README.md`](../README.md) defines llm-infer as a minimal, honest
 **paged LLM inference engine** with pluggable model backends. Qwen2.5-Coder is the pinned
 HF-oracle backend and exported llm-pretrain DenseBackbone bundles are a sibling backend.
-It is still measured on the llm-rlvr-sql GRPO rollout workload, but Qwen is no longer the
-center of the serving architecture.
+The serving architecture is backend-independent; the llm-rlvr-sql GRPO rollout is one
+measured workload, not the center of it.
 
 **Main runtime type.** This is a **Python inference library + test/benchmark harness** with an
 **OpenAI-compatible HTTP server** layered on top
@@ -288,7 +288,7 @@ Validates `FlashAttnPagedAttention` on A100 with tie-tolerance for bf16 numerica
 5. **No cross-system token equivalence** under sampling (different RNG) — timing only.
 
 **I don't see evidence for:** auth, database persistence, or background job queues. (HTTP
-request handling and app startup lifecycle now exist in
+request handling and app startup lifecycle live in
 [`llm_infer/serving/server/`](../llm_infer/serving/server/).)
 
 ---

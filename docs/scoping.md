@@ -1,16 +1,16 @@
 # llm-infer — scoping doc
 
-A from-scratch, honest paged LLM inference engine for **Qwen2.5-Coder-3B-Instruct**. The engine itself is the goal — to **learn** how a real paged inference engine is built and to **showcase** it on GitHub, with code and presentation held to a staff-engineer bar: most of the core things real engines do, kept simple, no over-engineering. Honest explanation second; speed and the llm-rlvr-sql rollout hook are the *fun side-quest* and one applied benchmark, not the identity.
+A from-scratch, honest paged LLM inference engine with **pluggable model backends**. Qwen2.5-Coder is the pinned HF-oracle backend; exported `llm-pretrain` DenseBackbone bundles are a peer backend. The engine itself is the goal: learn how a real paged inference engine is built and show it clearly, with code and presentation held to a staff-engineer bar. Honest explanation comes before speed; the llm-rlvr-sql rollout hook is one applied benchmark, not the identity.
 
 ## The claim (capability statement, not a number)
 
-> A from-scratch paged-inference engine for Qwen2.5-Coder-3B — exact greedy decoding vs HF; paged KV-cache + continuous batching, chunked prefill, prefix caching, and speculative decoding; benchmarked against naive HF and vLLM on one GPU; replayable in a KV-cache trace visualizer.
+> A from-scratch paged-inference engine with a generic model runtime — exact greedy decoding for the pinned Qwen oracle, correctness-first DenseBackbone bundle loading, paged KV-cache + continuous batching, chunked prefill, prefix caching, and speculative decoding; benchmarked against naive HF and vLLM on one GPU; replayable in a KV-cache trace visualizer.
 
 Not "beats vLLM." Not "production serving." Honest systems evidence. The differentiator is the **methodology and completeness** — correctness proven before any tok/s, the canonical techniques built and made legible, every ceiling and dead-end named — not a single number. The llm-rlvr-sql rollout is one applied benchmark that grounds it in real RL economics, not what makes it *yours*.
 
 ## Hard stop (evidence-based, ship v1 when ALL hold)
 
-1. Qwen2.5-Coder-3B **greedy decoding is exact** (same token ids as HF) on the unit correctness suite (fp32 fallback if bf16 tie-breaks get noisy — see Correctness).
+1. Qwen2.5-Coder-3B **greedy decoding is exact** (same token ids as HF) on the unit correctness suite, and DenseBackbone bundle loading reproduces source logits/generation on fixed prompts.
 2. Paged KV-cache + continuous batching run **end-to-end**.
 3. Benchmarks compare **naive HF vs llm-infer vs vLLM** on one documented GPU, config pinned.
 4. The optimized path **beats the naive baseline by a clear, honestly-reported margin** (directional — no target %, no vLLM-relative goal).
@@ -136,7 +136,7 @@ optional fields as absent, not zero. `decode_step` is the generated-token trace 
 the token source is `prefill`: the first token sampled after a completed prompt prefill must be
 represented there before it appears in `request_finished.token_ids`.
 
-Block lifecycle is now emitted honestly. `block_allocated` / `block_freed` come from an observer
+Block lifecycle is emitted honestly. `block_allocated` / `block_freed` come from an observer
 on `BlockAllocator` — the single owner of the free pool — not from higher-level request state. A
 block is `block_allocated` only when it leaves the pool (copy-on-write inside
 `PagedKVCache.prepare_write()` counts, because it allocates a new physical block) and
@@ -166,15 +166,15 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   remaining time is decode orchestration, projections/MLP, attention, prefill, KV writes, and
   GQA expansion, none of which the v2 toolkit (no-sync + KV vectorization) can move further.
 - **Prefix caching — refcounted block sharing for rollout siblings.** The canonical prefix-cache
-  technique now shares full prompt blocks by pointer across known G=4 sibling completions,
+  technique shares full prompt blocks by pointer across known G=4 sibling completions,
   with refcounted physical ownership and copy-on-write only for the final partial prompt block.
   Frozen rollout evidence preserved the accepted **3026** sampled tokens and improved the
   engine from **365.8 tok/s / $0.18 per 1k rollouts** to **411.5 tok/s / $0.16 per 1k
   rollouts**, with prompt prefill token-ops reduced from **15,416** to **3,854** (pinned:
   `bench-results/rollout-rollout-20260622T173732.json`).
-- **Chunked prefill / mixed prefill-decode.** Active decode requests now keep advancing between
-  bounded prompt chunks for not-yet-prefilled requests, preserving the cached-token path while
-  removing the old "prefill fully, then decode" split for long prompts.
+- **Chunked prefill / mixed prefill-decode.** Active decode requests keep advancing between
+  bounded prompt chunks for not-yet-prefilled requests, so a long prompt prefills in bounded
+  chunks instead of fully blocking decode, and the cached-token path is preserved.
 - **Speculative decoding v1 — prompt-lookup draft + greedy verifier.** The engine can use an
   n-gram / prompt-lookup draft source and verify `last_token + draft` in one cached forward,
   accepting only the greedy-matching prefix and falling back safely. This is correctness and
@@ -184,7 +184,7 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
   schema-versioned runtime events emitted from the real `InferenceEngine` path, plus a static
   local visualizer in `visualizer/` that renders schema-v3 JSONL as request lanes, prefill
   chunks, decode emissions, batch/throughput signals, event inspection, playback, and a paged
-  KV wall driven by **real block allocation/free** (filled blocks physically held now, the
+  KV wall driven by **real block allocation/free** (filled blocks physically held, the
   scheduler's reservation shown as headroom). The committed fixture at
   `docs/assets/kv_trace_schema_v3.jsonl` is a labelled **synthetic sample** produced by a
   standalone generator that emits the engine's schema-v3 event shapes (no engine/model/GPU
@@ -197,9 +197,8 @@ throughput number. Speed is the fun side-quest; it gets its own track, last.
 
 ### Measured dead-end — the CUDA-graph / static-bucket axis is closed for this workload
 
-The decode-graph / static 32-slot bucket idea (once framed as "v3 next") was **built and
-rejected**, not deferred. A static bucket was measured against the eager path and lost on two
-independent counts:
+The decode-graph / static 32-slot bucket idea is a measured dead-end, not deferred work. A
+static bucket was measured against the eager path and lost on two independent counts:
 
 1. **Slower.** The static bucket pays for fixed worst-case occupancy every step; the real
    workload has variable occupancy, so the bucket does device compute the eager path skips.
@@ -260,7 +259,7 @@ is by then.
 
 ## Repos (hub-and-spoke, not a monorepo)
 
-- Engine name: **`llm-infer`** (settled — descriptive and unambiguous; the earlier working names `paged` and `nano-infer` are retired). v1.5 is a **standalone engine + thin llm-rlvr-sql adapter script** (not a package import), preserving hub-and-spoke.
+- Engine name: **`llm-infer`** (descriptive and unambiguous). v1.5 is a **standalone engine + thin llm-rlvr-sql adapter script** (not a package import), preserving hub-and-spoke.
 - `kv-cache-theater` — only if trace-driven; separate.
 - `keeping-the-gpu-busy` — writeup/hub, later.
 

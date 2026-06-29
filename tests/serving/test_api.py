@@ -611,7 +611,7 @@ def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
 
 
 def test_per_request_temperature_is_honored_no_400() -> None:
-    """A non-greedy request is now served (no fixed-sampler 400) and returns a completion."""
+    """A non-greedy request is served with its own sampling and returns a completion."""
 
     async def go() -> None:
         app = _build_app()
@@ -631,7 +631,7 @@ def test_concurrent_requests_use_their_own_sampling() -> None:
 
     A greedy request run concurrently with a sampled one must match the same greedy request run
     alone — proof the sampled batchmate did not perturb it — while the sampled request still
-    returns a valid completion. This is the per-request-sampling replacement for the old 400.
+    returns a valid completion. Each request carries its own sampling on a shared engine.
     """
 
     async def content(client, **sampling) -> str:
@@ -670,10 +670,10 @@ def test_concurrent_requests_use_their_own_sampling() -> None:
 def test_oversized_request_is_rejected_and_engine_survives() -> None:
     """A request too large for the KV pool returns a clean 400 and never kills the engine loop.
 
-    Regression: before the preflight, an oversized prompt raised inside the background engine
-    thread (the scheduler's worst-case-fits rejection), killing the one loop and hanging every
-    client. Now the handler rejects it with a 400, and a normal request on the same app is still
-    served — proof the loop stayed alive.
+    Without the request handler's preflight, an oversized prompt would raise inside the
+    background engine thread (the scheduler's worst-case-fits rejection), killing the one loop
+    and hanging every client. The handler rejects it with a 400 up front, and a normal request
+    on the same app is still served — proof the loop stayed alive.
     """
 
     async def go() -> None:
@@ -712,9 +712,9 @@ def test_oversized_request_is_rejected_and_engine_survives() -> None:
 def test_unknown_model_is_404_not_a_silent_substitution(path: str, body: dict) -> None:
     """A model id this server does not serve is a 404 — never a 200 echoing a model we did not run.
 
-    Regression: the handlers used to copy ``request.model`` into the response, so a request for
-    ``gpt-4o`` returned 200 while tiny-Qwen actually served it. The server now validates against
-    the one served id and reports what truly ran.
+    The server validates ``request.model`` against the one served id and reports what truly ran,
+    so a request for an unserved id like ``gpt-4o`` is a 404 rather than a 200 that echoes the
+    requested id while tiny-Qwen actually served it.
     """
 
     async def go() -> None:

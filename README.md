@@ -147,7 +147,7 @@ legibility**. Speed is a side-quest with its own track, last.
    (`/v1/chat/completions`, `/v1/completions`, a stateless `/v1/responses` subset) → a hand-rolled
    Prometheus `/metrics` endpoint read from real engine state (request/token/preemption counters,
    live KV-pool and queue gauges, TTFT + latency histograms) → a concurrent `httpx` load generator
-   (`scripts/loadgen.py`). The engine is now drivable as a real server — `curl` it, point the
+   (`scripts/loadgen.py`). The engine is drivable as a real server — `curl` it, point the
    OpenAI SDK at it, scrape its metrics, and load-test it — not only through the frozen harness.
    See [Serving](#serving).
 

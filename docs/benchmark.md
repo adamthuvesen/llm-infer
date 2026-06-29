@@ -18,15 +18,14 @@ runners) live in `llm_infer/benchmarks/`.
 | `llm_infer` | this engine, **flash-attn backend**, bf16, all requests in one paged cache; every running request advances in one **fused batched decode** (`decode_many`) per step. | The optimized path under test. |
 | `vllm` | vLLM offline `LLM.generate`, prefix caching off, flags pinned. | The ceiling. |
 
-**Where the speed comes from (and the dead end it replaced).** The first Phase D run exposed
-that the engine's continuous-batching loop advanced each running request with its *own*
-forward per token — a per-request, per-layer Python loop that made `llm_infer` **slower than
-naive sequential HF** (251.7 s vs 164.9 s at 32×128). The fix is `decode_many`: all running
-requests advance in **one** batched forward per step — one matmul/kernel call over the whole
-running batch, with per-request RoPE positions and ragged FlashAttention (`cu_seqlens`) over
-each request's paged history. vLLM (which also fuses, plus CUDA graphs / a mature scheduler)
-remains the ceiling; `llm_infer` is the small, legible, correct paged engine that now earns
-its throughput from the batched forward rather than from a tight loop.
+**Where the speed comes from.** `decode_many` advances all running requests in **one** batched
+forward per step — one matmul/kernel call over the whole running batch, with per-request RoPE
+positions and ragged FlashAttention (`cu_seqlens`) over each request's paged history. An unfused
+per-request, per-layer forward measured **slower than naive sequential HF** (251.7 s vs 164.9 s
+at 32×128), so the fused batched forward is what earns the throughput. vLLM (which also fuses,
+plus CUDA graphs / a mature scheduler) remains the ceiling;
+`llm_infer` is the small, legible, correct paged engine that earns its throughput from the
+batched forward rather than from a tight loop.
 
 ## Methodology
 
@@ -87,9 +86,9 @@ median wall-clock. Every system decodes the same **4096** tokens.
 | `vllm` (ceiling) | yes — 32/32 ties | 0.95 | 4096 | 4323.6 | 104.17× |
 
 **Stop #4 holds.** `llm_infer` (98.3 tok/s) beats the naive baseline (41.5 tok/s) by **2.37×**.
-The batched decode (`decode_many`) was the difference: an earlier unfused build ran the same
-workload in 251.7 s (0.66× — *slower* than naive); fusing all running requests into one decode
-forward per step dropped it to 41.66 s.
+The batched decode (`decode_many`) is the difference: fusing all running requests into one
+decode forward per step runs the workload in 41.66 s, where an unfused per-request decode
+measured 251.7 s (0.66× — *slower* than naive).
 
 **Correctness, honestly.** Against fp32 full-recompute truth, **`llm_infer` and vLLM are
 faithful — every divergence (all 32 requests) is a traced numerical tie**, while HF `generate`

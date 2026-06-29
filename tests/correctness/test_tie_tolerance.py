@@ -1,11 +1,11 @@
-"""Tie-tolerance gate hardening (audit 2026-06-21): a prefix-equal length mismatch fails.
+"""Tie-tolerance gate (audit 2026-06-21): a prefix-equal length mismatch fails.
 
 The bar is token-for-token vs the golden, except at a genuine numerical tie. A fast output
 that is a strict *prefix* of the golden (or vice versa) has no differing token in the
-overlap, so the old gate returned ``ok=True`` — silently passing a truncated/over-run
-output as equivalent. These unit tests pin the hardened behavior. The fp32 reference is only
-consulted when a token actually diverges, so a sentinel model that raises if touched proves
-the prefix path never reaches it.
+overlap; the gate must still fail it rather than pass a truncated/over-run output as
+equivalent. These unit tests pin that behavior. The fp32 reference is only consulted when a
+token actually diverges, so a sentinel model that raises if touched proves the prefix path
+never reaches it.
 """
 
 from __future__ import annotations

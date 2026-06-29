@@ -43,7 +43,7 @@ The same viewer equally replays a real `InferenceEngine(trace=..., preemption=Tr
   physically held right now, with the scheduler's `reserved_blocks` shown as fainter headroom
 - logical cache footprint from observed cached/generated token counts
 
-Block allocation/free is now emitted honestly from the allocator boundary: a `block_allocated`
+Block allocation/free is emitted honestly from the allocator boundary: a `block_allocated`
 fires only when a block leaves the free pool (copy-on-write included), a `block_freed` fires only
 when a block truly returns (refcount-0), and a prefix-shared block retained by a sibling is freed
 once, by its last owner.
