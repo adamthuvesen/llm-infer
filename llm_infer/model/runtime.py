@@ -29,14 +29,25 @@ class ModelRegistryError(ValueError):
 class TokenizersJsonTokenizer:
     """Small adapter around a standalone ``tokenizer.json`` export."""
 
-    def __init__(self, tokenizer_path: Path) -> None:
+    def __init__(
+        self,
+        tokenizer_path: Path,
+        *,
+        default_add_special_tokens: bool = True,
+        chat_template: Mapping[str, object] | None = None,
+    ) -> None:
         from tokenizers import Tokenizer
 
         self.path = tokenizer_path
         self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        self._default_add_special_tokens = default_add_special_tokens
+        self._chat_template = chat_template
 
-    def encode(self, text: str) -> list[int]:
-        return list(self._tokenizer.encode(text).ids)
+    def encode(self, text: str, *, add_special_tokens: bool | None = None) -> list[int]:
+        special_tokens = (
+            self._default_add_special_tokens if add_special_tokens is None else add_special_tokens
+        )
+        return list(self._tokenizer.encode(text, add_special_tokens=special_tokens).ids)
 
     def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
         return self._tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
@@ -48,10 +59,20 @@ class TokenizersJsonTokenizer:
         add_generation_prompt: bool,
         tokenize: bool,
     ) -> object:
+        rendered = self._render_chat_template(messages, add_generation_prompt=add_generation_prompt)
+        return self.encode(rendered) if tokenize else rendered
+
+    def _render_chat_template(
+        self, messages: list[dict[str, str]], *, add_generation_prompt: bool
+    ) -> str:
+        if self._chat_template is not None:
+            return _render_bundle_chat_template(
+                self._chat_template, messages, add_generation_prompt=add_generation_prompt
+            )
         rendered = "\n".join(f"{message['role']}: {message['content']}" for message in messages)
         if add_generation_prompt:
             rendered = f"{rendered}\nassistant:" if rendered else "assistant:"
-        return self.encode(rendered) if tokenize else rendered
+        return rendered
 
 
 def available_backends() -> tuple[str, ...]:
@@ -167,7 +188,12 @@ def _load_dense_runtime(
         device=device,
     )
     manifest = _read_json_object(root / "manifest.json")
-    tokenizer = TokenizersJsonTokenizer(model.tokenizer_path)
+    tokenizer_metadata = _dense_tokenizer_metadata(manifest)
+    tokenizer = TokenizersJsonTokenizer(
+        model.tokenizer_path,
+        default_add_special_tokens=tokenizer_metadata["add_special_tokens"],
+        chat_template=tokenizer_metadata["chat_template"],
+    )
     return ModelRuntime(
         backend_id="dense",
         model_id=_dense_model_id(manifest, root),
@@ -179,6 +205,7 @@ def _load_dense_runtime(
             "source": "llm-pretrain-export",
             "format": "llm_pretrain_dense_v1",
             "manifest": manifest,
+            "chat_template": tokenizer_metadata["chat_template"],
         },
         bundle_path=root,
     )
@@ -234,6 +261,71 @@ def _dense_eos_ids(manifest: Mapping[str, object]) -> frozenset[int]:
         if isinstance(nested, list):
             return frozenset(int(item) for item in nested)
     return frozenset()
+
+
+def _dense_tokenizer_metadata(manifest: Mapping[str, object]) -> dict[str, object]:
+    tokenizer_entry = manifest.get("tokenizer")
+    tokenizer_config = tokenizer_entry if isinstance(tokenizer_entry, dict) else {}
+    chat_template = _dense_chat_template(manifest, tokenizer_config)
+    add_special_tokens = _dense_add_special_tokens(manifest, tokenizer_config, chat_template)
+    return {
+        "add_special_tokens": add_special_tokens,
+        "chat_template": chat_template,
+    }
+
+
+def _dense_chat_template(
+    manifest: Mapping[str, object], tokenizer_config: Mapping[str, object]
+) -> Mapping[str, object] | None:
+    for value in (manifest.get("chat_template"), tokenizer_config.get("chat_template")):
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ModelRegistryError("dense bundle chat_template must be an object")
+        return value
+    return None
+
+
+def _dense_add_special_tokens(
+    manifest: Mapping[str, object],
+    tokenizer_config: Mapping[str, object],
+    chat_template: Mapping[str, object] | None,
+) -> bool:
+    for value in (
+        tokenizer_config.get("add_special_tokens"),
+        manifest.get("add_special_tokens"),
+        chat_template.get("add_special_tokens") if chat_template is not None else None,
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise ModelRegistryError("dense bundle add_special_tokens must be a boolean")
+        return value
+    return True
+
+
+def _render_bundle_chat_template(
+    template: Mapping[str, object],
+    messages: list[dict[str, str]],
+    *,
+    add_generation_prompt: bool,
+) -> str:
+    roles = template.get("roles")
+    if not isinstance(roles, dict):
+        raise ModelRegistryError("dense bundle chat_template.roles must be an object")
+    parts: list[str] = []
+    for message in messages:
+        role = message["role"]
+        pattern = roles.get(role)
+        if not isinstance(pattern, str):
+            raise ModelRegistryError(f"dense bundle chat_template is missing role {role!r}")
+        parts.append(pattern.format(content=message["content"]))
+    if add_generation_prompt:
+        generation_prompt = template.get("generation_prompt")
+        if not isinstance(generation_prompt, str) or not generation_prompt:
+            raise ModelRegistryError("dense bundle chat_template.generation_prompt must be set")
+        parts.append(generation_prompt)
+    return "".join(parts)
 
 
 _LOADERS: dict[str, RuntimeLoader] = {
