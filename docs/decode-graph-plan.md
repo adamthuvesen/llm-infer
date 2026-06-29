@@ -11,7 +11,7 @@ This document is kept for context only.
 # Decode Graph Execution Plan (archived)
 
 This is the design-first tranche after the local speed loop reached a clean best of
-365.8 tok/s on the frozen llm-rlvr-sql rollout. It deliberately does not implement CUDA
+365.8 tok/s on the frozen llm-rlvr rollout. It deliberately does not implement CUDA
 graphs, a new scheduler, or a new kernel. The goal is to make the next implementation
 slice small enough to measure, while still plausibly moving the rollout toward the
 650 tok/s target.

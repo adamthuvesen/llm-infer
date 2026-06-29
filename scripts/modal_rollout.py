@@ -1,15 +1,15 @@
-"""Modal A100 rollout-timing comparison: llm-infer vs vLLM as llm-rlvr-sql GRPO rollout backends.
+"""Modal A100 rollout-timing comparison: llm-infer vs vLLM as llm-rlvr GRPO rollout backends.
 
 rollout's differentiator. Extends the benchmark harness (``llm_infer/benchmarks/`` runners +
 report, the same pinned-config Modal pattern) to the *sampled* rollout workload: one frozen
-llm-rlvr-sql GRPO rollout batch (anchor ``grpo-s0``) — 8 Spider-dev prompts × G=4 = 32
+llm-rlvr GRPO rollout batch (anchor ``grpo-s0``) — 8 Spider-dev prompts × G=4 = 32
 completions, ``max_completion_length=1024``, ``temperature=1.0``, ``top_p=1.0``, pinned seed —
 served from the merged grpo-s0 bf16 weights (``scripts/merge_adapter.py`` wrote them to the
 ``llm-infer-merged`` volume).
 
 Three rows, the same three systems as benchmark but timed under sampling:
 
-* ``vllm`` — llm-rlvr-sql's *current* rollout backend, the ceiling (never the thing we beat);
+* ``vllm`` — llm-rlvr's *current* rollout backend, the ceiling (never the thing we beat);
 * ``llm_infer`` — this engine, flash backend, fused batched decode, seeded sampler;
 * ``hf_sequential`` — the naive floor (per-request ``generate``, sampling).
 
@@ -340,7 +340,7 @@ def main(
             "merged_path": MERGED_MODEL_PATH,
             "base_id": fixture["model"]["id"],
             "base_revision": fixture["model"]["revision"],
-            "adapter": "llm-rlvr-sql grpo/grpo-s0 (rank 32), merged bf16",
+            "adapter": "llm-rlvr grpo/grpo-s0 (rank 32), merged bf16",
             "dtype": "bfloat16",
         },
         "workload": {

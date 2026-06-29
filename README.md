@@ -32,8 +32,8 @@ For the longer architecture map, see [docs/architecture.md](docs/architecture.md
 - `qwen`: `Qwen/Qwen2.5-Coder-3B-Instruct` at revision
   `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the Instruct model and its
   chat template. Plain `Qwen2.5-Coder-3B` is a different model.
-- `dense`: `llm_pretrain_dense_v1` export bundles from `llm-pretrain`,
-  including ESME checkpoints trained there and post-trained in `llm-posttrain`.
+- `dense`: `llm_pretrain_dense_v1` export bundles from `esme-pretrain`,
+  including ESME checkpoints trained there and post-trained in `esme-posttrain`.
   This is a correctness bridge, not a fast paged-KV backend yet; it uses full
   recompute and rejects prefix caching, speculative decoding, and preemption.
 
@@ -114,9 +114,9 @@ claims to beat.
 | 32 synthetic greedy requests  | naive HF sequential             | 41.5 tok/s   |
 | 32 synthetic greedy requests  | `llm_infer`                     | 98.3 tok/s   |
 | 32 synthetic greedy requests  | vLLM                            | 4323.6 tok/s |
-| Frozen `llm-rlvr-sql` rollout | naive HF sequential             | 39.4 tok/s   |
-| Frozen `llm-rlvr-sql` rollout | `llm_infer` with prefix caching | 411.5 tok/s  |
-| Frozen `llm-rlvr-sql` rollout | vLLM                            | 2170.6 tok/s |
+| Frozen `llm-rlvr` rollout | naive HF sequential             | 39.4 tok/s   |
+| Frozen `llm-rlvr` rollout | `llm_infer` with prefix caching | 411.5 tok/s  |
+| Frozen `llm-rlvr` rollout | vLLM                            | 2170.6 tok/s |
 
 The win over naive HF comes from continuous batching and KV reuse. The gap to
 vLLM is expected: vLLM has a mature scheduler, CUDA graphs, and custom kernels.

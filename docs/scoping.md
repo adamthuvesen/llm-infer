@@ -2,9 +2,9 @@
 
 `llm-infer` is a from-scratch paged LLM inference engine with pluggable model
 backends. Qwen2.5-Coder is the pinned HuggingFace oracle backend; exported
-`llm-pretrain` DenseBackbone bundles are a peer backend. The engine itself is the
+`esme-pretrain` DenseBackbone bundles are a peer backend. The engine itself is the
 work: correctness-first decoding, legible systems code, and honest benchmark
-evidence. The `llm-rlvr-sql` rollout hook is one applied benchmark, not the
+evidence. The `llm-rlvr` rollout hook is one applied benchmark, not the
 project's whole identity.
 
 ## Capability Statement
@@ -31,7 +31,7 @@ The engine is release-quality for this repo when all of these hold:
 3. Benchmarks compare naive HF, `llm-infer`, and vLLM on a documented GPU with a
    pinned config.
 4. Throughput is reported only for backends that pass the correctness gate.
-5. The frozen `llm-rlvr-sql` rollout timing benchmark is measured once and written
+5. The frozen `llm-rlvr` rollout timing benchmark is measured once and written
    up with its limitations.
 6. The docs explain the architecture, measurements, and known non-goals plainly.
 
@@ -43,7 +43,7 @@ The engine is release-quality for this repo when all of these hold:
 | Systems loop | paged KV allocator, scheduler, two-request vertical slice | prove the loop before the benchmark table |
 | Fast backend | `flash_attn_paged` behind the adapter | plug in the fast kernel only after the reference is trusted |
 | Evidence | batch-correctness suite, three-way benchmark table | compare naive HF, `llm-infer`, and vLLM on pinned config |
-| Applied rollout | one frozen `llm-rlvr-sql` rollout timing comparison and writeup | anchor the engine in real RL rollout economics |
+| Applied rollout | one frozen `llm-rlvr` rollout timing comparison and writeup | anchor the engine in real RL rollout economics |
 
 The trusted oracle is the first gate, not a clean-up step after optimization. Every
 backend passes the same oracle before it earns a speed number.
@@ -63,7 +63,7 @@ no tok/s.
 
 ## Applied Rollout Hook
 
-The rollout benchmark replays `llm-rlvr-sql`'s actual inference call pattern rather
+The rollout benchmark replays `llm-rlvr`'s actual inference call pattern rather
 than a synthetic microbenchmark:
 
 - checkpoint: a pinned SFT/GRPO weight set, merged before serving;

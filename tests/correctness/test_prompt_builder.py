@@ -1,9 +1,9 @@
-"""Pin the replicated llm-rlvr-sql prompt builder against its exact expected bytes.
+"""Pin the replicated llm-rlvr prompt builder against its exact expected bytes.
 
-``tests/correctness/prompt.py`` is a verbatim copy of llm-rlvr-sql's ``cot`` path (it
-must not import llm-rlvr-sql). These tests freeze the exact output so any drift in the
+``tests/correctness/prompt.py`` is a verbatim copy of llm-rlvr's ``cot`` path (it
+must not import llm-rlvr). These tests freeze the exact output so any drift in the
 copy breaks the build instead of silently desynchronizing the goldens. The expected
-strings below were produced by the real llm-rlvr-sql functions and compared byte-for-byte
+strings below were produced by the real llm-rlvr functions and compared byte-for-byte
 at fixture-creation time.
 """
 

@@ -1,6 +1,6 @@
-"""Merge the llm-rlvr-sql GRPO LoRA adapter into the base model, once, as a served artifact.
+"""Merge the llm-rlvr GRPO LoRA adapter into the base model, once, as a served artifact.
 
-rollout serves a *merged* checkpoint so the engine stays LoRA-free: the llm-rlvr-sql GRPO run
+rollout serves a *merged* checkpoint so the engine stays LoRA-free: the llm-rlvr GRPO run
 (`grpo-s0`, the shipped main result) saved a rank-32 PEFT LoRA adapter over the pinned base
 ``Qwen/Qwen2.5-Coder-3B-Instruct``. This script loads that base, applies the adapter with
 PEFT ``merge_and_unload``, and writes the merged bf16 weights to a Modal volume that the
@@ -8,7 +8,7 @@ rollout benchmark then serves to *both* llm-infer and vLLM (identical weights, f
 bf16 is the model's native dtype (Qwen2.5 trains/serves bf16; the GRPO run was bf16) and the
 dtype the engine's greedy oracle already validates, so serving keeps one uniform precision.
 
-The adapter is read-only input on llm-rlvr-sql's Modal volume ``text2sql-runs`` at
+The adapter is read-only input on llm-rlvr's Modal volume ``text2sql-runs`` at
 ``grpo/grpo-s0/``. The merge is a one-time step; the rollout benchmark never re-merges.
 
     modal run scripts/merge_adapter.py            # verify, merge, write /merged/grpo-s0
@@ -26,7 +26,7 @@ import modal
 
 REMOTE_ROOT = "/root/llm-infer"
 HF_CACHE = "/hf-cache"
-RUNS_MOUNT = "/runs"  # llm-rlvr-sql's text2sql-runs volume (read-only input)
+RUNS_MOUNT = "/runs"  # llm-rlvr's text2sql-runs volume (read-only input)
 MERGED_MOUNT = "/merged"  # this project's merged-weights artifact volume (output)
 ADAPTER_SUBPATH = "grpo/grpo-s0"  # the shipped GRPO main result (ANCHOR: grpo-s0 only)
 MERGED_NAME = "grpo-s0"
@@ -51,7 +51,7 @@ image = (
 )
 
 hf_cache = modal.Volume.from_name("llm-infer-hf-cache", create_if_missing=True)
-# llm-rlvr-sql's training-runs volume (its GRPO adapters). Must already exist — we only read it.
+# llm-rlvr's training-runs volume (its GRPO adapters). Must already exist — we only read it.
 runs = modal.Volume.from_name("text2sql-runs")
 merged = modal.Volume.from_name("llm-infer-merged", create_if_missing=True)
 

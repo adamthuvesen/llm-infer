@@ -1,6 +1,6 @@
 """The golden cases: a few short text-to-SQL prompts kept tiny so the oracle runs on CPU.
 
-Each case is a (schema, question) pair in the llm-rlvr-sql shape. Adding a case here and
+Each case is a (schema, question) pair in the llm-rlvr shape. Adding a case here and
 re-running ``scripts/generate_goldens.py`` regenerates the committed fixture. Keep
 schemas small and ``max_new_tokens`` short — the point is a fast, exact oracle, not
 coverage of long generations.

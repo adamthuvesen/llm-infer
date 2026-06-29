@@ -1,7 +1,7 @@
 # AGENTS.md — llm-infer
 
 A minimal, honest paged LLM inference engine with pluggable model backends. Qwen2.5-Coder
-is the pinned HF-oracle backend; exported llm-pretrain DenseBackbone bundles are a
+is the pinned HF-oracle backend; exported esme-pretrain DenseBackbone bundles are a
 correctness-only sibling backend. Full scope and current evidence boundaries live in [`docs/scoping.md`](docs/scoping.md).
 Read it before proposing work.
 
@@ -20,7 +20,7 @@ divergence traced to a numerical tie and documented.
   `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the **Instruct** variant and its
   chat template. Plain `-3B` is a different model and would invalidate the Qwen oracle.
   Full paged KV, prefix caching, speculative decode, preemption, and flash-attn.
-- `dense`: `llm_pretrain_dense_v1` export bundles from `llm-pretrain`. Correctness bridge
+- `dense`: `llm_pretrain_dense_v1` export bundles from `esme-pretrain`. Correctness bridge
   only — full recompute through the engine API, no real paged KV. Rejects prefix caching,
   speculative decode, and preemption at init/add_request. See `BackendCapabilities` in
   `llm_infer/model/interface.py`.

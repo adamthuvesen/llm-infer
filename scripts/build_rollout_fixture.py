@@ -1,21 +1,21 @@
-"""Freeze the 8-prompt llm-rlvr-sql GRPO rollout slice as a committed, reproducible fixture.
+"""Freeze the 8-prompt llm-rlvr GRPO rollout slice as a committed, reproducible fixture.
 
-rollout's rollout-timing comparison replays llm-rlvr-sql's *actual* GRPO rollout shape, not a
+rollout's rollout-timing comparison replays llm-rlvr's *actual* GRPO rollout shape, not a
 synthetic microbench. One GRPO rollout batch is 8 prompts × G=4 = 32 completions
-(``per_device_batch_size=8``, ``num_generations=4`` in llm-rlvr-sql's GrpoHyperparams). The
-prompts must be byte-identical to llm-rlvr-sql's eval path, so this builds them through
-llm-rlvr-sql's OWN builders — ``build_messages(style='cot')`` + ``serialize_schema`` — then
+(``per_device_batch_size=8``, ``num_generations=4`` in llm-rlvr's GrpoHyperparams). The
+prompts must be byte-identical to llm-rlvr's eval path, so this builds them through
+llm-rlvr's OWN builders — ``build_messages(style='cot')`` + ``serialize_schema`` — then
 applies the pinned Qwen Instruct chat template (``add_generation_prompt=True``), exactly as
 the eval/transformers path does. The resulting prompt token ids are frozen here so the
-benchmark replays them with no llm-rlvr-sql dependency and no re-tokenization drift.
+benchmark replays them with no llm-rlvr dependency and no re-tokenization drift.
 
-This runs locally, once. It needs llm-rlvr-sql's builders (pure pydantic) and ``datasets`` for
+This runs locally, once. It needs llm-rlvr's builders (pure pydantic) and ``datasets`` for
 the pinned Spider-dev questions. From the llm-infer repo root:
 
     uv run --with datasets --with pydantic python scripts/build_rollout_fixture.py
 
-Inputs (override via env): ``RLVR_SQL_ROOT`` (llm-rlvr-sql checkout, read-only),
-``TEXT2SQL_SPIDER_ROOT`` (an extracted ``spider_data/`` for ``tables.json`` — llm-rlvr-sql's
+Inputs (override via env): ``RLVR_ROOT`` (llm-rlvr checkout, read-only),
+``TEXT2SQL_SPIDER_ROOT`` (an extracted ``spider_data/`` for ``tables.json`` — llm-rlvr's
 local copy by default, so no multi-GB archive download). Writes
 ``tests/fixtures/rollout_grpo_s0_spider_dev.json`` and prints its sha256.
 """
@@ -33,14 +33,12 @@ from pathlib import Path
 from transformers import AutoTokenizer, GenerationConfig
 
 LLM_INFER_ROOT = Path(__file__).resolve().parents[1]
-RLVR_SQL_ROOT = Path(
-    os.environ.get("RLVR_SQL_ROOT", Path.home() / "dev" / "menti" / "llm-rlvr-sql")
-)
+RLVR_ROOT = Path(os.environ.get("RLVR_ROOT", Path.home() / "dev" / "menti" / "llm-rlvr"))
 SPIDER_ROOT = Path(
-    os.environ.get("TEXT2SQL_SPIDER_ROOT", RLVR_SQL_ROOT / "data" / "spider" / "spider_data")
+    os.environ.get("TEXT2SQL_SPIDER_ROOT", RLVR_ROOT / "data" / "spider" / "spider_data")
 )
 
-# llm-rlvr-sql GRPO rollout shape (llm_rlvr_sql.train.grpo.GrpoHyperparams) — anchor is grpo-s0.
+# llm-rlvr GRPO rollout shape (llm_rlvr.train.grpo.GrpoHyperparams) — anchor is grpo-s0.
 NUM_PROMPTS = 8  # per_device_batch_size
 NUM_GENERATIONS = 4  # G
 MAX_COMPLETION_LENGTH = 1024
@@ -54,10 +52,10 @@ FIXTURE_PATH = LLM_INFER_ROOT / "tests" / "fixtures" / "rollout_grpo_s0_spider_d
 
 
 def _load_build_messages(rlvr_root: Path):
-    """Load llm-rlvr-sql's ``build_messages`` from prompt.py without importing the eval package."""
-    prompt_path = rlvr_root / "src" / "llm_rlvr_sql" / "eval" / "prompt.py"
+    """Load llm-rlvr's ``build_messages`` from prompt.py without importing the eval package."""
+    prompt_path = rlvr_root / "src" / "llm_rlvr" / "eval" / "prompt.py"
     if not prompt_path.is_file():
-        raise FileNotFoundError(f"llm-rlvr-sql prompt builder not found at {prompt_path}")
+        raise FileNotFoundError(f"llm-rlvr prompt builder not found at {prompt_path}")
     spec = importlib.util.spec_from_file_location("rlvr_eval_prompt", prompt_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -87,25 +85,25 @@ def _sha256_file(path: Path) -> str:
 
 
 def main() -> None:
-    sys.path.insert(0, str(RLVR_SQL_ROOT / "src"))
+    sys.path.insert(0, str(RLVR_ROOT / "src"))
     sys.path.insert(0, str(LLM_INFER_ROOT))
 
-    from llm_rlvr_sql.data.artifacts import SPIDER_HF_REPO, SPIDER_HF_REVISION
-    from llm_rlvr_sql.data.schema import serialize_schema
-    from llm_rlvr_sql.data.spider import load_examples, load_schemas
+    from llm_rlvr.data.artifacts import SPIDER_HF_REPO, SPIDER_HF_REVISION
+    from llm_rlvr.data.schema import serialize_schema
+    from llm_rlvr.data.spider import load_examples, load_schemas
 
     from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 
-    # Load build_messages straight from its file: importing llm_rlvr_sql.eval as a package runs
+    # Load build_messages straight from its file: importing llm_rlvr.eval as a package runs
     # eval/__init__.py, which pulls the SQL sandbox/verifier chain (sqlparse). prompt.py itself
     # only depends on the light data layer, so executing it directly keeps this builder lean.
-    build_messages = _load_build_messages(RLVR_SQL_ROOT)
+    build_messages = _load_build_messages(RLVR_ROOT)
 
     tables_json = SPIDER_ROOT / "tables.json"
     if not tables_json.is_file():
         raise FileNotFoundError(
             f"no tables.json at {tables_json}; set TEXT2SQL_SPIDER_ROOT to an extracted "
-            "spider_data/ dir (llm-rlvr-sql's data/spider/spider_data by default)."
+            "spider_data/ dir (llm-rlvr's data/spider/spider_data by default)."
         )
     schemas = load_schemas(tables_json)
     examples = load_examples("dev")  # HF xlangai/spider @ pinned revision — the eval source

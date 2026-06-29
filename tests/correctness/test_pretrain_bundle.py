@@ -1,4 +1,4 @@
-"""Correctness checks for the llm-pretrain dense export-bundle bridge."""
+"""Correctness checks for the esme-pretrain dense export-bundle bridge."""
 
 from __future__ import annotations
 

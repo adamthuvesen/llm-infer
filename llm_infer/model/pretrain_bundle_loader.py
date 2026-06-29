@@ -1,4 +1,4 @@
-"""Load and validate llm-pretrain dense export bundles."""
+"""Load and validate esme-pretrain dense export bundles."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _MISSING = object()
 
 
 class PretrainBundleError(ValueError):
-    """Raised when an llm-pretrain export bundle is malformed."""
+    """Raised when an esme-pretrain export bundle is malformed."""
 
 
 @dataclass(frozen=True)

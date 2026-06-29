@@ -7,8 +7,8 @@ and which flows actually exist in code.
 
 **What this repo does.** [`README.md`](../README.md) defines llm-infer as a minimal, honest
 **paged LLM inference engine** with pluggable model backends. Qwen2.5-Coder is the pinned
-HF-oracle backend and exported llm-pretrain DenseBackbone bundles are a sibling backend.
-The serving architecture is backend-independent; the llm-rlvr-sql GRPO rollout is one
+HF-oracle backend and exported esme-pretrain DenseBackbone bundles are a sibling backend.
+The serving architecture is backend-independent; the llm-rlvr GRPO rollout is one
 measured workload, not the center of it.
 
 **Main runtime type.** This is a **Python inference library + test/benchmark harness** with an
@@ -35,7 +35,7 @@ don't see evidence for a packaged CLI.
 | **Transformers (HuggingFace)** | Qwen weights/config/tokenizer | Qwen weights come from HF; forward is ours so the oracle tests *our* engine |
 | **flash-attn** (CUDA only) | Fast attention kernel | Optional GPU backend behind [`AttentionBackend`](../llm_infer/kernels/base.py) |
 | **pytest** | Correctness oracle gate | Local CPU gate in [`tests/correctness/`](../tests/correctness/) |
-| **Modal** | Remote A100 runs | flash-attn oracle, 3-way benchmark, llm-rlvr-sql rollout timing ([`scripts/modal_*.py`](../scripts/)) |
+| **Modal** | Remote A100 runs | flash-attn oracle, 3-way benchmark, llm-rlvr rollout timing ([`scripts/modal_*.py`](../scripts/)) |
 | **uv** | Dependency management | [`pyproject.toml`](../pyproject.toml), Python 3.11+ |
 
 **Design doctrine (the thing that shapes everything).** Correctness comes first: every
@@ -150,7 +150,7 @@ code.
   allocated prompt blocks by refcount. Reservation, allocation, and sharing must stay
   consistent ([`scheduler.py`](../llm_infer/scheduler/scheduler.py),
   [`block_table.py`](../llm_infer/kv_cache/block_table.py)).
-- llm-rlvr-sql prompts are a **verbatim copy** in [`tests/correctness/prompt.py`](../tests/correctness/prompt.py),
+- llm-rlvr prompts are a **verbatim copy** in [`tests/correctness/prompt.py`](../tests/correctness/prompt.py),
   not an import — goldens freeze on exact bytes.
 - **`dense` backend limits** are enforced via `BackendCapabilities` on `ModelRuntime` and
   `InferenceEngine` — no prefix caching, speculative decode, or preemption on the recompute path.
@@ -286,7 +286,7 @@ Validates `FlashAttnPagedAttention` on A100 with tie-tolerance for bf16 numerica
 3. **Adjudicate tokens** against fp32 reference (exact or traced tie).
 4. Only correct systems get tok/s; print pinned config table ([`docs/benchmark.md`](benchmark.md)).
 
-### Flow E — llm-rlvr-sql Rollout Timing (Modal)
+### Flow E — llm-rlvr Rollout Timing (Modal)
 
 [`scripts/modal_rollout.py`](../scripts/modal_rollout.py):
 
@@ -411,7 +411,7 @@ flowchart TB
     Engine["PagedKVCache + Scheduler + InferenceEngine"]
     Flash["flash_attn_paged backend"]
     Benchmark["benchmarks vs HF + vLLM"]
-    Rollout["llm-rlvr-sql rollout timing + sampled Sampler"]
+    Rollout["llm-rlvr rollout timing + sampled Sampler"]
 
     Oracle --> Engine
     Engine --> Flash
@@ -456,7 +456,7 @@ calling HF ([`docs/fixture-format.md`](fixture-format.md)).
 **Honesty bar / tie tolerance.** bf16 flash path may diverge on genuine logit ties; acceptable
 only if traced to equal-within-tolerance logits — never "close enough."
 
-**llm-rlvr-sql / GRPO.** llm-rlvr-sql is the parent RL text-to-SQL project; GRPO (Group Relative
+**llm-rlvr / GRPO.** llm-rlvr is the parent RL text-to-SQL project; GRPO (Group Relative
 Policy Optimization) needs many sampled completions per prompt. The rollout benchmark measures this
 pattern ([`docs/keeping-the-gpu-busy.md`](keeping-the-gpu-busy.md)).
 
@@ -490,7 +490,7 @@ from chunk ranges rather than assuming one prefill event per request.
 | 7 | [`tests/correctness/test_paged_decode.py`](../tests/correctness/test_paged_decode.py) | What correctness properties must hold? |
 | 8 | [`llm_infer/benchmarks/runners.py`](../llm_infer/benchmarks/runners.py) | How is llm-infer wired for benchmarking vs HF/vLLM? |
 | 9 | [`docs/fixture-format.md`](fixture-format.md) | How are goldens structured and regenerated? |
-| 10 | [`scripts/modal_rollout.py`](../scripts/modal_rollout.py) | How does rollout timing connect to llm-rlvr-sql economics? |
+| 10 | [`scripts/modal_rollout.py`](../scripts/modal_rollout.py) | How does rollout timing connect to llm-rlvr economics? |
 
 ---
 
@@ -516,7 +516,7 @@ delegates only the attention matmul to swappable backends (`torch_naive` for tru
 `flash-attn` for speed). An `InferenceEngine` step loop admits requests, prefills new ones,
 fuses decode for all running requests via `decode_many`, samples tokens, and frees finished
 blocks. Correctness is enforced by pytest oracles against committed HF greedy goldens before
-any throughput claim; Modal scripts benchmark against naive HF and vLLM and measure llm-rlvr-sql
+any throughput claim; Modal scripts benchmark against naive HF and vLLM and measure llm-rlvr
 GRPO rollout economics.
 
 ### The 5 things to understand first

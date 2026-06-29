@@ -1,4 +1,4 @@
-"""Loader and correctness-only forward pass for llm-pretrain dense export bundles."""
+"""Loader and correctness-only forward pass for esme-pretrain dense export bundles."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ __all__ = ["BUNDLE_FORMAT", "PretrainBundleError", "PretrainBundleModel"]
 class PretrainBundleModel:
     """Full-recompute inference for ``llm_pretrain_dense_v1`` bundles.
 
-    This is a correctness bridge for exported llm-pretrain DenseBackbone weights. The
+    This is a correctness bridge for exported esme-pretrain DenseBackbone weights. The
     cached methods participate in the serving engine's block accounting, but they keep
     request token history and recompute logits rather than writing real K/V pages. That
     makes DenseBackbone usable through the same runtime path as optimized backends
@@ -81,7 +81,7 @@ class PretrainBundleModel:
         backend: AttentionBackend | None = None,
         device: torch.device | str = "cpu",
     ) -> PretrainBundleModel:
-        """Load and validate an exported llm-pretrain dense bundle."""
+        """Load and validate an exported esme-pretrain dense bundle."""
         root = Path(bundle_path)
         if not root.is_dir():
             raise PretrainBundleError(f"bundle path must be a directory: {root}")

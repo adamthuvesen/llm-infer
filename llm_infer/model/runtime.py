@@ -202,7 +202,7 @@ def _load_dense_runtime(
         eos_token_ids=_dense_eos_ids(manifest),
         capabilities=DENSE_CAPABILITIES,
         metadata={
-            "source": "llm-pretrain-export",
+            "source": "esme-pretrain-export",
             "format": "llm_pretrain_dense_v1",
             "manifest": manifest,
             "chat_template": tokenizer_metadata["chat_template"],
