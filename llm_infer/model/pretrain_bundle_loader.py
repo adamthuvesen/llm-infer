@@ -100,6 +100,20 @@ class PretrainDenseConfig:
         )
 
 
+@dataclass(frozen=True)
+class _TensorSpec:
+    target: str
+    aliases: tuple[str, ...]
+    shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _ProjectionSpec:
+    target: str
+    bases: tuple[str, ...]
+    shape: tuple[int, ...]
+
+
 def required_file(root: Path, name: str) -> Path:
     path = root / name
     if not path.is_file():
@@ -223,53 +237,103 @@ def normalize_state_dict(
     device: torch.device | str,
 ) -> dict[str, torch.Tensor]:
     weights: dict[str, torch.Tensor] = {}
-    head_dim = config.head_dim
+    layer_norm_specs = _layer_norm_specs(config)
+    qk_norm_specs = _qk_norm_specs(config)
+    attention_projection_specs, mlp_projection_specs = _projection_specs(config)
 
-    _copy_weight(
-        weights,
-        "embed_tokens.weight",
-        state_dict,
-        _root_aliases("token_embedding.weight", "embed_tokens.weight", "tok_embeddings.weight"),
-        (config.vocab_size, config.hidden_size),
-        dtype=dtype,
-        device=device,
-    )
-    _copy_weight(
-        weights,
-        "norm.weight",
-        state_dict,
-        _root_aliases("final_norm.weight", "norm.weight", "ln_f.weight"),
-        (config.hidden_size,),
-        dtype=dtype,
-        device=device,
-    )
-    if not config.tie_word_embeddings:
+    for spec in _root_tensor_specs(config):
         _copy_weight(
             weights,
-            "lm_head.weight",
+            spec.target,
             state_dict,
-            _root_aliases("lm_head.weight", "output.weight", "output_projection.weight"),
-            (config.vocab_size, config.hidden_size),
+            _root_aliases(*spec.aliases),
+            spec.shape,
             dtype=dtype,
             device=device,
         )
 
     for layer in range(config.num_hidden_layers):
-        _copy_layer_weight(
-            weights,
-            layer,
+        for spec in layer_norm_specs:
+            _copy_layer_weight(
+                weights,
+                layer,
+                spec.target,
+                state_dict,
+                spec.aliases,
+                spec.shape,
+                dtype=dtype,
+                device=device,
+            )
+        for spec in attention_projection_specs:
+            _copy_projection(
+                weights,
+                layer,
+                spec.target,
+                state_dict,
+                spec.bases,
+                spec.shape,
+                dtype=dtype,
+                device=device,
+            )
+        for spec in qk_norm_specs:
+            _copy_layer_weight(
+                weights,
+                layer,
+                spec.target,
+                state_dict,
+                spec.aliases,
+                spec.shape,
+                dtype=dtype,
+                device=device,
+            )
+        for spec in mlp_projection_specs:
+            _copy_projection(
+                weights,
+                layer,
+                spec.target,
+                state_dict,
+                spec.bases,
+                spec.shape,
+                dtype=dtype,
+                device=device,
+            )
+
+    return weights
+
+
+def _root_tensor_specs(config: PretrainDenseConfig) -> tuple[_TensorSpec, ...]:
+    specs = [
+        _TensorSpec(
+            "embed_tokens.weight",
+            ("token_embedding.weight", "embed_tokens.weight", "tok_embeddings.weight"),
+            (config.vocab_size, config.hidden_size),
+        ),
+        _TensorSpec(
+            "norm.weight",
+            ("final_norm.weight", "norm.weight", "ln_f.weight"),
+            (config.hidden_size,),
+        ),
+    ]
+    if not config.tie_word_embeddings:
+        specs.append(
+            _TensorSpec(
+                "lm_head.weight",
+                ("lm_head.weight", "output.weight", "output_projection.weight"),
+                (config.vocab_size, config.hidden_size),
+            )
+        )
+    return tuple(specs)
+
+
+def _layer_norm_specs(config: PretrainDenseConfig) -> tuple[_TensorSpec, ...]:
+    return (
+        _TensorSpec(
             "input_norm.weight",
-            state_dict,
             ("attention_norm.weight", "attn_norm.weight", "input_layernorm.weight", "norm1.weight"),
             (config.hidden_size,),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_layer_weight(
-            weights,
-            layer,
+        ),
+        _TensorSpec(
             "post_attention_norm.weight",
-            state_dict,
             (
                 "feedforward_norm.weight",
                 "ffn_norm.weight",
@@ -278,102 +342,79 @@ def normalize_state_dict(
                 "norm2.weight",
             ),
             (config.hidden_size,),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+    )
+
+
+def _qk_norm_specs(config: PretrainDenseConfig) -> tuple[_TensorSpec, ...]:
+    if not config.qk_norm:
+        return ()
+    return (
+        _TensorSpec(
+            "attn.q_norm.weight",
+            (
+                "attention.q_norm.weight",
+                "attn.q_norm.weight",
+                "self_attn.q_norm.weight",
+            ),
+            (config.head_dim,),
+        ),
+        _TensorSpec(
+            "attn.k_norm.weight",
+            (
+                "attention.k_norm.weight",
+                "attn.k_norm.weight",
+                "self_attn.k_norm.weight",
+            ),
+            (config.head_dim,),
+        ),
+    )
+
+
+def _projection_specs(
+    config: PretrainDenseConfig,
+) -> tuple[tuple[_ProjectionSpec, ...], tuple[_ProjectionSpec, ...]]:
+    head_dim = config.head_dim
+    attention = (
+        _ProjectionSpec(
             "attn.q_proj",
-            state_dict,
             ("attention.wq", "attention.q_proj", "attn.q_proj", "self_attn.q_proj", "attn.wq"),
             (config.num_attention_heads * head_dim, config.hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+        _ProjectionSpec(
             "attn.k_proj",
-            state_dict,
             ("attention.wk", "attention.k_proj", "attn.k_proj", "self_attn.k_proj", "attn.wk"),
             (config.num_key_value_heads * head_dim, config.hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+        _ProjectionSpec(
             "attn.v_proj",
-            state_dict,
             ("attention.wv", "attention.v_proj", "attn.v_proj", "self_attn.v_proj", "attn.wv"),
             (config.num_key_value_heads * head_dim, config.hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+        _ProjectionSpec(
             "attn.o_proj",
-            state_dict,
             ("attention.wo", "attention.o_proj", "attn.o_proj", "self_attn.o_proj", "attn.wo"),
             (config.hidden_size, config.hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        if config.qk_norm:
-            _copy_layer_weight(
-                weights,
-                layer,
-                "attn.q_norm.weight",
-                state_dict,
-                ("attention.q_norm.weight", "attn.q_norm.weight", "self_attn.q_norm.weight"),
-                (head_dim,),
-                dtype=dtype,
-                device=device,
-            )
-            _copy_layer_weight(
-                weights,
-                layer,
-                "attn.k_norm.weight",
-                state_dict,
-                ("attention.k_norm.weight", "attn.k_norm.weight", "self_attn.k_norm.weight"),
-                (head_dim,),
-                dtype=dtype,
-                device=device,
-            )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+    )
+    mlp = (
+        _ProjectionSpec(
             "mlp.gate_proj",
-            state_dict,
             ("feedforward.w_gate", "feed_forward.w1", "ffn.w1", "mlp.gate_proj", "mlp.w1"),
             (config.intermediate_size, config.hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+        _ProjectionSpec(
             "mlp.up_proj",
-            state_dict,
             ("feedforward.w_up", "feed_forward.w3", "ffn.w3", "mlp.up_proj", "mlp.w3"),
             (config.intermediate_size, config.hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        _copy_projection(
-            weights,
-            layer,
+        ),
+        _ProjectionSpec(
             "mlp.down_proj",
-            state_dict,
             ("feedforward.w_down", "feed_forward.w2", "ffn.w2", "mlp.down_proj", "mlp.w2"),
             (config.hidden_size, config.intermediate_size),
-            dtype=dtype,
-            device=device,
-        )
-
-    return weights
+        ),
+    )
+    return attention, mlp
 
 
 def _copy_layer_weight(

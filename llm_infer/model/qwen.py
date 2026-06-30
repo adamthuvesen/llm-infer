@@ -219,28 +219,7 @@ class QwenModel:
         the full history (including this token) is gathered and attended through the
         backend. Advances ``table.length`` by one.
         """
-        pos = table.length
-        table.reserve(1)
-        new_length = pos + 1
-        ids = torch.as_tensor(token_id, dtype=torch.long, device=self.device).reshape(1)
-        hidden = self.w["model.embed_tokens.weight"][ids].to(self.dtype)
-
-        cos, sin = self._rope_for_positions(
-            torch.tensor([pos], dtype=torch.float32, device=self.device)
-        )
-        for layer in range(self.num_layers):
-            hidden = self._apply_decoder_layer(
-                hidden,
-                layer,
-                lambda x, p, lyr: self._decode_attention(
-                    x, p, cos, sin, lyr, cache, table, pos, new_length
-                ),
-            )
-        table.length = new_length
-
-        with self._profile("logits"):
-            hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
-            return (hidden @ self._lm_head().T)[-1]
+        return self.decode_tokens(cache, table, token_id)[-1]
 
     @torch.no_grad()
     def decode_many(
@@ -435,41 +414,6 @@ class QwenModel:
         with self._profile("projections_mlp"):
             return self._output_proj(attn, p)
 
-    def _decode_attention(
-        self,
-        x: torch.Tensor,
-        p: str,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        layer: int,
-        cache: PagedKVCache,
-        table: BlockTable,
-        pos: int,
-        length: int,
-    ) -> torch.Tensor:
-        """Decode attention: append the new token's K/V, gather history, attend.
-
-        ``x`` is one row (the new token). Its K/V is written at position ``pos``; the
-        gathered history covers positions ``0 .. length-1`` (``length == pos + 1``,
-        including this token), so the single query attends over the whole prefix.
-        """
-        with self._profile("projections_mlp"):
-            q, k, v = self._project_heads(x, p)
-        q = apply_rope(q, cos, sin)
-        k = apply_rope(k, cos, sin)
-        with self._profile("kv_write"):
-            cache.write(
-                table, layer, pos, k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous()
-            )
-        with self._profile("kv_read_gather"):
-            k_hist, v_hist = cache.read(table, layer, length)  # (length, num_kv_heads, head_dim)
-        with self._profile("gqa_expand"):
-            k_hist, v_hist = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
-        with self._profile("attention"):
-            attn = self.backend.forward(q, k_hist, v_hist)
-        with self._profile("projections_mlp"):
-            return self._output_proj(attn, p)
-
     def _decode_attention_batched(
         self,
         x: torch.Tensor,
@@ -482,7 +426,7 @@ class QwenModel:
         positions: list[int],
         read_plan: KVReadPlan,
     ) -> torch.Tensor:
-        """Batched decode attention: same per-request math as :meth:`_decode_attention`, fused.
+        """Batched decode attention: same cached decode math as :meth:`decode_tokens`, fused.
 
         ``x`` is ``(B, hidden)`` — one new token per request. Projection and RoPE run on all
         ``B`` at once (each row rotated by its own position via the per-request ``cos``/``sin``).

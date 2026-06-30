@@ -118,6 +118,19 @@ def _tiny_qwen() -> QwenModel:
     return QwenModel(weights, config, TorchNaiveAttention(), torch.float32)
 
 
+def _paged_cache_for(
+    model: QwenModel, *, num_blocks: int = 8, block_size: int = 3
+) -> PagedKVCache:
+    return PagedKVCache(
+        num_layers=model.num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_kv_heads=model.num_kv_heads,
+        head_dim=model.head_dim,
+        dtype=model.dtype,
+    )
+
+
 def test_active_decode_advances_between_prefill_chunks() -> None:
     model = ChunkedModel()
     engine = InferenceEngine(model, block_size=4, num_blocks=8, prefill_chunk_size=2)
@@ -144,25 +157,11 @@ def test_chunked_prefill_logits_match_full_prefill() -> None:
     model = _tiny_qwen()
     prompt_ids = [1, 5, 9, 13, 17, 21, 25]
 
-    full_cache = PagedKVCache(
-        num_layers=model.num_layers,
-        num_blocks=8,
-        block_size=3,
-        num_kv_heads=model.num_kv_heads,
-        head_dim=model.head_dim,
-        dtype=model.dtype,
-    )
+    full_cache = _paged_cache_for(model)
     full_table = full_cache.new_request()
     full_logits = model.prefill(prompt_ids, full_cache, full_table)
 
-    chunk_cache = PagedKVCache(
-        num_layers=model.num_layers,
-        num_blocks=8,
-        block_size=3,
-        num_kv_heads=model.num_kv_heads,
-        head_dim=model.head_dim,
-        dtype=model.dtype,
-    )
+    chunk_cache = _paged_cache_for(model)
     chunk_table = chunk_cache.new_request()
     chunk_logits = None
     while chunk_table.length < len(prompt_ids):
@@ -176,6 +175,22 @@ def test_chunked_prefill_logits_match_full_prefill() -> None:
 
     assert chunk_logits is not None
     torch.testing.assert_close(chunk_logits, full_logits, rtol=1e-5, atol=1e-6)
+
+
+def test_decode_one_matches_full_recompute_for_appended_token() -> None:
+    model = _tiny_qwen()
+    prompt_ids = [1, 5, 9]
+    next_token = 13
+
+    cache = _paged_cache_for(model)
+    table = cache.new_request()
+    model.prefill(prompt_ids, cache, table)
+
+    cached_logits = model.decode_one(cache, table, next_token)
+    recompute_logits = model.logits([*prompt_ids, next_token])[-1]
+
+    assert table.length == len(prompt_ids) + 1
+    torch.testing.assert_close(cached_logits, recompute_logits, rtol=1e-5, atol=1e-6)
 
 
 def test_chunked_engine_tokens_match_full_prefill_engine() -> None:

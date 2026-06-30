@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -24,6 +25,12 @@ RuntimeLoader = Callable[..., ModelRuntime]
 
 class ModelRegistryError(ValueError):
     """Raised when a requested model backend cannot be resolved."""
+
+
+@dataclass(frozen=True)
+class _DenseTokenizerMetadata:
+    add_special_tokens: bool
+    chat_template: Mapping[str, object] | None
 
 
 class TokenizersJsonTokenizer:
@@ -191,8 +198,8 @@ def _load_dense_runtime(
     tokenizer_metadata = _dense_tokenizer_metadata(manifest)
     tokenizer = TokenizersJsonTokenizer(
         model.tokenizer_path,
-        default_add_special_tokens=tokenizer_metadata["add_special_tokens"],
-        chat_template=tokenizer_metadata["chat_template"],
+        default_add_special_tokens=tokenizer_metadata.add_special_tokens,
+        chat_template=tokenizer_metadata.chat_template,
     )
     return ModelRuntime(
         backend_id="dense",
@@ -205,7 +212,7 @@ def _load_dense_runtime(
             "source": "esme-pretrain-export",
             "format": "llm_pretrain_dense_v1",
             "manifest": manifest,
-            "chat_template": tokenizer_metadata["chat_template"],
+            "chat_template": tokenizer_metadata.chat_template,
         },
         bundle_path=root,
     )
@@ -256,15 +263,15 @@ def _dense_eos_ids(manifest: Mapping[str, object]) -> frozenset[int]:
     return frozenset()
 
 
-def _dense_tokenizer_metadata(manifest: Mapping[str, object]) -> dict[str, object]:
+def _dense_tokenizer_metadata(manifest: Mapping[str, object]) -> _DenseTokenizerMetadata:
     tokenizer_entry = manifest.get("tokenizer")
     tokenizer_config = tokenizer_entry if isinstance(tokenizer_entry, dict) else {}
     chat_template = _dense_chat_template(manifest, tokenizer_config)
     add_special_tokens = _dense_add_special_tokens(manifest, tokenizer_config, chat_template)
-    return {
-        "add_special_tokens": add_special_tokens,
-        "chat_template": chat_template,
-    }
+    return _DenseTokenizerMetadata(
+        add_special_tokens=add_special_tokens,
+        chat_template=chat_template,
+    )
 
 
 def _dense_chat_template(
