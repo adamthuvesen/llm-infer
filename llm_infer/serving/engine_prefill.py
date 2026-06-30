@@ -126,8 +126,7 @@ class EnginePrefillMixin(EngineMixinHost):
             # chunk's blocks are available before the model touches the cache.
             self._ensure_pool_room(request, new_tokens=chunk_size)
         result.prefill_chunks[request.request_id] = (start_pos, end_pos)
-        self._emit_trace(
-            "prefill_chunk_started",
+        self._trace_prefill_chunk_started(
             request_id=request.request_id,
             start_pos=start_pos,
             end_pos=end_pos,
@@ -146,8 +145,7 @@ class EnginePrefillMixin(EngineMixinHost):
                     chunk_size=chunk_size,
                 )
         request.prompt_cached_tokens = end_pos
-        self._emit_trace(
-            "prefill_chunk_progress",
+        self._trace_prefill_chunk_progress(
             request_id=request.request_id,
             start_pos=start_pos,
             end_pos=end_pos,

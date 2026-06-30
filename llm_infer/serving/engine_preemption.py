@@ -138,8 +138,7 @@ class EnginePreemptionMixin(EngineMixinHost):
             start = request.prompt_cached_tokens
             step = min(chunk_size, total - start)
             self._ensure_pool_room(request, step)
-            self._emit_trace(
-                "prefill_chunk_started",
+            self._trace_prefill_chunk_started(
                 request_id=request.request_id,
                 start_pos=start,
                 end_pos=start + step,
@@ -148,8 +147,7 @@ class EnginePreemptionMixin(EngineMixinHost):
             with self._record_time("prefill"):
                 self._write_recompute_chunk(request, sequence, start, step)
             request.prompt_cached_tokens = start + step
-            self._emit_trace(
-                "prefill_chunk_progress",
+            self._trace_prefill_chunk_progress(
                 request_id=request.request_id,
                 start_pos=start,
                 end_pos=start + step,

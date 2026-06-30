@@ -53,6 +53,23 @@ class EngineMixinHost:
     ) -> None:
         raise NotImplementedError
 
+    def _trace_prefill_chunk_started(
+        self, request_id: str, *, start_pos: int, end_pos: int, total_prompt_tokens: int
+    ) -> None:
+        raise NotImplementedError
+
+    def _trace_prefill_chunk_progress(
+        self,
+        request_id: str,
+        *,
+        start_pos: int,
+        end_pos: int,
+        cached_tokens: int,
+        total_prompt_tokens: int,
+        completed: bool,
+    ) -> None:
+        raise NotImplementedError
+
     def _trace_pool_event(self, event: BlockPoolEvent) -> None:
         raise NotImplementedError
 

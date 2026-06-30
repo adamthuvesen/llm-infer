@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -43,6 +44,15 @@ from llm_infer.serving.server.streaming import (
 # per token; OpenAI itself caps stop at 4 sequences, which is plenty for a from-scratch engine.
 _MAX_STOP_SEQUENCES = 4
 _MAX_STOP_LENGTH = 256
+
+
+@dataclass(frozen=True)
+class _StartedGeneration:
+    request_id: str
+    created: int
+    arrival: float
+    token_stream: AsyncIterator[TokenStreamItem]
+    detok: StopSequenceDetokenizer
 
 
 def create_app(
@@ -124,40 +134,37 @@ def create_app(
         _reject_responses_unsupported(request)
         model = _resolve_model(request.model, model_id)
         prompt_ids = _responses_prompt_ids(tokenizer, request)
-        _assert_capacity(async_engine, prompt_ids, request.max_output_tokens)
-        arrival = time.perf_counter()
-        stop = _stop_sequences(request.stop)
-        request_id = async_engine.next_request_id()
-        created = int(time.time())
-        response_id = f"resp-{request_id}"
-        token_stream = async_engine.stream(
-            request_id=request_id,
+        started = _start_generation(
+            async_engine=async_engine,
+            tokenizer=tokenizer,
+            eos_token_ids=eos_token_ids,
             prompt_ids=prompt_ids,
             max_new_tokens=request.max_output_tokens,
-            eos_token_ids=eos_token_ids,
             sampling=_sampling_params(request),
+            stop=_stop_sequences(request.stop),
         )
+        response_id = f"resp-{started.request_id}"
         if request.stream:
             sse = stream_responses_sse(
-                token_stream=token_stream,
-                detok=StopSequenceDetokenizer(tokenizer, stop),
+                token_stream=started.token_stream,
+                detok=started.detok,
                 response_id=response_id,
-                created=created,
+                created=started.created,
                 model=model,
                 input_tokens=len(prompt_ids),
                 metrics=metrics,
-                arrival=arrival,
+                arrival=started.arrival,
             )
             return StreamingResponse(sse, media_type="text/event-stream")
         return await _collect_response(
-            token_stream=token_stream,
-            detok=StopSequenceDetokenizer(tokenizer, stop),
+            token_stream=started.token_stream,
+            detok=started.detok,
             response_id=response_id,
-            created=created,
+            created=started.created,
             model=model,
             input_tokens=len(prompt_ids),
             metrics=metrics,
-            arrival=arrival,
+            arrival=started.arrival,
         )
 
     async def _serve(
@@ -170,43 +177,70 @@ def create_app(
         sampling: SamplingParams,
         stop: list[str],
     ):
-        _assert_capacity(async_engine, prompt_ids, max_new_tokens)
-        arrival = time.perf_counter()
-        request_id = async_engine.next_request_id()
-        created = int(time.time())
-        completion_id = f"cmpl-{request_id}"
-        token_stream = async_engine.stream(
+        started = _start_generation(
+            async_engine=async_engine,
+            tokenizer=tokenizer,
+            eos_token_ids=eos_token_ids,
+            prompt_ids=prompt_ids,
+            max_new_tokens=max_new_tokens,
+            sampling=sampling,
+            stop=stop,
+        )
+        completion_id = f"cmpl-{started.request_id}"
+        if stream:
+            sse = stream_openai_sse(
+                request_kind=request_kind,
+                token_stream=started.token_stream,
+                detok=started.detok,
+                completion_id=completion_id,
+                created=started.created,
+                model=model,
+                metrics=metrics,
+                arrival=started.arrival,
+            )
+            return StreamingResponse(sse, media_type="text/event-stream")
+        return await _collect(
+            request_kind=request_kind,
+            token_stream=started.token_stream,
+            detok=started.detok,
+            completion_id=completion_id,
+            created=started.created,
+            model=model,
+            prompt_tokens=len(prompt_ids),
+            metrics=metrics,
+            arrival=started.arrival,
+        )
+
+    return app
+
+
+def _start_generation(
+    *,
+    async_engine: AsyncInferenceEngine,
+    tokenizer: TokenizerLike,
+    eos_token_ids: frozenset[int],
+    prompt_ids: list[int],
+    max_new_tokens: int,
+    sampling: SamplingParams,
+    stop: list[str],
+) -> _StartedGeneration:
+    _assert_capacity(async_engine, prompt_ids, max_new_tokens)
+    arrival = time.perf_counter()
+    request_id = async_engine.next_request_id()
+    created = int(time.time())
+    return _StartedGeneration(
+        request_id=request_id,
+        created=created,
+        arrival=arrival,
+        token_stream=async_engine.stream(
             request_id=request_id,
             prompt_ids=prompt_ids,
             max_new_tokens=max_new_tokens,
             eos_token_ids=eos_token_ids,
             sampling=sampling,
-        )
-        if stream:
-            sse = stream_openai_sse(
-                request_kind=request_kind,
-                token_stream=token_stream,
-                detok=StopSequenceDetokenizer(tokenizer, stop),
-                completion_id=completion_id,
-                created=created,
-                model=model,
-                metrics=metrics,
-                arrival=arrival,
-            )
-            return StreamingResponse(sse, media_type="text/event-stream")
-        return await _collect(
-            request_kind=request_kind,
-            token_stream=token_stream,
-            detok=StopSequenceDetokenizer(tokenizer, stop),
-            completion_id=completion_id,
-            created=created,
-            model=model,
-            prompt_tokens=len(prompt_ids),
-            metrics=metrics,
-            arrival=arrival,
-        )
-
-    return app
+        ),
+        detok=StopSequenceDetokenizer(tokenizer, stop),
+    )
 
 
 async def _collect(

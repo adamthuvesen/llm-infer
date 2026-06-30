@@ -240,48 +240,40 @@ class ServerMetrics:
                 preemptions,
             )
         )
-        self.registry.register(
-            Gauge(
+        gauges = (
+            (
                 "llm_infer_running_requests",
                 "Requests currently in the scheduler's running set.",
                 running_requests,
-            )
-        )
-        self.registry.register(
-            Gauge(
+            ),
+            (
                 "llm_infer_waiting_requests",
                 "Requests queued and waiting for admission (queue depth).",
                 waiting_requests,
-            )
-        )
-        self.registry.register(
-            Gauge(
+            ),
+            (
                 "llm_infer_kv_blocks_used",
                 "Physical KV-cache blocks currently allocated.",
                 kv_blocks_used,
-            )
-        )
-        self.registry.register(
-            Gauge(
+            ),
+            (
                 "llm_infer_kv_blocks_free",
                 "Physical KV-cache blocks currently free in the pool.",
                 kv_blocks_free,
-            )
-        )
-        self.registry.register(
-            Gauge(
+            ),
+            (
                 "llm_infer_kv_blocks_total",
                 "Total physical KV-cache blocks in the pool.",
                 kv_blocks_total,
-            )
-        )
-        self.registry.register(
-            Gauge(
+            ),
+            (
                 "llm_infer_kv_utilization_ratio",
                 "Fraction of the KV-cache block pool currently in use (0..1).",
                 kv_utilization,
-            )
+            ),
         )
+        for name, help_text, source in gauges:
+            self.registry.register(Gauge(name, help_text, source))
 
     def render(self) -> str:
         return self.registry.render()

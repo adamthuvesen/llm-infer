@@ -35,6 +35,37 @@ class EngineTraceMixin(EngineMixinHost):
             token_source=token_source,
         )
 
+    def _trace_prefill_chunk_started(
+        self, request_id: str, *, start_pos: int, end_pos: int, total_prompt_tokens: int
+    ) -> None:
+        self._emit_trace(
+            "prefill_chunk_started",
+            request_id=request_id,
+            start_pos=start_pos,
+            end_pos=end_pos,
+            total_prompt_tokens=total_prompt_tokens,
+        )
+
+    def _trace_prefill_chunk_progress(
+        self,
+        request_id: str,
+        *,
+        start_pos: int,
+        end_pos: int,
+        cached_tokens: int,
+        total_prompt_tokens: int,
+        completed: bool,
+    ) -> None:
+        self._emit_trace(
+            "prefill_chunk_progress",
+            request_id=request_id,
+            start_pos=start_pos,
+            end_pos=end_pos,
+            cached_tokens=cached_tokens,
+            total_prompt_tokens=total_prompt_tokens,
+            completed=completed,
+        )
+
     def _trace_pool_event(self, event: BlockPoolEvent) -> None:
         """Emit block lifecycle from the allocator's physical free-pool boundary.
 

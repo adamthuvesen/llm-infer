@@ -49,18 +49,18 @@ async def drain_token_stream(
     text_parts: list[str] = []
     finish_reason = "length"
     token_count = 0
-    async for item in token_stream:
-        token_count += 1
-        fed = detok.feed(item.token_id)
-        text_parts.append(fed.text)
-        if fed.stopped:
-            finish_reason = "stop"
-            await finish_on_stop(token_stream, metrics, arrival)
-            break
+    async for item in iter_text_stream(
+        token_stream=token_stream,
+        detok=detok,
+        metrics=metrics,
+        arrival=arrival,
+    ):
+        token_count = item.token_count
         if item.finish_reason is not None:
             finish_reason = item.finish_reason
-    else:
-        text_parts.append(detok.finalize())
+        if item.terminal:
+            break
+        text_parts.append(item.text)
     return DrainResult(
         text="".join(text_parts),
         token_count=token_count,
