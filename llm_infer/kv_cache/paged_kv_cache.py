@@ -143,8 +143,9 @@ class PagedKVCache:
         idx = torch.as_tensor(
             table.physical_slots(start_pos, n), dtype=torch.long, device=key.device
         )
-        self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = key
-        self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = value
+        key_rows, value_rows = self._layer_rows(layer)
+        key_rows[idx] = key
+        value_rows[idx] = value
 
     def write_many(
         self,
@@ -168,17 +169,17 @@ class PagedKVCache:
             self.prepare_write(table, pos, 1)
         slots = [table.physical_slot(pos) for table, pos in zip(tables, positions, strict=True)]
         idx = torch.as_tensor(slots, dtype=torch.long, device=key.device)
-        self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = key
-        self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx] = value
+        key_rows, value_rows = self._layer_rows(layer)
+        key_rows[idx] = key
+        value_rows[idx] = value
 
     def read(self, table: BlockTable, layer: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather K/V for positions ``0 .. length-1`` as ``(length, num_kv_heads, head_dim)``."""
         idx = torch.as_tensor(
             table.physical_slots(0, length), dtype=torch.long, device=self.key.device
         )
-        key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
-        value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[idx]
-        return key, value
+        key_rows, value_rows = self._layer_rows(layer)
+        return key_rows[idx], value_rows[idx]
 
     def plan_read_many(self, tables: list[BlockTable], lengths: list[int]) -> KVReadPlan:
         """Build reusable packed-read indices for a batched decode step."""
@@ -207,10 +208,13 @@ class PagedKVCache:
 
     def read_many_plan(self, layer: int, plan: KVReadPlan) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather packed K/V for ``layer`` using a prebuilt :class:`KVReadPlan`."""
-        key = self.key[layer].view(-1, self.num_kv_heads, self.head_dim)[plan.idx]
-        value = self.value[layer].view(-1, self.num_kv_heads, self.head_dim)[plan.idx]
-        return key, value
+        key_rows, value_rows = self._layer_rows(layer)
+        return key_rows[plan.idx], value_rows[plan.idx]
 
     def _copy_block(self, source: int, target: int) -> None:
         self.key[:, target].copy_(self.key[:, source])
         self.value[:, target].copy_(self.value[:, source])
+
+    def _layer_rows(self, layer: int) -> tuple[torch.Tensor, torch.Tensor]:
+        shape = (-1, self.num_kv_heads, self.head_dim)
+        return self.key[layer].view(shape), self.value[layer].view(shape)
