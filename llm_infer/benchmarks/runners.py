@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from llm_infer.benchmarks.workload import Workload
+from llm_infer.benchmarks.workload import SamplingConfig, Workload
 from llm_infer.model.interface import CausalLMBackend
 from llm_infer.profiling import TimingProfiler
 from llm_infer.serving import GREEDY, InferenceEngine, Request, SamplingParams
@@ -57,7 +57,7 @@ def _sync() -> None:
         torch.cuda.synchronize()
 
 
-def _sampling_config(sampling: object) -> dict[str, object]:
+def _sampling_config(sampling: SamplingConfig | None) -> dict[str, object]:
     """Render a system's decoding config for the pinned record (greedy vs sampled)."""
     if sampling is None:
         return {"mode": "greedy", "temperature": 0.0}
@@ -67,6 +67,11 @@ def _sampling_config(sampling: object) -> dict[str, object]:
         "top_p": sampling.top_p,
         "seed": sampling.seed,
     }
+
+
+def _request_seed(sampling: SamplingConfig, request_index: int) -> int:
+    """Per-completion seed: same base run, independent draws across expanded GRPO requests."""
+    return sampling.seed + request_index
 
 
 def time_system(
@@ -136,7 +141,9 @@ def run_llm_infer(
         if sampling is None:
             return GREEDY
         return SamplingParams(
-            temperature=sampling.temperature, top_p=sampling.top_p, seed=sampling.seed + index
+            temperature=sampling.temperature,
+            top_p=sampling.top_p,
+            seed=_request_seed(sampling, index),
         )
 
     def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
@@ -238,7 +245,7 @@ def run_hf_sequential(
         outputs: dict[str, list[int]] = {}
         for index, req in enumerate(workload.requests):
             if sampling is not None:
-                set_seed(sampling.seed + index)  # per-completion seed → independent G draws
+                set_seed(_request_seed(sampling, index))
             input_ids = torch.tensor([req.prompt_ids], device=device)
             gen = hf_model.generate(input_ids, **gen_kwargs)
             outputs[req.request_id] = gen[0, input_ids.shape[1] :].tolist()
@@ -357,7 +364,7 @@ def run_vllm(
             SamplingParams(
                 temperature=sampling.temperature,
                 top_p=sampling.top_p,
-                seed=sampling.seed + index,
+                seed=_request_seed(sampling, index),
                 max_tokens=workload.max_new_tokens,
                 n=1,
                 stop_token_ids=sorted(workload.eos_token_ids),
