@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv / venv (uv.lock IS committed for reproducibility)
+.venv/
+
+# pytest / tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# model / HF caches (never vendor weights into the repo)
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+.cache/
+checkpoints/
+exports/
+runs/
+data/
+datasets/
+wandb/
+
+# raw benchmark run artifacts (the curated result is folded into docs/benchmark.md)
+bench-results/
+
+# local logs / database-like scratch outputs
+*.log
+*.sqlite
+*.db
+*.parquet
+*.arrow
+
+# OS
+.DS_Store
