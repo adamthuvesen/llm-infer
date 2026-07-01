@@ -380,14 +380,13 @@ class PretrainBundleModel:
         The just-computed K/V (positions ``0 .. L-1``) is exactly what attention needs here, so
         it is used directly; writing it to the paged store seeds the decode steps that follow.
         """
-        del layer
         q, k, v = self._project_heads(x, prefix)
         q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
         # Store pre-GQA K/V as (seq, num_kv_heads, head_dim) at positions 0..seq-1.
         with self._profile("kv_write"):
             cache.write(
                 table,
-                self._layer_of(prefix),
+                layer,
                 0,
                 k.transpose(0, 1).contiguous(),
                 v.transpose(0, 1).contiguous(),
@@ -409,20 +408,18 @@ class PretrainBundleModel:
         end_pos: int,
     ) -> torch.Tensor:
         """Chunked prefill attention over cached prefix plus the current prompt chunk."""
-        del layer
         q, k, v = self._project_heads(x, prefix)
         q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
-        layer_index = self._layer_of(prefix)
         with self._profile("kv_write"):
             cache.write(
                 table,
-                layer_index,
+                layer,
                 start_pos,
                 k.transpose(0, 1).contiguous(),
                 v.transpose(0, 1).contiguous(),
             )
         with self._profile("kv_read_gather"):
-            k_hist, v_hist = cache.read(table, layer_index, end_pos)
+            k_hist, v_hist = cache.read(table, layer, end_pos)
         k_hist, v_hist = self._expand_kv(k_hist.transpose(0, 1), v_hist.transpose(0, 1))
         attn = self.backend.forward(q, k_hist, v_hist)
         return self._output_proj(attn, prefix)
@@ -446,16 +443,14 @@ class PretrainBundleModel:
         written to its own paged history and its full history gathered (GQA-expanded) — ragged
         across requests — then one batched attention call returns the ``B`` outputs.
         """
-        del layer
         q, k, v = self._project_heads(x, prefix)
         # q/k/v shapes: (heads, B, hd), (kv_heads, B, hd), (kv_heads, B, hd).
         q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
 
-        layer_index = self._layer_of(prefix)
         with self._profile("kv_write"):
             cache.write_many(
                 tables,
-                layer_index,
+                layer,
                 positions,
                 k.transpose(0, 1).contiguous(),
                 v.transpose(0, 1).contiguous(),
@@ -463,7 +458,7 @@ class PretrainBundleModel:
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
         with self._profile("kv_read_gather"):
-            k_hist, v_hist = cache.read_many_plan(layer_index, read_plan)
+            k_hist, v_hist = cache.read_many_plan(layer, read_plan)
         k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
 
         attn = self.backend.forward_decode_batch_packed(
@@ -545,11 +540,6 @@ class PretrainBundleModel:
         if self.tie_word_embeddings:
             return self.w["embed_tokens.weight"].to(self.dtype)
         return self.w["lm_head.weight"].to(self.dtype)
-
-    @staticmethod
-    def _layer_of(prefix: str) -> int:
-        """Layer index parsed back from a ``layers.{i}.`` weight prefix for the cache write."""
-        return int(prefix.split(".")[1])
 
     def _rope_tables(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         positions = torch.arange(seq_len, dtype=torch.float32, device=self.device)

@@ -355,7 +355,7 @@ def _template_token_ids(rendered: object) -> list[int]:
     return [int(token) for token in ids]
 
 
-def _apply_chat_template(tokenizer: object, messages: list[ChatMessage]) -> list[int]:
+def _apply_chat_template(tokenizer: TokenizerLike, messages: list[ChatMessage]) -> list[int]:
     rendered = tokenizer.apply_chat_template(
         [{"role": m.role, "content": m.content} for m in messages],
         add_generation_prompt=True,
@@ -455,7 +455,7 @@ def _include_stream_usage(request: SamplingRequestBody) -> bool:
     return bool(request.stream_options and request.stream_options.include_usage)
 
 
-def _responses_prompt_ids(tokenizer: object, request: ResponsesRequest) -> list[int]:
+def _responses_prompt_ids(tokenizer: TokenizerLike, request: ResponsesRequest) -> list[int]:
     """Tokenize a Responses ``input`` (+ optional ``instructions``) into prompt ids.
 
     A bare string with no instructions is encoded raw — the caller asked for plain

@@ -94,12 +94,10 @@ class EngineDecodeMixin(EngineMixinHost):
             tokens[i] = sample_row(
                 logits[i], p, request.generated, request.generator(logits.device)
             )
-        if any(token is None for token in tokens):
-            raise RuntimeError("sampled fewer tokens than requests")
         filled: list[torch.Tensor] = []
         for token in tokens:
             if token is None:
-                raise RuntimeError("internal sampling gap")
+                raise RuntimeError("sampled fewer tokens than requests")
             filled.append(token)
         return filled
 
