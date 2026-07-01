@@ -24,7 +24,7 @@ CPU-runnable by design — keep cases short. Run:
 
     uv run python scripts/generate_goldens.py
 
-Writes ``tests/correctness/goldens/qwen2_5_coder_3b_instruct_cot.json``.
+Writes ``llm_infer/fixtures/qwen2_5_coder_3b_instruct_cot.json``.
 """
 
 from __future__ import annotations
@@ -52,9 +52,8 @@ DO_SAMPLE = False  # greedy / temperature 0
 
 GOLDEN_PATH = (
     Path(__file__).resolve().parents[1]
-    / "tests"
-    / "correctness"
-    / "goldens"
+    / "llm_infer"
+    / "fixtures"
     / "qwen2_5_coder_3b_instruct_cot.json"
 )
 

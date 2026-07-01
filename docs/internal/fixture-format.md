@@ -25,7 +25,7 @@ running the reference check need no GPU.
 
 ## Storage
 
-One JSON file per (model, prompt-style): `tests/correctness/goldens/<name>.json`.
+One JSON file per (model, prompt-style): `llm_infer/fixtures/<name>.json`.
 
 ```jsonc
 {
@@ -146,7 +146,7 @@ This mirrors the reference check discipline exactly: the *non*-tie gap traced ab
 logits (~7000× the cross-path logit noise of 5.3e-5) and was correctly classified as
 **not** a tie. The 1e-3 tolerance sits well above that observed numerical noise yet
 hundreds of times below a real decision margin like 0.397, so it can launder genuine
-ties but never a real bug. The policy lives in `tests/correctness/tie_tolerance.py`; the
+ties but never a real bug. The policy lives in `llm_infer/validation/tie_tolerance.py`; the
 GPU reference check is `tests/correctness/test_flash_attn_paged.py` (auto-skipped off CUDA, run
 on the target A100 via `scripts/modal_reference_check.py`). The exact `torch_naive` CPU reference check is
 unchanged and remains the local check.

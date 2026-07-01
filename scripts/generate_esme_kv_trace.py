@@ -46,8 +46,9 @@ def _deterministic_clock() -> Callable[[], float]:
 def build_trace_jsonl() -> str:
     """Run the tiny Esme bundle through the real engine with tracing; return schema-v3 JSONL."""
     with tempfile.TemporaryDirectory() as tmp:
-        # Imported lazily so the script has no test-time import cost when only --help is wanted.
-        from tests.correctness.test_pretrain_bundle import _write_tiny_bundle
+        from llm_infer.fixtures.tiny_pretrain_bundle import (
+            write_tiny_pretrain_bundle as _write_tiny_bundle,
+        )
 
         runtime = load_model_runtime("esme", bundle_path=_write_tiny_bundle(Path(tmp)))
         recorder = TraceRecorder()

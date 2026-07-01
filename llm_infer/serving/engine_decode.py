@@ -8,12 +8,14 @@ import torch
 
 from llm_infer.kv_cache.block_allocator import OutOfBlocksError
 from llm_infer.kv_cache.block_table import BlockTable
-from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.engine_contract import EngineMixinHost
+else:
+    EngineMixinHost = object
 
 
 class EngineDecodeMixin(EngineMixinHost):
@@ -55,7 +57,7 @@ class EngineDecodeMixin(EngineMixinHost):
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
         self._trace_decode_step(requests, list(tokens), token_source="decode")
-        self._release_finished_in(requests)
+        self._release_finished_in(requests, result)
 
     def _params_for(self, request: Request) -> SamplingParams:
         """The request's own sampling params, or the engine default when it set none."""
@@ -203,7 +205,7 @@ class EngineDecodeMixin(EngineMixinHost):
         # freed wholesale by _release_finished_in, so only trim a still-running request).
         if not request.finished:
             request.block_table.trim_to_length()
-        self._release_finished_in([request])
+        self._release_finished_in([request], result)
 
     def _accepted_prefix_length(
         self, verifier_tokens: torch.Tensor, draft_tokens: torch.Tensor
@@ -228,7 +230,7 @@ class EngineDecodeMixin(EngineMixinHost):
         if request.finished and request.request_id not in result.finished:
             result.finished.append(request.request_id)
 
-    def _release_finished_in(self, requests: list[Request]) -> None:
+    def _release_finished_in(self, requests: list[Request], result: StepResult) -> None:
         """Free and release any of ``requests`` that just finished, promptly.
 
         Called at the end of each prefill/decode op — after its ``decode_step`` trace, so the
@@ -241,9 +243,11 @@ class EngineDecodeMixin(EngineMixinHost):
         for request in requests:
             if request.finished and self._is_running(request):
                 self._trace_request_finished(request)
+                result.finished_outputs[request.request_id] = request.generated
                 if request.block_table is not None:
                     self._free_block_table(request.block_table)
                 self.scheduler.release(request)
+                self._requests.pop(request.request_id, None)
 
     def _free_block_table(self, table: BlockTable) -> None:
         """Release backend per-table state, then return physical blocks to the pool."""

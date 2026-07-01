@@ -259,31 +259,50 @@ def main(
         }
     else:
         raise ValueError(f"command must be 'smoke' or 'rollout', got {command!r}")
-    n_prompts = num_prompts or defaults["num_prompts"]
-    g = num_generations or defaults["num_generations"]
-    max_comp = max_completion or defaults["max_completion"]
-    w = defaults["warmup"] if warmup < 0 else warmup
-    it = iters or defaults["iters"]
+    effective_num_prompts = num_prompts or defaults["num_prompts"]
+    effective_num_generations = num_generations or defaults["num_generations"]
+    effective_max_completion = max_completion or defaults["max_completion"]
+    effective_warmup = defaults["warmup"] if warmup < 0 else warmup
+    effective_iters = iters or defaults["iters"]
     with_sample_text = command == "smoke"
 
     fixture = json.loads(ROLLOUT_FIXTURE.read_text(encoding="utf-8"))
     workload = build_rollout_workload(
         MERGED_MODEL_PATH,
-        num_prompts=n_prompts,
-        num_generations=g,
-        max_completion_length=max_comp,
+        num_prompts=effective_num_prompts,
+        num_generations=effective_num_generations,
+        max_completion_length=effective_max_completion,
     )
     num_completions = len(workload.requests)
     print(
-        f"[rollout] {command}: {n_prompts} prompts × G={g} = {num_completions} completions, "
-        f"≤{max_comp} tok, temp={workload.sampling.temperature} top_p={workload.sampling.top_p} "
-        f"seed={workload.sampling.seed}, warmup={w}, iters={it}"
+        f"[rollout] {command}: {effective_num_prompts} prompts × "
+        f"G={effective_num_generations} = {num_completions} completions, "
+        f"≤{effective_max_completion} tok, temp={workload.sampling.temperature} "
+        f"top_p={workload.sampling.top_p} seed={workload.sampling.seed}, "
+        f"warmup={effective_warmup}, iters={effective_iters}"
     )
     print("[rollout] running vLLM ceiling (own image, A100) ...")
-    vllm_res = json.loads(rollout_vllm.remote(n_prompts, g, max_comp, w, it, with_sample_text))
+    vllm_res = json.loads(
+        rollout_vllm.remote(
+            effective_num_prompts,
+            effective_num_generations,
+            effective_max_completion,
+            effective_warmup,
+            effective_iters,
+            with_sample_text,
+        )
+    )
     print("[rollout] running llm-infer + HF floor (flash image, A100) ...")
     main_res = json.loads(
-        rollout_engine_and_hf.remote(n_prompts, g, max_comp, w, it, with_sample_text, profile)
+        rollout_engine_and_hf.remote(
+            effective_num_prompts,
+            effective_num_generations,
+            effective_max_completion,
+            effective_warmup,
+            effective_iters,
+            with_sample_text,
+            profile,
+        )
     )
 
     rows_in = [
@@ -322,14 +341,14 @@ def main(
         },
         "workload": {
             "completions": num_completions,
-            "num_prompts": n_prompts,
-            "num_generations": g,
-            "max_completion_length": max_comp,
+            "num_prompts": effective_num_prompts,
+            "num_generations": effective_num_generations,
+            "max_completion_length": effective_max_completion,
             "temperature": workload.sampling.temperature,
             "top_p": workload.sampling.top_p,
             "seed": workload.sampling.seed,
-            "warmup": w,
-            "iters": it,
+            "warmup": effective_warmup,
+            "iters": effective_iters,
             "dataset": fixture["dataset"],
             "selection": fixture["selection"],
             "source": workload.source,

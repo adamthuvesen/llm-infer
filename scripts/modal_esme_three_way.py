@@ -34,16 +34,17 @@ from pathlib import Path
 
 import modal
 
+from scripts.modal_esme_bundle import (
+    ESME_BUNDLE_MOUNT,
+    REMOTE_BUNDLE_PATH,
+    VOLUME_NAME,
+    local_bundle_path,
+    stage_bundle,
+)
 from scripts.modal_flash_image import FLASH_IMAGE, IGNORE, REMOTE_ROOT, REPO_ROOT
 
-DEFAULT_LOCAL_BUNDLE = Path("/Users/adamthuvesen/dev/menti/esme-posttrain/exports/esme-214m-chat")
-VOLUME_NAME = "llm-infer-esme-bundles"
-ESME_BUNDLE_DIR = "esme-214m-chat"
 ESME_HF_DIR = "esme-214m-chat-hf"
-ESME_BUNDLE_MOUNT = "/esme-bundles"
-REMOTE_BUNDLE_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_BUNDLE_DIR}"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
-REQUIRED_BUNDLE_FILES = ("manifest.json", "config.json", "tokenizer.json", "weights.pt")
 HF_CHECKPOINT_FILES = ("config.json", "model.safetensors", "tokenizer.json")
 BLOCK_SIZE = 128
 
@@ -71,31 +72,6 @@ vllm_image = (
 )
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-
-
-def _validate_local_bundle(bundle_path: Path) -> None:
-    missing = [name for name in REQUIRED_BUNDLE_FILES if not (bundle_path / name).is_file()]
-    if missing:
-        raise FileNotFoundError(f"{bundle_path} is missing required bundle files: {missing}")
-    manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
-    model = manifest.get("model")
-    if not isinstance(model, dict) or model.get("name") != "Esme-214M-Chat":
-        raise ValueError(f"expected Esme-214M-Chat bundle, found model={model!r}")
-
-
-def _stage_raw_bundle(bundle_path: Path) -> None:
-    """Copy the RAW bundle files to the Modal volume — pure file IO, no torch (local-safe).
-
-    The bundle->HF conversion imports torch (``convert_esme_to_hf`` -> torch), which the local
-    ``modal run`` client env does not have; it runs remotely in :func:`convert_bundle_to_hf`. This
-    only uploads the four raw bundle files, which is just the Modal volume API.
-    """
-    _validate_local_bundle(bundle_path)
-    print(f"[esme-3way] staging raw bundle -> {VOLUME_NAME}:/{ESME_BUNDLE_DIR}")
-    with esme_bundles.batch_upload(force=True) as batch:
-        for name in REQUIRED_BUNDLE_FILES:
-            batch.put_file(bundle_path / name, f"/{ESME_BUNDLE_DIR}/{name}")
-    print(f"[esme-3way] staged {len(REQUIRED_BUNDLE_FILES)} raw bundle files")
 
 
 @app.function(image=esme_image, volumes={ESME_BUNDLE_MOUNT: esme_bundles}, timeout=30 * 60)
@@ -314,21 +290,36 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
         defaults = {"num_requests": 8, "max_new_tokens": 64, "warmup": 1, "iters": 3}
     else:
         raise ValueError(f"command must be 'smoke' or 'bench', got {command!r}")
-    n = defaults["num_requests"]
-    m = defaults["max_new_tokens"]
-    w = defaults["warmup"]
-    it = defaults["iters"]
+    effective_num_requests = defaults["num_requests"]
+    effective_max_new_tokens = defaults["max_new_tokens"]
+    effective_warmup = defaults["warmup"]
+    effective_iters = defaults["iters"]
 
-    local_bundle = Path(bundle_path).expanduser() if bundle_path else DEFAULT_LOCAL_BUNDLE
-    _stage_raw_bundle(local_bundle)
+    local_bundle = local_bundle_path(bundle_path)
+    stage_bundle(esme_bundles, local_bundle, label="esme-3way")
     print("[esme-3way] converting bundle -> HF Qwen3 checkpoint (remote, FLASH_IMAGE) ...")
     print(f"[esme-3way] {convert_bundle_to_hf.remote()}")
 
-    print(f"[esme-3way] {command}: Esme-214M-Chat naive HF vs llm_infer vs vLLM, {n}x{m}")
+    print(
+        f"[esme-3way] {command}: Esme-214M-Chat naive HF vs llm_infer vs vLLM, "
+        f"{effective_num_requests}x{effective_max_new_tokens}"
+    )
     print("[esme-3way] running vLLM (own image, A100) ...")
-    vllm_res = json.loads(bench_vllm.remote(n, m, w, it))
+    vllm_res = json.loads(
+        bench_vllm.remote(
+            effective_num_requests, effective_max_new_tokens, effective_warmup, effective_iters
+        )
+    )
     print("[esme-3way] running naive HF + llm_infer + oracle gate ...")
-    main_res = json.loads(bench_hf_and_engine.remote(n, m, w, it, vllm_res["outputs"]))
+    main_res = json.loads(
+        bench_hf_and_engine.remote(
+            effective_num_requests,
+            effective_max_new_tokens,
+            effective_warmup,
+            effective_iters,
+            vllm_res["outputs"],
+        )
+    )
 
     rows = main_res["rows"]
     for row in rows:
@@ -349,7 +340,12 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             "command": command,
             "model": "Esme-214M-Chat",
             "reference": "direct PretrainBundleModel.logits() greedy decode (bundle oracle)",
-            "workload": {"num_requests": n, "max_new_tokens": m, "warmup": w, "iters": it},
+            "workload": {
+                "num_requests": effective_num_requests,
+                "max_new_tokens": effective_max_new_tokens,
+                "warmup": effective_warmup,
+                "iters": effective_iters,
+            },
             "vllm": vllm_res["config"],
             "num_blocks": main_res["num_blocks"],
             "repro_command": f"modal run scripts/modal_esme_three_way.py --command {command}",

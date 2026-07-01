@@ -78,6 +78,16 @@ def test_tracing_is_off_by_default() -> None:
 
     assert engine.trace is None
     assert engine.run() == {"r": [12, 13]}
+    assert engine._requests == {}
+
+
+def test_run_returns_completed_outputs_without_retaining_finished_requests() -> None:
+    engine = InferenceEngine(TraceModel(), block_size=4, num_blocks=8)
+    engine.add_request(Request("short", [1], 1, frozenset({63})))
+    engine.add_request(Request("long", [1, 2], 3, frozenset({63})))
+
+    assert engine.run() == {"short": [11], "long": [12, 13, 14]}
+    assert engine._requests == {}
 
 
 def test_trace_recorder_captures_real_engine_events() -> None:

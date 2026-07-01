@@ -6,11 +6,13 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from llm_infer.kv_cache.block_allocator import OutOfBlocksError
-from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.engine_contract import EngineMixinHost
+else:
+    EngineMixinHost = object
 
 
 class EnginePreemptionMixin(EngineMixinHost):
@@ -29,7 +31,7 @@ class EnginePreemptionMixin(EngineMixinHost):
 
         Delegates to the cache's dry-run cost so the count includes copy-on-write: a request
         whose last block is a prefix-shared partial block copies it private on append, which
-        pulls a block the rulee capacity-growth math misses (and would otherwise OOM mid-write).
+        pulls a block the plain capacity-growth math misses (and would otherwise OOM mid-write).
         """
         table = request.block_table
         if table is None:

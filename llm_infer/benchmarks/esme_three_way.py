@@ -41,6 +41,7 @@ from llm_infer.benchmarks.esme_paged import (
 from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
 from llm_infer.model.runtime import ModelRuntime
 from llm_infer.serving import InferenceEngine, Request
+from llm_infer.validation.tie_tolerance import LogitsOracle
 
 DecodeOnce = Callable[[], dict[str, list[int]]]
 
@@ -188,7 +189,7 @@ class EsmeAgreement:
 
 
 def tie_tolerant_agreement(
-    oracle_model: object,
+    oracle_model: LogitsOracle,
     requests: list[EsmeBenchRequest],
     outputs: dict[str, list[int]],
     reference: dict[str, list[int]],
@@ -204,13 +205,22 @@ def tie_tolerant_agreement(
     beyond it a real divergence. ``all_ties_or_exact`` drives ``matches_reference`` (no non-tie
     divergence ⇒ the system reports tok/s).
     """
-    from tests.correctness.tie_tolerance import compare_under_tie_tolerance
+    from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     prompts_by_id = {req.request_id: list(req.prompt_ids) for req in requests}
     exact = 0
     ties: list[dict[str, object]] = []
     divergences: list[dict[str, object]] = []
-    for request_id, raw in outputs.items():
+    missing = sorted(set(reference) - set(outputs))
+    extra = sorted(set(outputs) - set(reference))
+    if missing:
+        divergences.append({"request": missing[0], "detail": f"missing outputs for {missing[:3]}"})
+    if extra:
+        divergences.append({"request": extra[0], "detail": f"unexpected outputs for {extra[:3]}"})
+    for request_id in reference:
+        if request_id not in outputs:
+            continue
+        raw = outputs[request_id]
         fast = normalize_at_eos(raw, eos_token_ids)
         gold = normalize_at_eos(reference[request_id], eos_token_ids)
         if fast == gold:
@@ -228,7 +238,7 @@ def tie_tolerant_agreement(
         exact=exact,
         tie=len(ties),
         nontie=len(divergences),
-        total=len(outputs),
+        total=len(reference),
         ties_sample=ties[:3],
         divergences_sample=divergences[:3],
     )

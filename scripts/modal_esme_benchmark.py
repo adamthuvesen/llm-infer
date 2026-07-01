@@ -20,22 +20,24 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import time
 from pathlib import Path
 
 import modal
 
+from scripts.modal_esme_bundle import (
+    ESME_BUNDLE_MOUNT,
+    REMOTE_BUNDLE_PATH,
+    REQUIRED_BUNDLE_FILES,
+    VOLUME_NAME,
+    local_bundle_path,
+    stage_bundle,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
 CUDA_IMAGE = "nvidia/cuda:13.0.3-devel-ubuntu22.04"
 
-DEFAULT_LOCAL_BUNDLE = Path("/Users/adamthuvesen/dev/menti/esme-posttrain/exports/esme-214m-chat")
-VOLUME_NAME = "llm-infer-esme-bundles"
-ESME_BUNDLE_DIR = "esme-214m-chat"
-ESME_BUNDLE_MOUNT = "/esme-bundles"
-REMOTE_BUNDLE_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_BUNDLE_DIR}"
-REQUIRED_BUNDLE_FILES = ("manifest.json", "config.json", "tokenizer.json", "weights.pt")
 BLOCK_SIZE = 128
 
 app = modal.App("llm-infer-esme-benchmark")
@@ -60,40 +62,6 @@ esme_image = (
 )
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-
-
-def _local_bundle_path(bundle_path: str) -> Path:
-    if bundle_path:
-        return Path(bundle_path).expanduser()
-    env_path = os.environ.get("ESME_BUNDLE_PATH")
-    return Path(env_path).expanduser() if env_path else DEFAULT_LOCAL_BUNDLE
-
-
-def _validate_local_bundle(bundle_path: Path) -> dict:
-    missing = [name for name in REQUIRED_BUNDLE_FILES if not (bundle_path / name).is_file()]
-    if missing:
-        raise FileNotFoundError(f"{bundle_path} is missing required bundle files: {missing}")
-    manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
-    model = manifest.get("model")
-    if not isinstance(model, dict):
-        raise ValueError(f"{bundle_path}/manifest.json must contain a model object")
-    if model.get("name") != "Esme-214M-Chat":
-        raise ValueError(f"expected Esme-214M-Chat bundle, found model.name={model.get('name')!r}")
-    if model.get("id") != "esme-214m-chat":
-        raise ValueError(f"expected esme-214m-chat bundle id, found model.id={model.get('id')!r}")
-    if manifest.get("eos_token_ids") != [2]:
-        raise ValueError(f"expected Esme EOS [2], found {manifest.get('eos_token_ids')!r}")
-    return manifest
-
-
-def _stage_bundle(bundle_path: Path) -> dict:
-    manifest = _validate_local_bundle(bundle_path)
-    print(f"[esme] staging {bundle_path} -> Modal volume {VOLUME_NAME}:/{ESME_BUNDLE_DIR}")
-    with esme_bundles.batch_upload(force=True) as batch:
-        for name in REQUIRED_BUNDLE_FILES:
-            batch.put_file(bundle_path / name, f"/{ESME_BUNDLE_DIR}/{name}")
-    print(f"[esme] staged {len(REQUIRED_BUNDLE_FILES)} bundle files")
-    return manifest
 
 
 def _run_comparison(
@@ -298,18 +266,27 @@ def main(
     else:
         raise ValueError(f"command must be 'smoke' or 'bench', got {command!r}")
 
-    n = num_requests or defaults["num_requests"]
-    m = max_new_tokens or defaults["max_new_tokens"]
-    w = defaults["warmup"] if warmup < 0 else warmup
-    it = iters or defaults["iters"]
-    local_bundle = _local_bundle_path(bundle_path)
-    _stage_bundle(local_bundle)
+    effective_num_requests = num_requests or defaults["num_requests"]
+    effective_max_new_tokens = max_new_tokens or defaults["max_new_tokens"]
+    effective_warmup = defaults["warmup"] if warmup < 0 else warmup
+    effective_iters = iters or defaults["iters"]
+    local_bundle = local_bundle_path(bundle_path)
+    stage_bundle(esme_bundles, local_bundle, label="esme")
 
     print(
         f"[esme] {command}: Esme-214M-Chat paged-KV vs full recompute, "
-        f"{n} requests x {m} new tokens, warmup={w}, iters={it}"
+        f"{effective_num_requests} requests x {effective_max_new_tokens} new tokens, "
+        f"warmup={effective_warmup}, iters={effective_iters}"
     )
-    record = json.loads(bench_esme.remote(n, m, w, it, command == "smoke"))
+    record = json.loads(
+        bench_esme.remote(
+            effective_num_requests,
+            effective_max_new_tokens,
+            effective_warmup,
+            effective_iters,
+            command == "smoke",
+        )
+    )
     record["config"]["command"] = command
     record["config"]["bundle"]["local_source"] = str(local_bundle)
     record["config"]["repro_command"] = (

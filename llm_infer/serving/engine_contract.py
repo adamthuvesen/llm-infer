@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
 
 
-class EngineMixinHost:
+class EngineMixinHost(Protocol):
     """Attributes and cross-mixin hooks provided by :class:`InferenceEngine`.
 
     The engine is intentionally split across mixins. This base keeps their shared
@@ -42,7 +42,7 @@ class EngineMixinHost:
     preemption_count: int
 
     def _emit_trace(self, event: TraceEventName, **fields: object) -> None:
-        raise NotImplementedError
+        ...
 
     def _trace_decode_step(
         self,
@@ -51,12 +51,12 @@ class EngineMixinHost:
         *,
         token_source: TokenSource,
     ) -> None:
-        raise NotImplementedError
+        ...
 
     def _trace_prefill_chunk_started(
         self, request_id: str, *, start_pos: int, end_pos: int, total_prompt_tokens: int
     ) -> None:
-        raise NotImplementedError
+        ...
 
     def _trace_prefill_chunk_progress(
         self,
@@ -68,45 +68,45 @@ class EngineMixinHost:
         total_prompt_tokens: int,
         completed: bool,
     ) -> None:
-        raise NotImplementedError
+        ...
 
     def _trace_pool_event(self, event: BlockPoolEvent) -> None:
-        raise NotImplementedError
+        ...
 
     def _trace_request_finished(self, request: Request) -> None:
-        raise NotImplementedError
+        ...
 
     def _record_time(self, name: str) -> AbstractContextManager[object]:
-        raise NotImplementedError
+        ...
 
     def _record_host_time(self, name: str) -> AbstractContextManager[object]:
-        raise NotImplementedError
+        ...
 
     def _ensure_pool_room(self, request: Request, new_tokens: int) -> None:
-        raise NotImplementedError
+        ...
 
     def _blocks_to_grow(self, request: Request, new_tokens: int) -> int:
-        raise NotImplementedError
+        ...
 
     def _is_running(self, request: Request) -> bool:
-        raise NotImplementedError
+        ...
 
     def _live_running(self, requests: Iterable[Request]) -> list[Request]:
-        raise NotImplementedError
+        ...
 
     def _sample_one(self, logits: torch.Tensor, request: Request) -> torch.Tensor:
-        raise NotImplementedError
+        ...
 
     def _record(
         self, request: Request, token: int | torch.Tensor, is_eos: bool, result: StepResult
     ) -> None:
-        raise NotImplementedError
+        ...
 
     def _eos_flags(self, tokens: torch.Tensor, requests: list[Request]) -> list[bool]:
-        raise NotImplementedError
+        ...
 
-    def _release_finished_in(self, requests: list[Request]) -> None:
-        raise NotImplementedError
+    def _release_finished_in(self, requests: list[Request], result: StepResult) -> None:
+        ...
 
     def _free_block_table(self, table: BlockTable) -> None:
-        raise NotImplementedError
+        ...

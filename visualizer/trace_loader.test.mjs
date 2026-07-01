@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { appendEventRowContent } from "./event_row.js";
-import { buildTheaterLayout, validateTheaterLayout } from "./theater_layout.js";
+import { theaterGeometry } from "./theater_layout.js";
 import { buildTraceModel, parseJsonlTrace } from "./trace_loader.js";
 
 test("loads the committed schema-v3 fixture into a renderable model", async () => {
@@ -102,12 +102,40 @@ test("validates the request_preempted reason", () => {
 
 test("rejects a trace with a sequence gap (playback assumes contiguous ids)", () => {
   const text = [
-    { event: "request_admitted", schema_version: 3, sequence: 1, step: 0, request_id: "r" },
+    {
+      event: "request_admitted",
+      schema_version: 3,
+      sequence: 1,
+      step: 0,
+      request_id: "r",
+      prompt_tokens: 2,
+      max_new_tokens: 4,
+      reserved_blocks: 1,
+    },
     { event: "decode_step", schema_version: 3, sequence: 3, step: 1, request_ids: ["r"], token_ids: [9] },
   ]
     .map((event) => JSON.stringify(event))
     .join("\n");
   assert.throws(() => parseJsonlTrace(text), /Sequence gap/);
+});
+
+test("rejects a trace whose sequence ids do not start at one", () => {
+  const text = [
+    {
+      event: "request_admitted",
+      schema_version: 3,
+      sequence: 10,
+      step: 0,
+      request_id: "r",
+      prompt_tokens: 2,
+      max_new_tokens: 4,
+      reserved_blocks: 1,
+    },
+    { event: "decode_step", schema_version: 3, sequence: 11, step: 1, request_ids: ["r"], token_ids: [9] },
+  ]
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+  assert.throws(() => parseJsonlTrace(text), /start at 1/);
 });
 
 test("rejects a decode_step whose token_ids are not integers", () => {
@@ -134,13 +162,32 @@ test("rejects a multi-request decode_step that is not one token per request", ()
   assert.throws(() => parseJsonlTrace(text), /one token_id per request/);
 });
 
-test("theater layout keeps headline, cursor marker, ticks, and lanes separated", () => {
-  const layout = buildTheaterLayout(4);
+test("theater layout keeps the timeline and lanes inside the rendered frame", () => {
+  const layout = theaterGeometry(4);
 
-  assert.equal(validateTheaterLayout(layout), true);
-  assert.ok(layout.header.subheadY < layout.cursorCy - 8);
-  assert.ok(layout.cursorLabelY < layout.laneTop);
-  assert.ok(layout.tickY < layout.laneTop);
+  const textSafetyGap = 12;
+  assert.ok(layout.frameLeft < layout.left);
+  assert.ok(layout.left < layout.right);
+  assert.ok(layout.right < layout.frameRight);
+  assert.ok(layout.gridTop - 8 + textSafetyGap < layout.laneTop);
+  assert.equal(layout.width, 1000);
+  assert.equal(layout.laneHeight, 88);
+  assert.ok(layout.gridTop < layout.laneTop);
+  assert.ok(layout.gridBottom <= layout.height);
+});
+
+test("rejects malformed throughput samples before inspector rendering", () => {
+  const text = JSON.stringify({
+    event: "tokens_per_second_sampled",
+    schema_version: 3,
+    sequence: 1,
+    step: 0,
+    tokens_per_second: "fast",
+    tokens_emitted: 1,
+    total_generated_tokens: 1,
+    elapsed_seconds: 0.1,
+  });
+  assert.throws(() => parseJsonlTrace(text), /tokens_per_second_sampled/);
 });
 
 test("keeps speculative-style multi-token decode bursts on one request lane", () => {
@@ -171,6 +218,73 @@ test("keeps speculative-style multi-token decode bursts on one request lane", ()
 
   const model = buildTraceModel(parseJsonlTrace(text));
   assert.deepEqual(model.requestList[0].decodes[0].tokenIds, [41, 42, 43]);
+});
+
+test("re-admission after preemption preserves the original lane and generated-token count", () => {
+  const text = [
+    {
+      event: "request_admitted",
+      schema_version: 3,
+      sequence: 1,
+      step: 0,
+      request_id: "r",
+      prompt_tokens: 3,
+      max_new_tokens: 5,
+      reserved_blocks: 2,
+    },
+    {
+      event: "decode_step",
+      schema_version: 3,
+      sequence: 2,
+      step: 1,
+      request_ids: ["r"],
+      token_ids: [41],
+      tokens_emitted: 1,
+      batch_size: 1,
+    },
+    {
+      event: "request_preempted",
+      schema_version: 3,
+      sequence: 3,
+      step: 2,
+      request_id: "r",
+      preempt_reason: "kv_pressure",
+      block_count: 1,
+      generated_tokens: 1,
+      pool_used: 0,
+      pool_free: 4,
+    },
+    {
+      event: "request_admitted",
+      schema_version: 3,
+      sequence: 4,
+      step: 3,
+      request_id: "r",
+      prompt_tokens: 3,
+      max_new_tokens: 5,
+      reserved_blocks: 2,
+    },
+    {
+      event: "request_resumed",
+      schema_version: 3,
+      sequence: 5,
+      step: 3,
+      request_id: "r",
+      prompt_tokens: 3,
+      generated_tokens: 1,
+      cached_tokens: 3,
+      pool_used: 1,
+      pool_free: 3,
+    },
+  ]
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+
+  const model = buildTraceModel(parseJsonlTrace(text));
+  assert.equal(model.requestList.length, 1);
+  assert.equal(model.requestList[0].firstSequence, 1);
+  assert.equal(model.requestList[0].resumes[0].generatedTokens, 1);
+  assert.equal(model.pressureSamples.at(-1).logicalTokens, 4);
 });
 
 test("renders hostile event labels as text, not markup", () => {
@@ -220,4 +334,28 @@ test("rejects non-string request labels before rendering", () => {
   });
 
   assert.throws(() => parseJsonlTrace(text), /request_id must be a string/);
+});
+
+test("rejects event-specific required fields before model building", () => {
+  const missingRequestId = JSON.stringify({
+    event: "request_admitted",
+    schema_version: 3,
+    sequence: 1,
+    step: 0,
+    prompt_tokens: 3,
+    max_new_tokens: 5,
+    reserved_blocks: 2,
+  });
+  assert.throws(() => parseJsonlTrace(missingRequestId), /request_admitted must have a non-empty request_id/);
+
+  const missingFinishedTokens = JSON.stringify({
+    event: "request_finished",
+    schema_version: 3,
+    sequence: 1,
+    step: 0,
+    request_id: "r",
+    generated_tokens: 1,
+    reason: "length",
+  });
+  assert.throws(() => parseJsonlTrace(missingFinishedTokens), /request_finished token_ids/);
 });

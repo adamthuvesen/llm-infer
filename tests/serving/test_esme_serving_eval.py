@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.runtime import load_model_runtime
 from scripts.esme_serving_eval import (
     EngineRequestSpec,
@@ -19,7 +20,6 @@ from scripts.esme_serving_eval import (
     run_asgi_http_workload,
     run_engine_workload,
 )
-from tests.correctness.test_pretrain_bundle import _write_tiny_bundle
 
 
 def _runtime(tmp_path: Path):

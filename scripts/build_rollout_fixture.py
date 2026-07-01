@@ -17,7 +17,7 @@ the pinned Spider-dev questions. From the llm-infer repo root:
 Inputs (override via env): ``RLVR_ROOT`` (llm-rlvr checkout, read-only),
 ``TEXT2SQL_SPIDER_ROOT`` (an extracted ``spider_data/`` for ``tables.json`` — llm-rlvr's
 local copy by default, so no multi-GB archive download). Writes
-``tests/fixtures/rollout_grpo_s0_spider_dev.json`` and prints its sha256.
+``llm_infer/fixtures/rollout_grpo_s0_spider_dev.json`` and prints its sha256.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ SAMPLING_SEED = 0  # GrpoHyperparams.seed
 SELECTION_SEED = 0  # frozen, reproducible choice of the 8 Spider-dev prompts
 PROMPT_STYLE = "cot"  # the RL model's chain-of-thought instruction
 
-FIXTURE_PATH = LLM_INFER_ROOT / "tests" / "fixtures" / "rollout_grpo_s0_spider_dev.json"
+FIXTURE_PATH = LLM_INFER_ROOT / "llm_infer" / "fixtures" / "rollout_grpo_s0_spider_dev.json"
 
 
 def _load_build_messages(rlvr_root: Path):

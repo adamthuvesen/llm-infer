@@ -18,7 +18,7 @@ import pytest
 
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
-from tests.correctness.test_chunked_prefill import _tiny_qwen
+from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 VOCAB = 37
 EOS_ID = 36  # the tiny model never greedily emits this on these prompts, so length caps decode
@@ -647,6 +647,7 @@ def _chat(**extra) -> dict:
         (_chat(top_p=2.0), 400),
         (_chat(top_k=-3), 400),
         (_chat(presence_penalty=5.0), 400),
+        (_chat(seed=2**64), 400),
     ],
 )
 def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
@@ -655,6 +656,30 @@ def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
         async with app.router.lifespan_context(app), _client(app) as client:
             resp = await client.post("/v1/chat/completions", json=payload)
             assert resp.status_code == status
+
+    _run(go())
+
+
+@pytest.mark.parametrize(
+    "path, payload",
+    [
+        ("/v1/chat/completions", _chat(seed=True, max_tokens=3)),
+        (
+            "/v1/completions",
+            {"model": "tiny-qwen", "prompt": "hi", "top_k": "4", "max_tokens": 3},
+        ),
+        (
+            "/v1/responses",
+            {"model": "tiny-qwen", "input": "hi", "seed": "123", "max_output_tokens": 3},
+        ),
+    ],
+)
+def test_numeric_fields_reject_json_coercion(path: str, payload: dict) -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(path, json=payload)
+            assert resp.status_code == 422
 
     _run(go())
 
@@ -671,6 +696,29 @@ def test_per_request_temperature_is_honored_no_400() -> None:
             )
             assert resp.status_code == 200
             assert resp.json()["usage"]["completion_tokens"] == 5
+
+    _run(go())
+
+
+def test_overflow_seed_rejected_and_engine_survives() -> None:
+    """Bad seeds fail at request validation, not inside the background sampling loop."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            invalid = await client.post(
+                "/v1/chat/completions",
+                json=_chat(temperature=0.8, seed=2**64, max_tokens=5),
+            )
+            assert invalid.status_code == 400
+            assert "seed must be in" in invalid.json()["detail"]
+
+            ok = await client.post(
+                "/v1/chat/completions",
+                json=_chat(temperature=0.8, seed=2**64 - 1, max_tokens=5),
+            )
+            assert ok.status_code == 200
+            assert ok.json()["usage"]["completion_tokens"] == 5
 
     _run(go())
 

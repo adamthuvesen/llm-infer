@@ -16,14 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     role: Literal["system", "user", "assistant"]
     content: str
 
 
 class StreamOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     include_usage: bool = False
 
@@ -37,7 +37,7 @@ class SamplingRequestBody(BaseModel):
     honor (``n > 1``, ``logprobs``) are validated explicitly in the handlers.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     model: str
     temperature: float = 0.0
@@ -153,7 +153,7 @@ class ModelList(BaseModel):
 class ResponseInputItem(BaseModel):
     """One structured input item: a role + text content, mirroring a chat message."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     role: Literal["system", "user", "assistant", "developer"]
     content: str
@@ -161,7 +161,7 @@ class ResponseInputItem(BaseModel):
 
 
 class ResponsesRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     model: str
     input: str | list[ResponseInputItem]

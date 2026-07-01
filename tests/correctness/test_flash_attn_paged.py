@@ -16,22 +16,20 @@ run on the target GPU (Modal A100) via ``scripts/modal_reference_check.py``; the
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
 
+from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving import InferenceEngine, Request
-
-from .tie_tolerance import DEFAULT_TIE_TOLERANCE, compare_under_tie_tolerance
+from llm_infer.validation.tie_tolerance import DEFAULT_TIE_TOLERANCE, compare_under_tie_tolerance
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="flash-attn requires CUDA; run on the target GPU"
 )
 
-GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
-FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+FIXTURE = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
 EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
 MAX_NEW = FIXTURE["decoding"]["max_new_tokens"]
 CASES = FIXTURE["cases"]

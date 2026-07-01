@@ -41,7 +41,7 @@ uv run python scripts/generate_esme_kv_trace.py --write
 This drives the **actual** `InferenceEngine` over the tiny `Esme-214M-Chat`-format bundle with
 preemption on and writes `docs/assets/esme_kv_trace_schema_v3.jsonl` — every event is emitted by
 the real engine/scheduler/allocator on the Esme backend, including a forced recompute preemption.
-Load it with `Load JSONL` to watch an own-model (Esme) run, not a synthetic one. A fixed step
+Load it with `Load JSONL` to watch an Esme run, not a synthetic one. A fixed step
 clock keeps the artifact byte-stable so it can be regression-checked.
 
 ## What The Viewer Shows

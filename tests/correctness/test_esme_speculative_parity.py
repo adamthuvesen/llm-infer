@@ -20,13 +20,12 @@ from pathlib import Path
 import pytest
 import torch
 
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
 from llm_infer.tracing import TraceRecorder
-
-from .test_pretrain_bundle import _write_tiny_bundle
 
 # A prompt with a repeated suffix so prompt-lookup actually finds a draft to verify (otherwise
 # speculation degrades to the normal path and the test would not exercise verification).

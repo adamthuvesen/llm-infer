@@ -24,6 +24,9 @@ from dataclasses import dataclass
 
 import torch
 
+_MIN_TORCH_SEED = -(2**63)
+_MAX_TORCH_SEED = 2**64 - 1
+
 
 @dataclass(frozen=True)
 class SamplingParams:
@@ -65,6 +68,12 @@ class SamplingParams:
             raise ValueError(f"presence_penalty must be in [-2, 2]; got {self.presence_penalty}")
         if not (-2.0 <= self.frequency_penalty <= 2.0):
             raise ValueError(f"frequency_penalty must be in [-2, 2]; got {self.frequency_penalty}")
+        if not isinstance(self.seed, int) or isinstance(self.seed, bool):
+            raise ValueError(f"seed must be an integer; got {self.seed!r}")
+        if not (_MIN_TORCH_SEED <= self.seed <= _MAX_TORCH_SEED):
+            raise ValueError(
+                f"seed must be in [{_MIN_TORCH_SEED}, {_MAX_TORCH_SEED}]; got {self.seed}"
+            )
 
     @property
     def is_greedy(self) -> bool:

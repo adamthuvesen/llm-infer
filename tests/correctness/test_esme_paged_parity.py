@@ -28,11 +28,10 @@ from pathlib import Path
 import pytest
 import torch
 
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
-
-from .test_pretrain_bundle import _write_tiny_bundle
 
 # Synthetic bundle: fp32 bit-noise, essentially exact.
 SYNTH_RTOL = 1e-5

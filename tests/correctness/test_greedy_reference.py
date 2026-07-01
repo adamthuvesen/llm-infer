@@ -14,25 +14,23 @@ The model load is module-scoped (one 3B fp32 load for the whole suite) and marke
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
 
+from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.qwen import QwenModel
 
-GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
-
 
 def _load_fixture() -> dict:
-    if not GOLDEN_PATH.exists():
+    if not QWEN_COT_GOLDEN.is_file():
         pytest.fail(
-            f"golden fixture missing at {GOLDEN_PATH}; "
+            f"golden fixture missing at {QWEN_COT_GOLDEN}; "
             "regenerate with `uv run python scripts/generate_goldens.py`"
         )
-    return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+    return json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
 
 
 FIXTURE = _load_fixture()

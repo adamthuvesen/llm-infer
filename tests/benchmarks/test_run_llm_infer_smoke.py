@@ -8,9 +8,9 @@ import pytest
 
 from llm_infer.benchmarks.runners import run_llm_infer
 from llm_infer.benchmarks.workload import BenchRequest, Workload
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
-from tests.correctness.test_pretrain_bundle import _write_tiny_bundle
 
 
 @pytest.fixture

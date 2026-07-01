@@ -18,7 +18,7 @@ use bf16 for timed generation and are checked against the fp32
 | `Esme-214M-Chat` | `llm_infer` | yes, 6 exact + 2 ties | 2.625 | 486 | 185.2 |
 | `Esme-214M-Chat` | `vllm` | yes, 6 exact + 2 ties | 0.149 | 472 | 3163.4 |
 
-`llm_infer` is **5.5x** the naive HF baseline on the own model. vLLM is the ceiling, not
+`llm_infer` is **5.5x** the naive HF baseline on Esme. vLLM is the ceiling, not
 the system this repo claims to beat.
 
 ## What Was Measured

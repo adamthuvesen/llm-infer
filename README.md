@@ -95,7 +95,7 @@ Esme bundle.
 | `llm_infer` | 185.2 tok/s |
 | vLLM | 3163.4 tok/s |
 
-`llm_infer` is 5.5x the naive HF baseline on the own model. vLLM remains the ceiling, not the
+`llm_infer` is 5.5x the naive HF baseline on Esme. vLLM remains the ceiling, not the
 opponent this repo claims to beat. Full methodology and caveats are in
 [docs/benchmark.md](docs/benchmark.md).
 

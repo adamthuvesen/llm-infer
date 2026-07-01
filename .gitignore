@@ -27,8 +27,20 @@ data/
 datasets/
 wandb/
 
+# Modal / W&B / local service logs
+.modal/
+modal-logs/
+modal_logs/
+
 # raw benchmark run artifacts (the curated result is folded into docs/benchmark.md)
 bench-results/
+benchmark-payloads/
+raw-data/
+outputs/
+artifacts/
+traces/
+models/
+model-weights/
 
 # local logs / database-like scratch outputs
 *.log

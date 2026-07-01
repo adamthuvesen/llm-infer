@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
 
+from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
 from tests.support.fake_causal_lm import FakeCausalLMBase
 
-GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
-FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+FIXTURE = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
 EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
 CASE = FIXTURE["cases"][0]
 

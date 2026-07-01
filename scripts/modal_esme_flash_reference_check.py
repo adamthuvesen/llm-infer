@@ -25,20 +25,19 @@ definition every flash harness imports, so flash-attn installs from a prebuilt w
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 import modal
 
+from scripts.modal_esme_bundle import (
+    ESME_BUNDLE_MOUNT,
+    REMOTE_BUNDLE_PATH,
+    VOLUME_NAME,
+    local_bundle_path,
+    stage_bundle,
+)
 from scripts.modal_flash_image import FLASH_IMAGE
 
-DEFAULT_LOCAL_BUNDLE = Path("/Users/adamthuvesen/dev/menti/esme-posttrain/exports/esme-214m-chat")
-VOLUME_NAME = "llm-infer-esme-bundles"
-ESME_BUNDLE_DIR = "esme-214m-chat"
-ESME_BUNDLE_MOUNT = "/esme-bundles"
-REMOTE_BUNDLE_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_BUNDLE_DIR}"
-REQUIRED_BUNDLE_FILES = ("manifest.json", "config.json", "tokenizer.json", "weights.pt")
 BLOCK_SIZE = 128
 
 app = modal.App("llm-infer-esme-flash-reference-check")
@@ -48,32 +47,6 @@ app = modal.App("llm-infer-esme-flash-reference-check")
 flash_image = FLASH_IMAGE
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-
-
-def _local_bundle_path(bundle_path: str) -> Path:
-    if bundle_path:
-        return Path(bundle_path).expanduser()
-    env_path = os.environ.get("ESME_BUNDLE_PATH")
-    return Path(env_path).expanduser() if env_path else DEFAULT_LOCAL_BUNDLE
-
-
-def _validate_local_bundle(bundle_path: Path) -> None:
-    missing = [name for name in REQUIRED_BUNDLE_FILES if not (bundle_path / name).is_file()]
-    if missing:
-        raise FileNotFoundError(f"{bundle_path} is missing required bundle files: {missing}")
-    manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
-    model = manifest.get("model")
-    if not isinstance(model, dict) or model.get("name") != "Esme-214M-Chat":
-        raise ValueError(f"expected Esme-214M-Chat bundle, found model={model!r}")
-
-
-def _stage_bundle(bundle_path: Path) -> None:
-    _validate_local_bundle(bundle_path)
-    print(f"[esme-flash] staging {bundle_path} -> {VOLUME_NAME}:/{ESME_BUNDLE_DIR}")
-    with esme_bundles.batch_upload(force=True) as batch:
-        for name in REQUIRED_BUNDLE_FILES:
-            batch.put_file(bundle_path / name, f"/{ESME_BUNDLE_DIR}/{name}")
-    print(f"[esme-flash] staged {len(REQUIRED_BUNDLE_FILES)} bundle files")
 
 
 @app.function(
@@ -189,5 +162,5 @@ def main(command: str = "smoke", bundle_path: str = "") -> None:
         num_requests, max_new_tokens = 8, 64
     else:
         raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")
-    _stage_bundle(_local_bundle_path(bundle_path))
+    stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="esme-flash")
     print(check_esme_flash.remote(num_requests, max_new_tokens))

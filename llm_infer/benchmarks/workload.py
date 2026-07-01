@@ -1,11 +1,11 @@
 """The shared three-way benchmark workload — one identical input for every system.
 
-Cleary rule #1 of the benchmark: naive HF, llm-infer, and vLLM must decode the *same*
+Benchmark rule #1: naive HF, llm-infer, and vLLM must decode the *same*
 prompts under the *same* stop config, or the tokens/s numbers compare different work.
 This module is the single source of that workload, so no runner can quietly use an
 easier input.
 
-The prompts are the committed golden ``prompt_ids`` (``tests/correctness/goldens/``) —
+The prompts are the committed golden ``prompt_ids`` (``llm_infer/fixtures/``) —
 already tokenized through the pinned Instruct chat template and frozen, byte-identical to
 the reference check. The benchmark replays those prompt token ids directly (no
 tokenizer, no model here), cycling the small case pool up to ``num_requests`` so the batch
@@ -18,18 +18,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
-DEFAULT_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "tests"
-    / "correctness"
-    / "goldens"
-    / "qwen2_5_coder_3b_instruct_cot.json"
-)
-ROLLOUT_FIXTURE = (
-    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "rollout_grpo_s0_spider_dev.json"
-)
+from llm_infer.fixtures import QWEN_COT_GOLDEN, ROLLOUT_GRPO_S0_SPIDER_DEV
+
+DEFAULT_FIXTURE = QWEN_COT_GOLDEN
+ROLLOUT_FIXTURE = ROLLOUT_GRPO_S0_SPIDER_DEV
 
 
 @dataclass(frozen=True)
@@ -80,7 +75,7 @@ def build_workload(
     num_requests: int,
     max_new_tokens: int,
     *,
-    fixture_path: Path = DEFAULT_FIXTURE,
+    fixture_path: Traversable | Path = DEFAULT_FIXTURE,
 ) -> Workload:
     """Build ``num_requests`` requests by cycling the committed golden prompts.
 
@@ -126,7 +121,7 @@ def build_rollout_workload(
     served_model_id: str,
     served_model_revision: str | None = None,
     *,
-    fixture_path: Path = ROLLOUT_FIXTURE,
+    fixture_path: Traversable | Path = ROLLOUT_FIXTURE,
     num_prompts: int | None = None,
     num_generations: int | None = None,
     max_completion_length: int | None = None,

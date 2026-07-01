@@ -15,8 +15,8 @@ import httpx
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, ServerMetrics, create_app
 from llm_infer.serving.server.metrics import Histogram, Registry
-from tests.correctness.test_chunked_prefill import _tiny_qwen
 from tests.serving.test_api import EOS_ID, TinyTokenizer
+from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 NUM_BLOCKS = 64
 

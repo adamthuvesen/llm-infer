@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from llm_infer.kv_cache.block_allocator import BlockPoolEvent
-from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 from llm_infer.tracing import FinishReason, TokenSource, TraceEvent, TraceEventName
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.engine_contract import EngineMixinHost
+else:
+    EngineMixinHost = object
 
 
 class EngineTraceMixin(EngineMixinHost):

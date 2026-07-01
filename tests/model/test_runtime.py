@@ -17,10 +17,10 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.runtime import ModelRegistryError, available_backends, load_model_runtime
 from llm_infer.serve import DEFAULT_BACKEND, _bundle_path_for_backend, build_app_from_runtime
-from tests.correctness.test_pretrain_bundle import _write_tiny_bundle
 
 
 def _client(app) -> httpx.AsyncClient:

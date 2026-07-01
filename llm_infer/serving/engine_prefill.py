@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING
 import torch
 
 from llm_infer.scheduler.scheduler import blocks_for_footprint, max_blocks_for
-from llm_infer.serving.engine_contract import EngineMixinHost
 from llm_infer.serving.request import Request
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.engine_contract import EngineMixinHost
+else:
+    EngineMixinHost = object
 
 
 class EnginePrefillMixin(EngineMixinHost):
@@ -58,7 +60,7 @@ class EnginePrefillMixin(EngineMixinHost):
             token = self._sample_one(logits, request)
         self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
         self._trace_decode_step([request], [token], token_source="prefill")
-        self._release_finished_in([request])
+        self._release_finished_in([request], result)
 
     def _prefill_shared_group(self, requests: list[Request], result: StepResult) -> None:
         prompt_ids = requests[0].prompt_ids
@@ -100,7 +102,7 @@ class EnginePrefillMixin(EngineMixinHost):
         for request, token, is_eos in zip(members, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
         self._trace_decode_step(members, tokens, token_source="prefill")
-        self._release_finished_in(members)
+        self._release_finished_in(members, result)
 
     def _cache_prompt_chunk(self, request: Request, result: StepResult) -> torch.Tensor | None:
         """Cache one prompt chunk and return final-prompt logits when ready to sample."""

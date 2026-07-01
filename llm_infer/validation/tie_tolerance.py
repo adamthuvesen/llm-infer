@@ -9,8 +9,7 @@ The mechanism mirrors the reference check divergence trace in docs/fixture-forma
 the fast backend's greedy tokens against the golden and stop at the **first** step ``t``
 where they differ. Up to ``t`` the two sequences are identical, so the fast backend
 decoded step ``t`` from exactly the golden prefix; we recompute that step's logits with
-the **reference path** — ``QwenModel.logits`` (full recompute, fp32, the trusted
-reference) — over ``prompt + golden[:t]``. Two outcomes:
+the trusted fp32 full-recompute oracle over ``prompt + golden[:t]``. Two outcomes:
 
 * Both the token the fast kernel chose AND the golden token are within ``tolerance`` of the
   reference max — a genuine tie. The fast kernel's fp32-reduction-order picked the other
@@ -34,10 +33,9 @@ first divergence on its own case.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
-
-from llm_infer.model.qwen import QwenModel
 
 # The top-2 reference-logit gap at or below which a divergence counts as a genuine tie.
 # Sized from the reference check trace: the *non*-tie gap there was 0.397 logits (~7000x the
@@ -69,8 +67,12 @@ class TieToleranceResult:
     failure: str | None  # set iff the first divergence was NOT a tie (a real bug)
 
 
+class LogitsOracle(Protocol):
+    def logits(self, token_ids: list[int]) -> torch.Tensor: ...
+
+
 def compare_under_tie_tolerance(
-    reference: QwenModel,
+    reference: LogitsOracle,
     prompt_ids: list[int],
     fast_tokens: list[int],
     golden_tokens: list[int],

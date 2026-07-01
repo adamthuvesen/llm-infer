@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.tracing import TraceRecorder
-from tests.correctness.test_chunked_prefill import _tiny_qwen
+from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 # A vocab-37 model with EOS pinned to an id it never greedily emits in these short runs, so the
 # length cap (not EOS) ends each request and the full continuation is exercised.

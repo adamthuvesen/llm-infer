@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from tests.correctness.tie_tolerance import compare_under_tie_tolerance
+from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
 
 class _ReferenceMustNotBeUsed:

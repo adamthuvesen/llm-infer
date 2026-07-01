@@ -18,7 +18,7 @@ The benchmark times one frozen GRPO-style rollout batch:
 | model | `Qwen/Qwen2.5-Coder-3B-Instruct` plus merged `grpo-s0` LoRA |
 
 Prompts are byte-identical to the original `llm-rlvr` evaluation path and frozen in
-`tests/fixtures/rollout_grpo_s0_spider_dev.json`.
+`llm_infer/fixtures/rollout_grpo_s0_spider_dev.json`.
 
 ## Systems
 

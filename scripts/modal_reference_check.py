@@ -22,8 +22,6 @@ Run with the ``modal`` CLI (``uv tool install modal``), not as a project depende
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import modal
 
 from scripts.modal_flash_image import FLASH_IMAGE, REMOTE_ROOT
@@ -53,6 +51,7 @@ def smoke() -> str:
 
     import torch
 
+    from llm_infer.fixtures import QWEN_COT_GOLDEN
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.qwen import QwenModel
     from llm_infer.serving import InferenceEngine, Request
@@ -60,11 +59,7 @@ def smoke() -> str:
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     print(f"device: {torch.cuda.get_device_name(0)}; flash-attn imported OK")
 
-    fixture = json.loads(
-        (
-            Path(REMOTE_ROOT) / "tests/correctness/goldens/qwen2_5_coder_3b_instruct_cot.json"
-        ).read_text(encoding="utf-8")
-    )
+    fixture = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
     case = fixture["cases"][0]
     eos = frozenset(fixture["decoding"]["eos_token_ids"])
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
 from llm_infer.tracing import TraceRecorder
-from tests.correctness.test_chunked_prefill import _tiny_qwen
+from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 EOS = frozenset({36})  # the tiny model does not emit this on these prompts, so length caps decode
 STEPS = 12

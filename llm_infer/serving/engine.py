@@ -36,6 +36,7 @@ class StepResult:
     prefill_chunks: dict[str, tuple[int, int]] = field(default_factory=dict)
     finished: list[str] = field(default_factory=list)
     tokens: dict[str, list[int | torch.Tensor]] = field(default_factory=dict)
+    finished_outputs: dict[str, list[int]] = field(default_factory=dict)
 
 
 class InferenceEngine(
@@ -203,11 +204,12 @@ class InferenceEngine(
 
     def run(self) -> dict[str, list[int]]:
         """Step until the queue and running set drain; return each request's generated ids."""
+        finished_outputs: dict[str, list[int]] = {}
         with self._record_time("total_wall"):
             while self.scheduler.has_work():
-                self.step()
-        with self._record_host_time("cpu_gpu_sync"):
-            return {rid: request.generated for rid, request in self._requests.items()}
+                result = self.step()
+                finished_outputs.update(result.finished_outputs)
+        return finished_outputs
 
 
 def _infer_capabilities(model: CausalLMBackend) -> BackendCapabilities:

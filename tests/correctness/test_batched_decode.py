@@ -16,16 +16,15 @@ validated on the A100 by the benchmark's fp32-reference agreement check.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
 
+from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.serving import InferenceEngine, Request
 
-GOLDEN_PATH = Path(__file__).parent / "goldens" / "qwen2_5_coder_3b_instruct_cot.json"
-FIXTURE = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+FIXTURE = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
 EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
 MAX_NEW = FIXTURE["decoding"]["max_new_tokens"]
 CASES = FIXTURE["cases"]

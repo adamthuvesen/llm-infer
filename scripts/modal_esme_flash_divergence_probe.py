@@ -27,14 +27,14 @@ from pathlib import Path
 
 import modal
 
+from scripts.modal_esme_bundle import (
+    ESME_BUNDLE_MOUNT,
+    REMOTE_BUNDLE_PATH,
+    VOLUME_NAME,
+    local_bundle_path,
+    stage_bundle,
+)
 from scripts.modal_flash_image import FLASH_IMAGE
-
-DEFAULT_LOCAL_BUNDLE = Path("/Users/adamthuvesen/dev/menti/esme-posttrain/exports/esme-214m-chat")
-VOLUME_NAME = "llm-infer-esme-bundles"
-ESME_BUNDLE_DIR = "esme-214m-chat"
-ESME_BUNDLE_MOUNT = "/esme-bundles"
-REMOTE_BUNDLE_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_BUNDLE_DIR}"
-REQUIRED_BUNDLE_FILES = ("manifest.json", "config.json", "tokenizer.json", "weights.pt")
 
 # esme-001 is index 1 of the flash gate's prompt list; the divergence is at decode step 22.
 PROMPTS = (
@@ -51,16 +51,6 @@ TOKEN_ORACLE = 4817
 app = modal.App("llm-infer-esme-flash-divergence-probe")
 flash_image = FLASH_IMAGE
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-
-
-def _stage_bundle(bundle_path: Path) -> None:
-    missing = [name for name in REQUIRED_BUNDLE_FILES if not (bundle_path / name).is_file()]
-    if missing:
-        raise FileNotFoundError(f"{bundle_path} is missing required bundle files: {missing}")
-    with esme_bundles.batch_upload(force=True) as batch:
-        for name in REQUIRED_BUNDLE_FILES:
-            batch.put_file(bundle_path / name, f"/{ESME_BUNDLE_DIR}/{name}")
-    print(f"[probe] staged {len(REQUIRED_BUNDLE_FILES)} bundle files")
 
 
 @app.function(
@@ -145,6 +135,5 @@ def probe() -> str:
 
 @app.local_entrypoint()
 def main(bundle_path: str = "") -> None:
-    local = Path(bundle_path).expanduser() if bundle_path else DEFAULT_LOCAL_BUNDLE
-    _stage_bundle(local)
+    stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="probe")
     print(probe.remote())

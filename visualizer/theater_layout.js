@@ -1,34 +1,21 @@
-export function buildTheaterLayout(requestCount) {
-  const laneHeight = 78;
-  const header = {
-    kickerY: 54,
-    headlineY: 82,
-    subheadY: 106,
-    bottomY: 124,
-  };
-  const laneTop = 166;
-  const signalTop = laneTop + requestCount * laneHeight + 58;
+export function theaterGeometry(laneCount) {
+  const width = 1000;
+  const left = 196;
+  const right = width - 40;
+  const top = 70;
+  const laneHeight = 88;
+  const laneTop = top;
+  const height = laneTop + laneCount * laneHeight + 24;
   return {
-    width: 1180,
-    height: Math.max(720, signalTop + 170),
-    left: 180,
-    timelineRight: 850,
+    width,
+    height,
+    left,
+    right,
+    frameLeft: 8,
+    frameRight: width - 8,
     laneTop,
     laneHeight,
-    signalTop,
-    cursorLineTop: header.bottomY,
-    cursorCy: header.bottomY + 16,
-    cursorLabelY: header.bottomY + 22,
-    tickY: header.bottomY + 8,
-    header,
+    gridTop: top - 8,
+    gridBottom: laneTop + laneCount * laneHeight + 4,
   };
-}
-
-export function validateTheaterLayout(layout) {
-  const textSafetyGap = 12;
-  return (
-    layout.header.subheadY + textSafetyGap < layout.cursorCy - 8 &&
-    layout.cursorLabelY + textSafetyGap < layout.laneTop &&
-    layout.tickY + textSafetyGap < layout.laneTop
-  );
 }

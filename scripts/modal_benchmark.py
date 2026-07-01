@@ -114,9 +114,6 @@ def bench_engine_and_hf(
     divergence the fp32 reference proves is a genuine numerical tie. A non-tie
     divergence marks that system non-equivalent (no tok/s).
     """
-    import sys
-
-    sys.path.insert(0, REMOTE_ROOT)  # make the tests.* tie-policy importable (see generate_goldens)
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -131,7 +128,7 @@ def bench_engine_and_hf(
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.qwen import QwenModel
     from llm_infer.serving import InferenceEngine, Request
-    from tests.correctness.tie_tolerance import compare_under_tie_tolerance
+    from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     hf_cache.commit()
@@ -197,7 +194,20 @@ def bench_engine_and_hf(
 
     def comparison_vs_reference(outputs: dict[str, list[int]]) -> dict:
         exact, ties, divergences = 0, [], []
-        for rid, raw in outputs.items():
+        missing = sorted(set(reference) - set(outputs))
+        extra = sorted(set(outputs) - set(reference))
+        if missing:
+            divergences.append(
+                {"request": missing[0], "detail": f"missing outputs for {missing[:3]}"}
+            )
+        if extra:
+            divergences.append(
+                {"request": extra[0], "detail": f"unexpected outputs for {extra[:3]}"}
+            )
+        for rid in reference:
+            if rid not in outputs:
+                continue
+            raw = outputs[rid]
             fast = normalize_at_eos(raw, eos)
             gold = reference[rid]
             if fast == gold:
@@ -215,7 +225,7 @@ def bench_engine_and_hf(
             "exact": exact,
             "tie": len(ties),
             "nontie": len(divergences),
-            "total": len(outputs),
+            "total": len(reference),
             # Matches fp32 reference except at genuine bf16 ties.
             "all_ties_or_exact": not divergences,
             "ties_sample": ties[:3],
@@ -277,17 +287,33 @@ def main(
         defaults = {"num_requests": 32, "max_new_tokens": 128, "warmup": 1, "iters": 3}
     else:
         raise ValueError(f"command must be 'smoke' or 'bench', got {command!r}")
-    n = num_requests or defaults["num_requests"]
-    m = max_new_tokens or defaults["max_new_tokens"]
-    w = defaults["warmup"] if warmup < 0 else warmup
-    it = iters or defaults["iters"]
+    effective_num_requests = num_requests or defaults["num_requests"]
+    effective_max_new_tokens = max_new_tokens or defaults["max_new_tokens"]
+    effective_warmup = defaults["warmup"] if warmup < 0 else warmup
+    effective_iters = iters or defaults["iters"]
 
-    workload = build_workload(n, m)
-    print(f"[benchmark] {command}: {n} requests x {m} new tokens, warmup={w}, iters={it}")
+    workload = build_workload(effective_num_requests, effective_max_new_tokens)
+    print(
+        f"[benchmark] {command}: {effective_num_requests} requests x "
+        f"{effective_max_new_tokens} new tokens, warmup={effective_warmup}, iters={effective_iters}"
+    )
     print("[benchmark] running vLLM (own image, A100) ...")
-    vllm_res = json.loads(bench_vllm.remote(n, m, w, it))
+    vllm_res = json.loads(
+        bench_vllm.remote(
+            effective_num_requests, effective_max_new_tokens, effective_warmup, effective_iters
+        )
+    )
     print("[benchmark] running naive HF + llm-infer + fp32-reference agreement ...")
-    main_res = json.loads(bench_engine_and_hf.remote(n, m, w, it, vllm_res["outputs"], profile))
+    main_res = json.loads(
+        bench_engine_and_hf.remote(
+            effective_num_requests,
+            effective_max_new_tokens,
+            effective_warmup,
+            effective_iters,
+            vllm_res["outputs"],
+            profile,
+        )
+    )
 
     agree = main_res["comparison_vs_fp32_reference"]
     rows_in = [
@@ -323,10 +349,10 @@ def main(
         "gpu": {"hf_and_engine": main_res["gpu"], "vllm": vllm_res["gpu"]},
         "versions": {"hf_and_engine": main_res["versions"], "vllm": vllm_res["versions"]},
         "workload": {
-            "num_requests": n,
-            "max_new_tokens": m,
-            "warmup": w,
-            "iters": it,
+            "num_requests": effective_num_requests,
+            "max_new_tokens": effective_max_new_tokens,
+            "warmup": effective_warmup,
+            "iters": effective_iters,
             "model_id": workload.model_id,
             "model_revision": workload.model_revision,
             "eos_token_ids": sorted(workload.eos_token_ids),

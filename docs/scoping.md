@@ -76,7 +76,7 @@ llm_infer/
   benchmarks/     # Esme baselines plus historical Qwen harnesses
 tests/correctness/ # reference and equivalence checks
 docs/             # public docs
-docs/internal/    # archived plans and operator context
+docs/internal/    # archived implementation notes
 scripts/          # goldens, benchmarks, loadgen, trace fixtures
 visualizer/       # schema-v3 KV trace replay UI
 ```

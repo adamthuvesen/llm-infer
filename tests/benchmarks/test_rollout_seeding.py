@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from llm_infer.benchmarks.runners import run_llm_infer
 from llm_infer.benchmarks.workload import BenchRequest, SamplingConfig, Workload
-from tests.correctness.test_chunked_prefill import _tiny_qwen
+from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 
 def _group_workload() -> Workload:

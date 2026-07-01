@@ -12,13 +12,12 @@ from pathlib import Path
 
 import torch
 
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.interface import DENSE_CAPABILITIES, QWEN_CAPABILITIES
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
-
-from .test_pretrain_bundle import _write_tiny_bundle
 
 
 def test_logit_soft_cap_changes_logits(tmp_path: Path) -> None:

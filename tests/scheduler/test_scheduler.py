@@ -165,3 +165,19 @@ def test_requeue_returns_preempted_request_to_front() -> None:
     # The preempted request reclaims a slot ahead of the never-started newcomer.
     assert [r.request_id for r in sched.waiting] == ["running", "waiting"]
     assert running not in sched.running
+    assert sched.committed_blocks == 0
+
+
+def test_preempt_release_subtracts_admitted_budget_not_later_footprint() -> None:
+    sched = Scheduler(num_blocks=4, block_size=4, preemption=True)
+    request = _request("r", prompt_len=3, max_new_tokens=6)
+    sched.add(request)
+    sched.admit(free_blocks=4)
+    assert sched.committed_blocks == 1
+
+    request.record(7)
+    request.record(7)
+    assert blocks_for_footprint(request, block_size=4) == 2
+
+    sched.release(request)
+    assert sched.committed_blocks == 0

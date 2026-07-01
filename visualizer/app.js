@@ -1,4 +1,5 @@
 import { appendEventRowContent } from "./event_row.js";
+import { theaterGeometry } from "./theater_layout.js";
 import { buildTraceModel, eventLabel, parseJsonlTrace } from "./trace_loader.js";
 
 const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v3.jsonl";
@@ -240,11 +241,11 @@ function renderTheater() {
 }
 
 function renderLane(scene, request, index, geo) {
-  const y0 = geo.laneTop + index * geo.laneH;
-  const trackY = y0 + geo.laneH * 0.62;
+  const y0 = geo.laneTop + index * geo.laneHeight;
+  const trackY = y0 + geo.laneHeight * 0.62;
   const lane = group(scene, "lane");
 
-  rect(lane, geo.frameLeft, y0, geo.frameRight - geo.frameLeft, geo.laneH, `lane-band${index % 2 ? " alt" : ""}`, 0);
+  rect(lane, geo.frameLeft, y0, geo.frameRight - geo.frameLeft, geo.laneHeight, `lane-band${index % 2 ? " alt" : ""}`, 0);
 
   text(lane, 16, y0 + 26, request.requestId, "lane-title");
   text(lane, 16, y0 + 44, laneMeta(request), "lane-sub");
@@ -445,23 +446,6 @@ function ensureTheater() {
 
   state.theater = { laneCount, geo, scene, playhead, playLine, playGlow };
   return state.theater;
-}
-
-function theaterGeometry(laneCount) {
-  const width = 1000;
-  const left = 196;
-  const right = width - 40;
-  const top = 70;
-  const laneH = 88;
-  const laneTop = top;
-  const height = laneTop + laneCount * laneH + 24;
-  return {
-    width, height, left, right,
-    frameLeft: 8, frameRight: width - 8,
-    laneTop, laneH,
-    gridTop: top - 8,
-    gridBottom: laneTop + laneCount * laneH + 4,
-  };
 }
 
 /* ============================ data helpers ============================ */

@@ -73,6 +73,7 @@ class Scheduler:
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
         self.committed_blocks = 0
+        self._committed_by_request: dict[str, int] = {}
 
     def add(self, request: Request) -> None:
         """Queue a request. Rejects one too large to ever fit the whole pool.
@@ -96,7 +97,7 @@ class Scheduler:
         reclaim a slot ahead of never-started newcomers rather than starve behind them.
         """
         self.running.remove(request)
-        self.committed_blocks -= blocks_for_footprint(request, self.block_size)
+        self.committed_blocks -= self._pop_committed_budget(request)
         self.waiting.appendleft(request)
 
     def admit(self, *, free_blocks: int | None = None) -> list[Request]:
@@ -126,18 +127,20 @@ class Scheduler:
             self.waiting.popleft()
             self.running.append(request)
             self.committed_blocks += need
+            self._committed_by_request[request.request_id] = need
             admitted.append(request)
         return admitted
 
     def release(self, request: Request) -> None:
         """Drop a finished request from the running set and return its block budget."""
         self.running.remove(request)
-        budget = (
-            blocks_for_footprint(request, self.block_size)
-            if self.preemption
-            else max_blocks_for(request, self.block_size)
-        )
-        self.committed_blocks -= budget
+        self.committed_blocks -= self._pop_committed_budget(request)
+
+    def _pop_committed_budget(self, request: Request) -> int:
+        budget = self._committed_by_request.pop(request.request_id, None)
+        if budget is None:
+            raise ValueError(f"request {request.request_id!r} has no committed block budget")
+        return budget
 
     def preemption_victim(self, exclude: Request | None = None) -> Request | None:
         """The request to evict under pressure: most-recently-admitted, never ``exclude``.

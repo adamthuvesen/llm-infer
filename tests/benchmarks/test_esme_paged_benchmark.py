@@ -18,8 +18,9 @@ from llm_infer.benchmarks.esme_paged import (
     compare_paged_vs_recompute,
     reference_outputs,
 )
+from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.runtime import load_model_runtime
-from tests.correctness.test_pretrain_bundle import _write_tiny_bundle
 
 
 @pytest.fixture
@@ -41,6 +42,40 @@ def _requests() -> list[EsmeBenchRequest]:
         EsmeBenchRequest("r0", "p0", (1, 4, 7)),
         EsmeBenchRequest("r1", "p1", (2, 5)),
     ]
+
+
+class _OracleMustNotBeUsed:
+    def logits(self, _token_ids: list[int]) -> torch.Tensor:
+        raise AssertionError("exact/missing-output comparison should not consult logits")
+
+
+def test_tie_tolerant_agreement_fails_missing_or_extra_request_ids() -> None:
+    requests = _requests()
+    reference = {"r0": [1, 2], "r1": [3, 4]}
+
+    missing = tie_tolerant_agreement(
+        _OracleMustNotBeUsed(),
+        requests,
+        {"r0": [1, 2]},
+        reference,
+        frozenset({99}),
+    )
+    assert missing.total == 2
+    assert missing.nontie == 1
+    assert not missing.all_ties_or_exact
+    assert "missing outputs" in str(missing.divergences_sample)
+
+    extra = tie_tolerant_agreement(
+        _OracleMustNotBeUsed(),
+        requests,
+        {"r0": [1, 2], "r1": [3, 4], "r2": [5]},
+        reference,
+        frozenset({99}),
+    )
+    assert extra.total == 2
+    assert extra.nontie == 1
+    assert not extra.all_ties_or_exact
+    assert "unexpected outputs" in str(extra.divergences_sample)
 
 
 def test_both_systems_match_reference_and_report_throughput(tiny_runtime) -> None:

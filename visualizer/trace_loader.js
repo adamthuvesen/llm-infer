@@ -47,6 +47,9 @@ export function parseJsonlTrace(text) {
   }
 
   const sorted = [...events].sort((a, b) => a.sequence - b.sequence);
+  if (sorted[0].sequence !== 1) {
+    throw new Error(`First sequence is ${sorted[0].sequence}; ids must start at 1.`);
+  }
   // Playback assumes contiguous sequence ids — the recorder emits a monotonic per-event counter
   // with no skips. A gap means the trace lost a line, so the timeline would silently misrepresent
   // the run (missing steps, wrong durations); reject it rather than render a false story.
@@ -140,7 +143,6 @@ export function buildTraceModel(events) {
     if (event.event === "request_admitted") {
       const request = ensureRequest(event.request_id);
       Object.assign(request, {
-        firstSequence: event.sequence,
         admittedStep: event.step,
         promptTokens: event.prompt_tokens,
         maxNewTokens: event.max_new_tokens,
@@ -149,7 +151,9 @@ export function buildTraceModel(events) {
       });
       active.add(event.request_id);
       cachedTokens.set(event.request_id, 0);
-      generatedTokens.set(event.request_id, 0);
+      if (!generatedTokens.has(event.request_id)) {
+        generatedTokens.set(event.request_id, 0);
+      }
     }
 
     if (event.event === "prefill_chunk_progress") {
@@ -228,6 +232,7 @@ export function buildTraceModel(events) {
       });
       // Re-admitted and rebuilding by recompute — back on the wall as its prefill replays.
       cachedTokens.set(event.request_id, event.cached_tokens ?? 0);
+      generatedTokens.set(event.request_id, event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0);
       active.add(event.request_id);
     }
 
@@ -349,8 +354,73 @@ function validateEvent(event, lineNumber) {
   if (event.event === "block_allocated" || event.event === "block_freed") {
     validateBlockEvent(event, lineNumber);
   }
+  if (event.event === "request_admitted") {
+    validateRequestAdmitted(event, lineNumber);
+  }
+  if (event.event === "prefill_chunk_started" || event.event === "prefill_chunk_progress") {
+    validatePrefillChunk(event, lineNumber);
+  }
   if (event.event === "decode_step") {
     validateDecodeStep(event, lineNumber);
+  }
+  if (event.event === "request_preempted") {
+    validatePreempted(event, lineNumber);
+  }
+  if (event.event === "request_resumed") {
+    validateResumed(event, lineNumber);
+  }
+  if (event.event === "request_finished") {
+    validateFinished(event, lineNumber);
+  }
+  if (event.event === "batch_size_changed") {
+    validateBatchSizeChanged(event, lineNumber);
+  }
+  if (event.event === "tokens_per_second_sampled") {
+    validateThroughputEvent(event, lineNumber);
+  }
+}
+
+function requireRequestId(event, lineNumber) {
+  if (typeof event.request_id !== "string" || event.request_id.length === 0) {
+    throw new Error(`Line ${lineNumber} ${event.event} must have a non-empty request_id.`);
+  }
+}
+
+function requireNonNegativeInteger(event, field, lineNumber) {
+  if (!Number.isInteger(event[field]) || event[field] < 0) {
+    throw new Error(`Line ${lineNumber} ${event.event} must have a non-negative integer ${field}.`);
+  }
+}
+
+function requirePositiveInteger(event, field, lineNumber) {
+  if (!Number.isInteger(event[field]) || event[field] < 1) {
+    throw new Error(`Line ${lineNumber} ${event.event} must have a positive integer ${field}.`);
+  }
+}
+
+function validateRequestAdmitted(event, lineNumber) {
+  requireRequestId(event, lineNumber);
+  requirePositiveInteger(event, "prompt_tokens", lineNumber);
+  requirePositiveInteger(event, "max_new_tokens", lineNumber);
+  requireNonNegativeInteger(event, "reserved_blocks", lineNumber);
+  if (event.prefix_group_id !== undefined && event.prefix_group_id !== null && typeof event.prefix_group_id !== "string") {
+    throw new Error(`Line ${lineNumber} request_admitted prefix_group_id must be a string or null.`);
+  }
+}
+
+function validatePrefillChunk(event, lineNumber) {
+  requireRequestId(event, lineNumber);
+  for (const field of ["start_pos", "end_pos", "total_prompt_tokens"]) {
+    requireNonNegativeInteger(event, field, lineNumber);
+  }
+  if (event.end_pos < event.start_pos || event.end_pos > event.total_prompt_tokens) {
+    throw new Error(`Line ${lineNumber} ${event.event} must satisfy start_pos <= end_pos <= total_prompt_tokens.`);
+  }
+  if (event.event === "prefill_chunk_progress") {
+    requireNonNegativeInteger(event, "cached_tokens", lineNumber);
+    if (event.completed !== true && event.completed !== false) {
+      throw new Error(`Line ${lineNumber} prefill_chunk_progress completed must be a boolean.`);
+    }
   }
 }
 
@@ -381,6 +451,56 @@ function validateBlockEvent(event, lineNumber) {
   for (const field of ["pool_used", "pool_free"]) {
     if (!Number.isInteger(event[field]) || event[field] < 0) {
       throw new Error(`Line ${lineNumber} ${event.event} must have a non-negative integer ${field}.`);
+    }
+  }
+}
+
+function validatePreempted(event, lineNumber) {
+  requireRequestId(event, lineNumber);
+  requireNonNegativeInteger(event, "block_count", lineNumber);
+  requireNonNegativeInteger(event, "generated_tokens", lineNumber);
+  requireNonNegativeInteger(event, "pool_used", lineNumber);
+  requireNonNegativeInteger(event, "pool_free", lineNumber);
+}
+
+function validateResumed(event, lineNumber) {
+  requireRequestId(event, lineNumber);
+  requirePositiveInteger(event, "prompt_tokens", lineNumber);
+  requireNonNegativeInteger(event, "generated_tokens", lineNumber);
+  requireNonNegativeInteger(event, "cached_tokens", lineNumber);
+  requireNonNegativeInteger(event, "pool_used", lineNumber);
+  requireNonNegativeInteger(event, "pool_free", lineNumber);
+}
+
+function validateFinished(event, lineNumber) {
+  requireRequestId(event, lineNumber);
+  if (!Array.isArray(event.token_ids) || event.token_ids.some((id) => !Number.isInteger(id))) {
+    throw new Error(`Line ${lineNumber} request_finished token_ids must be an array of integers.`);
+  }
+  requireNonNegativeInteger(event, "generated_tokens", lineNumber);
+  if (event.generated_tokens !== event.token_ids.length) {
+    throw new Error(`Line ${lineNumber} request_finished generated_tokens must match token_ids length.`);
+  }
+  if (event.reason !== "eos" && event.reason !== "length") {
+    throw new Error(`Line ${lineNumber} request_finished reason must be "eos" or "length".`);
+  }
+}
+
+function validateBatchSizeChanged(event, lineNumber) {
+  requireNonNegativeInteger(event, "previous_batch_size", lineNumber);
+  requireNonNegativeInteger(event, "batch_size", lineNumber);
+  requireNonNegativeInteger(event, "waiting", lineNumber);
+}
+
+function validateThroughputEvent(event, lineNumber) {
+  for (const field of ["tokens_per_second", "elapsed_seconds"]) {
+    if (typeof event[field] !== "number" || !Number.isFinite(event[field]) || event[field] < 0) {
+      throw new Error(`Line ${lineNumber} tokens_per_second_sampled must have a non-negative finite ${field}.`);
+    }
+  }
+  for (const field of ["tokens_emitted", "total_generated_tokens"]) {
+    if (!Number.isInteger(event[field]) || event[field] < 0) {
+      throw new Error(`Line ${lineNumber} tokens_per_second_sampled must have a non-negative integer ${field}.`);
     }
   }
 }

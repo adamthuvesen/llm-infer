@@ -23,6 +23,7 @@ from pathlib import Path
 
 import httpx
 
+from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serve import build_app_from_runtime
@@ -30,7 +31,6 @@ from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.request import Request
 from llm_infer.serving.server import AsyncInferenceEngine
 from llm_infer.tracing import TraceRecorder
-from tests.correctness.test_pretrain_bundle import _write_tiny_bundle
 
 # Prompts are bare token ids from the tiny WordLevel vocab (tok_0..tok_10): the bundle tokenizer
 # decodes "tok_N" -> N, so a space-joined string of them round-trips to exactly these ids.
