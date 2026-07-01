@@ -1,0 +1,776 @@
+"""HTTP-surface tests for the OpenAI-compatible server, on the tiny CPU model.
+
+These prove the transport, not the math: the engine's token ids are already validated
+token-for-token by the reference check. Here we check the wire contract (response shape,
+ids, usage, finish_reason), that streaming emits SSE deltas ending in ``[DONE]``, that
+several streaming requests genuinely batch through one engine loop, and that unsupported
+fields fail loudly with a 4xx. Everything runs greedy on the tiny random-weight Qwen — fast,
+deterministic, no GPU.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import httpx
+import pytest
+
+from llm_infer.serving.engine import InferenceEngine
+from llm_infer.serving.server import AsyncInferenceEngine, create_app
+from tests.correctness.test_chunked_prefill import _tiny_qwen
+
+VOCAB = 37
+EOS_ID = 36  # the tiny model never greedily emits this on these prompts, so length caps decode
+
+
+class TinyTokenizer:
+    """A whitespace/byte stand-in for a real tokenizer over the 37-token vocab.
+
+    ``encode`` maps each character to ``ord(c) % VOCAB`` (never EOS), ``decode`` maps ids back
+    to printable ASCII via ``id + 33``, and ``apply_chat_template`` flattens messages into ids.
+    Enough surface for the server to tokenize prompts and detokenize streamed output without a
+    real model — the ids it produces are valid engine inputs and the text round-trips cleanly.
+    """
+
+    eos_token_id = EOS_ID
+
+    def encode(self, text: str) -> list[int]:
+        return [(ord(c) % (VOCAB - 1)) for c in text] or [1]
+
+    def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
+        ids = [t for t in token_ids if not (skip_special_tokens and t == EOS_ID)]
+        return "".join(chr(33 + (t % 94)) for t in ids)
+
+    def apply_chat_template(
+        self, messages: list[dict], add_generation_prompt: bool = True, tokenize: bool = True
+    ) -> dict[str, list[int]]:
+        # Mirror a real HF tokenizer: tokenize=True yields a BatchEncoding-shaped mapping
+        # ({"input_ids": [...]}), NOT a bare list — so the server must read input_ids rather
+        # than iterate the mapping (which would yield its string keys). This pins that contract.
+        text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+        if add_generation_prompt:
+            text += "\nassistant:"
+        ids = self.encode(text)
+        return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+
+def _build_app(*, block_size: int = 8, num_blocks: int = 64):
+    model = _tiny_qwen()
+    engine = InferenceEngine(model, block_size=block_size, num_blocks=num_blocks)
+    async_engine = AsyncInferenceEngine(engine)
+    return create_app(
+        async_engine=async_engine,
+        tokenizer=TinyTokenizer(),
+        model_id="tiny-qwen",
+        eos_token_ids=frozenset({EOS_ID}),
+    )
+
+
+def _client(app) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_engine_step_failure_fails_streams_instead_of_hanging() -> None:
+    """If the background step loop dies, in-flight streams fail and new ones are rejected fast.
+
+    Without a fatal boundary the loop thread would die silently and every consumer would block
+    forever on its queue. The loop contains the failure: active streams re-raise the engine
+    error, and later submissions are rejected immediately.
+    """
+
+    async def go() -> None:
+        engine = InferenceEngine(_tiny_qwen(), block_size=8, num_blocks=64)
+
+        def boom():
+            raise RuntimeError("engine exploded")
+
+        engine.step = boom  # the loop dies on its first real step
+        async_engine = AsyncInferenceEngine(engine)
+        async_engine.start()
+        try:
+            stream = async_engine.stream(
+                request_id="r0",
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=5,
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            with pytest.raises(RuntimeError, match="engine exploded"):
+                async for _ in stream:
+                    pass
+
+            # The loop is dead: a new submission is rejected fast, not left to hang.
+            for _ in range(200):
+                if async_engine._fatal is not None:
+                    break
+                await asyncio.sleep(0.01)
+            later = async_engine.stream(
+                request_id="r1",
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=5,
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            with pytest.raises(RuntimeError, match="no longer running"):
+                async for _ in later:
+                    pass
+        finally:
+            async_engine.stop()
+
+    _run(go())
+
+
+def test_cancellation_aborts_engine_request() -> None:
+    """Dropping a stream mid-generation aborts its engine request and frees the loop.
+
+    We consume one token then break out of the ``async for`` (the disconnect signal). The
+    wrapper's ``finally`` flags the stream aborted; the loop finishes the engine request and
+    stops decoding it. We assert the request leaves the scheduler's running set.
+    """
+
+    async def go() -> None:
+        engine = InferenceEngine(_tiny_qwen(), block_size=8, num_blocks=64)
+        async_engine = AsyncInferenceEngine(engine)
+        async_engine.start()
+        try:
+            request_id = async_engine.next_request_id()
+            stream = async_engine.stream(
+                request_id=request_id,
+                prompt_ids=[1, 2, 3],
+                max_new_tokens=50,  # long, so it would keep decoding without the abort
+                eos_token_ids=frozenset({EOS_ID}),
+            )
+            count = 0
+            async for _ in stream:
+                count += 1
+                if count == 1:
+                    break  # client "disconnects" after the first token
+            await stream.aclose()
+
+            # The loop sees the abort at the next step boundary and releases the request.
+            for _ in range(200):
+                running_ids = {r.request_id for r in engine.scheduler.running}
+                if request_id not in running_ids and not engine.scheduler.waiting:
+                    break
+                await asyncio.sleep(0.01)
+            running_ids = {r.request_id for r in engine.scheduler.running}
+            assert request_id not in running_ids
+            assert count == 1
+        finally:
+            async_engine.stop()
+
+    _run(go())
+
+
+def test_health_and_models() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            health = await client.get("/health")
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok"}
+
+            models = await client.get("/v1/models")
+            assert models.status_code == 200
+            body = models.json()
+            assert body["object"] == "list"
+            assert body["data"][0]["id"] == "tiny-qwen"
+            assert body["data"][0]["object"] == "model"
+
+    _run(go())
+
+
+def test_chat_completion_non_streaming_shape() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "tiny-qwen",
+                    "messages": [{"role": "user", "content": "hello there"}],
+                    "max_tokens": 5,
+                },
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["object"] == "chat.completion"
+            assert body["id"].startswith("cmpl-")
+            assert body["model"] == "tiny-qwen"
+            choice = body["choices"][0]
+            assert choice["index"] == 0
+            assert choice["message"]["role"] == "assistant"
+            assert isinstance(choice["message"]["content"], str)
+            # Greedy run never hits EOS here, so the length cap stops it at exactly max_tokens.
+            assert choice["finish_reason"] == "length"
+            usage = body["usage"]
+            assert usage["completion_tokens"] == 5
+            assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+    _run(go())
+
+
+def test_completion_non_streaming_shape() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 4},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["object"] == "text_completion"
+            choice = body["choices"][0]
+            assert isinstance(choice["text"], str)
+            assert choice["finish_reason"] == "length"
+            assert body["usage"]["completion_tokens"] == 4
+
+    _run(go())
+
+
+def _parse_sse(text: str) -> list:
+    chunks = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            payload = line[len("data: ") :]
+            if payload == "[DONE]":
+                chunks.append("[DONE]")
+            else:
+                chunks.append(json.loads(payload))
+    return chunks
+
+
+def test_chat_completion_streaming_sse() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            async with client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json={
+                    "model": "tiny-qwen",
+                    "messages": [{"role": "user", "content": "stream please"}],
+                    "max_tokens": 5,
+                    "stream": True,
+                },
+            ) as resp:
+                assert resp.status_code == 200
+                assert resp.headers["content-type"].startswith("text/event-stream")
+                text = ""
+                async for piece in resp.aiter_text():
+                    text += piece
+            chunks = _parse_sse(text)
+            assert chunks[-1] == "[DONE]"
+            data_chunks = [c for c in chunks if c != "[DONE]"]
+            assert all(c["object"] == "chat.completion.chunk" for c in data_chunks)
+            assert data_chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+            # The last data chunk carries the finish_reason, no content.
+            assert data_chunks[-1]["choices"][0]["finish_reason"] == "length"
+
+    _run(go())
+
+
+def test_chat_completion_streaming_usage_chunk() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            async with client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json={
+                    "model": "tiny-qwen",
+                    "messages": [{"role": "user", "content": "stream usage please"}],
+                    "max_tokens": 5,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                },
+            ) as resp:
+                assert resp.status_code == 200
+                text = ""
+                async for piece in resp.aiter_text():
+                    text += piece
+            chunks = [c for c in _parse_sse(text) if c != "[DONE]"]
+            usage_chunks = [chunk for chunk in chunks if chunk.get("usage") is not None]
+            assert len(usage_chunks) == 1
+            usage = usage_chunks[0]["usage"]
+            assert usage_chunks[0]["choices"] == []
+            assert usage["completion_tokens"] == 5
+            assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+    _run(go())
+
+
+def test_completion_streaming_sse() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            async with client.stream(
+                "POST",
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "xy", "max_tokens": 4, "stream": True},
+            ) as resp:
+                assert resp.status_code == 200
+                text = ""
+                async for piece in resp.aiter_text():
+                    text += piece
+            chunks = _parse_sse(text)
+            assert chunks[-1] == "[DONE]"
+            data_chunks = [c for c in chunks if c != "[DONE]"]
+            assert all(c["object"] == "text_completion" for c in data_chunks)
+            assert data_chunks[-1]["choices"][0]["finish_reason"] == "length"
+
+    _run(go())
+
+
+def test_completion_public_prefix_group_field_is_accepted() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/completions",
+                json={
+                    "model": "tiny-qwen",
+                    "prompt": "same prefix",
+                    "max_tokens": 4,
+                    "llm_infer_prefix_group_id": "public-prefix",
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["completion_tokens"] == 4
+
+    _run(go())
+
+
+def test_streaming_matches_non_streaming() -> None:
+    """Same prompt: the concatenated stream deltas equal the non-streaming content."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            payload = {
+                "model": "tiny-qwen",
+                "messages": [{"role": "user", "content": "consistency check"}],
+                "max_tokens": 6,
+            }
+            full = await client.post("/v1/chat/completions", json=payload)
+            expected = full.json()["choices"][0]["message"]["content"]
+
+            async with client.stream(
+                "POST", "/v1/chat/completions", json={**payload, "stream": True}
+            ) as resp:
+                text = ""
+                async for piece in resp.aiter_text():
+                    text += piece
+            streamed = "".join(
+                c["choices"][0]["delta"].get("content", "")
+                for c in _parse_sse(text)
+                if c != "[DONE]"
+            )
+            assert streamed == expected
+
+    _run(go())
+
+
+def test_concurrent_streams_batch_through_one_loop() -> None:
+    """Many streaming requests in flight at once must all complete off the single engine loop.
+
+    They are launched concurrently and awaited together; with one background batching loop the
+    only way they all finish is by being decoded together (continuous batching). We assert each
+    got the right number of tokens and a finish reason — proof the loop served them in parallel.
+    """
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+
+            async def one(content: str, max_tokens: int) -> tuple[int, str]:
+                async with client.stream(
+                    "POST",
+                    "/v1/chat/completions",
+                    json={
+                        "model": "tiny-qwen",
+                        "messages": [{"role": "user", "content": content}],
+                        "max_tokens": max_tokens,
+                        "stream": True,
+                    },
+                ) as resp:
+                    text = ""
+                    async for piece in resp.aiter_text():
+                        text += piece
+                chunks = [c for c in _parse_sse(text) if c != "[DONE]"]
+                content_chunks = sum(1 for c in chunks if c["choices"][0]["delta"].get("content"))
+                finish = chunks[-1]["choices"][0]["finish_reason"]
+                return content_chunks, finish
+
+            results = await asyncio.gather(
+                one("first request", 6),
+                one("second request here", 6),
+                one("third", 6),
+                one("a fourth concurrent client", 6),
+            )
+            for content_chunks, finish in results:
+                assert finish == "length"
+                assert content_chunks >= 1
+
+    _run(go())
+
+
+def test_concurrent_streaming_equals_serial_tokens() -> None:
+    """Running requests concurrently yields the same tokens as running each alone.
+
+    This is the real continuous-batching guarantee: sharing one loop and one KV-cache must not
+    perturb any request's greedy output. We compare each prompt's streamed text under load
+    against the same prompt served by itself.
+    """
+
+    prompts = ["alpha", "a longer beta prompt", "gamma g"]
+
+    async def text_for(client, prompt: str) -> str:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": "tiny-qwen",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 6,
+                "stream": True,
+            },
+        ) as resp:
+            raw = ""
+            async for piece in resp.aiter_text():
+                raw += piece
+        return "".join(
+            c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
+        )
+
+    async def go() -> None:
+        # Serial reference: a fresh app/engine per prompt, run alone.
+        serial: dict[str, str] = {}
+        for prompt in prompts:
+            app = _build_app()
+            async with app.router.lifespan_context(app), _client(app) as client:
+                serial[prompt] = await text_for(client, prompt)
+
+        # Concurrent: one shared app/engine, all prompts in flight together.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            concurrent = await asyncio.gather(*(text_for(client, p) for p in prompts))
+
+        for prompt, text in zip(prompts, concurrent, strict=True):
+            assert text == serial[prompt], f"{prompt!r} diverged under concurrent batching"
+
+    _run(go())
+
+
+def _parse_named_sse(text: str) -> list[tuple[str, dict]]:
+    """Parse Responses semantic SSE into (event_name, data) pairs."""
+    events: list[tuple[str, dict]] = []
+    name: str | None = None
+    for line in text.splitlines():
+        if line.startswith("event: "):
+            name = line[len("event: ") :]
+        elif line.startswith("data: ") and name is not None:
+            events.append((name, json.loads(line[len("data: ") :])))
+            name = None
+    return events
+
+
+def test_responses_non_streaming_shape() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={"model": "tiny-qwen", "input": "tell me something", "max_output_tokens": 5},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["object"] == "response"
+            assert body["id"].startswith("resp-")
+            assert body["status"] == "completed"
+            assert body["model"] == "tiny-qwen"
+            message = body["output"][0]
+            assert message["type"] == "message"
+            assert message["role"] == "assistant"
+            assert message["content"][0]["type"] == "output_text"
+            assert message["content"][0]["text"] == body["output_text"]
+            usage = body["usage"]
+            assert usage["output_tokens"] == 5
+            assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
+
+    _run(go())
+
+
+def test_responses_structured_input_uses_chat_template() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "tiny-qwen",
+                    "instructions": "be terse",
+                    "input": [{"role": "user", "content": "structured input"}],
+                    "max_output_tokens": 4,
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["object"] == "response"
+
+    _run(go())
+
+
+def test_responses_streaming_semantic_events() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            async with client.stream(
+                "POST",
+                "/v1/responses",
+                json={
+                    "model": "tiny-qwen",
+                    "input": "stream this response",
+                    "max_output_tokens": 5,
+                    "stream": True,
+                },
+            ) as resp:
+                assert resp.status_code == 200
+                assert resp.headers["content-type"].startswith("text/event-stream")
+                text = ""
+                async for piece in resp.aiter_text():
+                    text += piece
+            events = _parse_named_sse(text)
+            names = [name for name, _ in events]
+            assert names[0] == "response.created"
+            assert names[-1] == "response.completed"
+            assert "response.output_text.delta" in names
+
+            streamed = "".join(
+                data["delta"] for name, data in events if name == "response.output_text.delta"
+            )
+            completed = next(data for name, data in events if name == "response.completed")
+            assert completed["response"]["output_text"] == streamed
+
+    _run(go())
+
+
+def test_responses_streaming_matches_non_streaming() -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            payload = {"model": "tiny-qwen", "input": "match me", "max_output_tokens": 6}
+            full = await client.post("/v1/responses", json=payload)
+            expected = full.json()["output_text"]
+
+            async with client.stream(
+                "POST", "/v1/responses", json={**payload, "stream": True}
+            ) as resp:
+                text = ""
+                async for piece in resp.aiter_text():
+                    text += piece
+            streamed = "".join(
+                data["delta"]
+                for name, data in _parse_named_sse(text)
+                if name == "response.output_text.delta"
+            )
+            assert streamed == expected
+
+    _run(go())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"model": "tiny-qwen", "input": "hi", "tools": [{"type": "web_search"}]},
+        {"model": "tiny-qwen", "input": "hi", "previous_response_id": "resp-123"},
+        {"model": "tiny-qwen", "input": "hi", "store": True},
+        {"model": "tiny-qwen", "input": "hi", "background": True},
+        {"model": "tiny-qwen", "input": "hi", "n": 2},
+        {"model": "tiny-qwen", "input": "hi", "temperature": -1.0},  # out of range -> 400
+    ],
+)
+def test_responses_unsupported_fields_rejected(payload: dict) -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post("/v1/responses", json=payload)
+            assert 400 <= resp.status_code < 500
+
+    _run(go())
+
+
+def test_responses_per_request_sampling_is_honored() -> None:
+    """The Responses endpoint accepts per-request temperature and seed."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "tiny-qwen",
+                    "input": "sample me",
+                    "max_output_tokens": 5,
+                    "temperature": 0.9,
+                    "frequency_penalty": 0.1,
+                    "seed": 2,
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["output_tokens"] == 5
+
+    _run(go())
+
+
+def _chat(**extra) -> dict:
+    return {"model": "tiny-qwen", "messages": [{"role": "user", "content": "hi"}], **extra}
+
+
+@pytest.mark.parametrize(
+    "payload, status",
+    [
+        # tools / function-calling: explicitly unsupported.
+        (_chat(tools=[{"type": "function"}]), 422),
+        # n > 1: only one choice is returned.
+        (_chat(n=2), 422),
+        # logprobs: not produced.
+        (_chat(logprobs=True), 422),
+        # genuinely unknown field: extra=forbid -> 422 from validation.
+        (_chat(logit_bias={"1": 1.0}), 422),
+        # out-of-range sampling: mapped to SamplingParams, which rejects loudly as 400.
+        (_chat(temperature=-1.0), 400),
+        (_chat(top_p=2.0), 400),
+        (_chat(top_k=-3), 400),
+        (_chat(presence_penalty=5.0), 400),
+    ],
+)
+def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post("/v1/chat/completions", json=payload)
+            assert resp.status_code == status
+
+    _run(go())
+
+
+def test_per_request_temperature_is_honored_no_400() -> None:
+    """A non-greedy request is served with its own sampling and returns a completion."""
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json=_chat(temperature=0.8, top_p=0.9, top_k=10, seed=1, max_tokens=5),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["usage"]["completion_tokens"] == 5
+
+    _run(go())
+
+
+def test_concurrent_requests_use_their_own_sampling() -> None:
+    """Two concurrent clients with different temperatures are each served their own sampling.
+
+    A greedy request run concurrently with a sampled one must match the same greedy request run
+    alone — proof the sampled batchmate did not perturb it — while the sampled request still
+    returns a valid completion. Each request carries its own sampling on a shared engine.
+    """
+
+    async def content(client, **sampling) -> str:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json=_chat(max_tokens=6, stream=True, **sampling),
+        ) as resp:
+            assert resp.status_code == 200
+            raw = ""
+            async for piece in resp.aiter_text():
+                raw += piece
+        return "".join(
+            c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
+        )
+
+    async def go() -> None:
+        # Greedy alone, as the reference.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            greedy_alone = await content(client)
+
+        # Greedy + a hot sampled request concurrently on one shared engine.
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            greedy_batched, sampled = await asyncio.gather(
+                content(client),
+                content(client, temperature=1.5, seed=5),
+            )
+        assert greedy_batched == greedy_alone
+        assert isinstance(sampled, str)
+
+    _run(go())
+
+
+def test_oversized_request_is_rejected_and_engine_survives() -> None:
+    """A request too large for the KV pool returns a clean 400 and never kills the engine loop.
+
+    Without the request handler's preflight, an oversized prompt would raise inside the
+    background engine thread (the scheduler's worst-case-fits rejection), killing the one loop
+    and hanging every client. The handler rejects it with a 400 up front, and a normal request
+    on the same app is still served — proof the loop stayed alive.
+    """
+
+    async def go() -> None:
+        # Pool holds 2 blocks of 8 → at most 16 cached positions; ask for far more than that.
+        app = _build_app(block_size=8, num_blocks=2)
+        async with app.router.lifespan_context(app), _client(app) as client:
+            oversized = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 1000},
+            )
+            assert oversized.status_code == 400
+            assert "block" in oversized.json()["detail"].lower()
+
+            # The engine loop is still alive: a request that fits the pool is served normally.
+            ok = await client.post(
+                "/v1/completions",
+                json={"model": "tiny-qwen", "prompt": "abc", "max_tokens": 4},
+            )
+            assert ok.status_code == 200
+            assert ok.json()["usage"]["completion_tokens"] == 4
+
+    _run(go())
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        (
+            "/v1/chat/completions",
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 3},
+        ),
+        ("/v1/completions", {"model": "gpt-4o", "prompt": "hi", "max_tokens": 3}),
+        ("/v1/responses", {"model": "gpt-4o", "input": "hi", "max_output_tokens": 3}),
+    ],
+)
+def test_unknown_model_is_404_not_a_silent_substitution(path: str, body: dict) -> None:
+    """A model id this server does not serve is a 404 — never a 200 echoing a model we did not run.
+
+    The server validates ``request.model`` against the one served id and reports what truly ran,
+    so a request for an unserved id like ``gpt-4o`` is a 404 rather than a 200 that echoes the
+    requested id while tiny-Qwen actually served it.
+    """
+
+    async def go() -> None:
+        app = _build_app()
+        async with app.router.lifespan_context(app), _client(app) as client:
+            resp = await client.post(path, json=body)
+            assert resp.status_code == 404, f"{path} accepted an unknown model"
+            assert "gpt-4o" in resp.json()["detail"]
+
+    _run(go())
