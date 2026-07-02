@@ -42,6 +42,9 @@ from scripts.modal_flash_image import FLASH_IMAGE, IGNORE, REMOTE_ROOT, REPO_ROO
 ESME_HF_DIR = "esme-214m-chat-hf"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
 BLOCK_SIZE = 128
+# Decode-graph buckets for the llm_infer rows: the default spread plus 256, so the curve's
+# largest batch replays from graphs instead of silently falling back to the eager window.
+CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 
 app = modal.App("llm-infer-esme-batch-curve")
 
@@ -164,6 +167,7 @@ def sweep(
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
@@ -180,6 +184,10 @@ def sweep(
         attention_backend=FlashAttnPagedAttention(),
     )
     eos = oracle_runtime.eos_token_ids
+    # The llm_infer rows run what serving runs: decode-window CUDA graphs, captured once up
+    # front so no capture cost lands inside a timed iteration. The oracle stays eager fp32.
+    capture_s = enable_decode_graphs_if_cuda(flash_runtime.model, CAPTURE_SIZES)
+    print(f"[curve] decode graphs: captured {CAPTURE_SIZES} in {capture_s:.1f} s")
 
     # fp32 oracle greedy decode once per unique prompt, shared by every row in this record.
     reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
@@ -224,7 +232,9 @@ def sweep(
 
     rows: list[dict] = []
 
-    # llm_infer rows: fresh engine per iteration, defaults (window + planned buffers).
+    # llm_infer rows: fresh engine per iteration, serving defaults (window + planned buffers
+    # + decode graphs; the runner is model-owned, so every fresh engine replays the same
+    # captured buckets).
     kv_evidence: dict[str, object] = {}
     for size in llm_infer_batches:
         requests = build_requests(flash_runtime.tokenizer, size, HEADLINE_PROMPTS)
@@ -337,6 +347,7 @@ def sweep(
         {
             "rows": rows,
             "kv_evidence": kv_evidence,
+            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
         }
@@ -382,6 +393,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
     record = {
         "rows": sweep_res["rows"],
         "kv_evidence": sweep_res["kv_evidence"],
+        "decode_graphs": sweep_res["decode_graphs"],
         "gpu": {"sweep_container": sweep_res["gpu"], "vllm_container": vllm_res["gpu"]},
         "versions": sweep_res["versions"],
         "config": {

@@ -28,6 +28,7 @@ import torch
 
 from llm_infer.benchmarks.report import normalize_at_eos
 from llm_infer.model.decode import greedy_decode
+from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.interface import ModelRuntime
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serve import BUNDLE_BACKENDS
@@ -1334,6 +1335,10 @@ async def _main_async(args: argparse.Namespace) -> int:
         }
     else:
         runtime = _load_runtime(args)
+        # Same default as serve.py: a CUDA bundle model captures the decode-window graphs
+        # before any workload runs, so eval rows measure the path serving actually uses.
+        # No-op on CPU, where local eval usually runs.
+        capture_s = enable_decode_graphs_if_cuda(runtime.model) if args.decode_graphs else None
         workloads = await run_local_eval(runtime, workload_names=selected, device=args.device)
         metadata = {
             "target": "local",
@@ -1342,6 +1347,10 @@ async def _main_async(args: argparse.Namespace) -> int:
             "device": args.device,
             "dtype": str(args.dtype).replace("torch.", ""),
             "bundle_path": str(runtime.bundle_path) if runtime.bundle_path is not None else None,
+            "decode_graphs": {
+                "enabled": capture_s is not None,
+                "capture_s": capture_s,
+            },
         }
 
     output = args.output or _default_output_path()
@@ -1383,6 +1392,12 @@ def main() -> None:
             "Known: "
             + ", ".join(w.name for w in (*default_engine_workloads(), *default_http_workloads()))
         ),
+    )
+    parser.add_argument(
+        "--no-decode-graphs",
+        dest="decode_graphs",
+        action="store_false",
+        help="Skip decode-graph capture on CUDA and eval the eager decode window instead.",
     )
     parser.add_argument("--output", type=Path, help="JSON summary path")
     parser.add_argument("--jsonl-output", type=Path, help="Optional per-request JSONL path")

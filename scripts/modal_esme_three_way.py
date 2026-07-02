@@ -173,6 +173,7 @@ def bench_hf_and_engine(
     from llm_infer.benchmarks.esme_three_way import run_three_way, tie_tolerant_agreement
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+    from llm_infer.model.decode_graph import DEFAULT_CAPTURE_SIZES, enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -195,6 +196,10 @@ def bench_hf_and_engine(
     )
     if not flash_runtime.capabilities.flash_attention:
         raise AssertionError("Esme llm_infer row must run on the flash-attn backend")
+    # The llm_infer row runs what serving runs: decode-window CUDA graphs, captured up front
+    # so no capture cost lands inside a timed iteration. The oracle stays eager fp32.
+    capture_s = enable_decode_graphs_if_cuda(flash_runtime.model)
+    print(f"[esme-3way] decode graphs: captured {DEFAULT_CAPTURE_SIZES} in {capture_s:.1f} s")
     prompts = HEADLINE_PROMPTS if headline else DEFAULT_PROMPTS
     requests = build_requests(oracle_runtime.tokenizer, num_requests, prompts)
     needed = sum(math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests)
@@ -258,6 +263,10 @@ def bench_hf_and_engine(
             "num_blocks": num_blocks,
             "vllm_matches_reference": vllm_agreement.all_ties_or_exact,
             "vllm_total_output_tokens": total_output_tokens(vllm_outputs, eos),
+            "decode_graphs": {
+                "capture_sizes": list(DEFAULT_CAPTURE_SIZES),
+                "capture_s": capture_s,
+            },
         }
     )
 
@@ -378,6 +387,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             },
             "vllm": vllm_res["config"],
             "num_blocks": main_res["num_blocks"],
+            "decode_graphs": main_res["decode_graphs"],
             "repro_command": f"modal run scripts/modal_esme_three_way.py --command {command}",
         },
     }
