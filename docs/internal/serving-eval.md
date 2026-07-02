@@ -60,6 +60,8 @@ Server-wide controls exposed by `python -m llm_infer.serve`:
 - `--preemption-policy off|recompute`: strict reservation or KV-pressure eviction with
   recompute resume.
 - `--prefill-chunk-size N`: cache at most `N` prompt tokens per prefill step.
+- `--decode-window-size N`: decode steps per EOS/stop host sync for all-greedy batches;
+  `1` restores the classic per-step decode path.
 - `--prompt-lookup-speculative`: enable prompt-lookup speculative decode when supported.
 
 Per-request HTTP controls:
@@ -97,23 +99,15 @@ Per-request HTTP controls:
 - `reference.status`: `pass`, `fail`, `partial` for mixed greedy/sampled rows, `skipped` for
   all sampled rows, or `unavailable` for external HTTP.
 
-## Local Esme Result
+## What the harness demonstrates
 
-Run date: `2026-06-30`. Bundle: `Esme-214M-Chat`. Device: CPU, fp32. These are local
-serving-control checks, not headline GPU benchmark claims.
-
-| workload | ref | completed | observed | output tok | TTFT p50 ms | queue p50 ms | preemptions | KV peak | tok/s field |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `shared-prefix-greedy` | pass | 4/4 | 4/4 | 24 | 97.73 | 0.05 | 0 | 0.125 | reported |
-| `chunked-long-short` | pass | 4/4 | 4/4 | 20 | 119.04 | 0.03 | 0 | 0.078 | reported |
-| `tight-kv-preemption` | pass | 3/3 | 3/3 | 18 | 88.90 | 0.02 | 3 | 1.000 | reported |
-| `speculative-greedy` | pass | 2/2 | 2/2 | 16 | 61.00 | 0.02 | 0 | 0.062 | reported |
-| `api-streaming-mixed` | pass | 3/3 | 3/3 | 18 | 487.54 | 0.62 | 0 | 0.125 | reported |
-| `api-blocking-sampled` | partial | 4/4 | 4/4 | 24 | 379.76 | 33.87 | 0 | 0.125 | withheld: sampled requests |
-
-The useful finding is that the public serving path can force and count real preemptions,
-preserve reference agreement, expose prefix caching, distinguish reference-gated rows from
-sampled rows, and report queue time, stream token counts, and KV utilization.
+Local CPU runs of the full workload set (last verified `2026-06-30`, before the decode
+window became the engine default — absolute latencies from that run are not current) show
+the public serving path can force and count real preemptions, preserve reference
+agreement, expose prefix caching, distinguish reference-gated rows from sampled rows, and
+report queue time, stream token counts, and KV utilization. The published per-technique
+GPU numbers live in [../benchmark.md](../benchmark.md)'s technique gallery; this harness is
+the local, no-spend way to observe the same techniques interacting.
 
 ## Machine-Readable Output
 

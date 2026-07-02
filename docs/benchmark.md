@@ -196,23 +196,6 @@ One request continuing a plainly repetitive paragraph (encode path, not chat tem
 verifier keeps output token-identical, so the gate is exact by construction; on
 non-repetitive chat traffic the drafts miss and the technique is off by default.
 
-## Historical Qwen Public Baseline
-
-Kept for public-model reproduction and regression context. `Qwen/Qwen2.5-Coder-3B-Instruct`
-at revision `488639f1ff808d1d3d0ba301aef8c11461451ec5`, run `2026-06-21` on A100-80GB PCIe,
-32 requests x 128 new tokens, greedy, prefix caching off. Only systems that agreed with the
-fp32 reference reported throughput.
-
-| system | reference agreement | tok/s |
-| --- | --- | ---: |
-| `hf_sequential` | diverged beyond tie tolerance | not reported |
-| `hf_batched` | diverged beyond tie tolerance | not reported |
-| `llm_infer` | yes, 32/32 ties | 98.3 |
-
-New benchmark work uses Esme unless the task is explicitly about this record. The archived
-Qwen rollout timing lives in
-[internal/keeping-the-gpu-busy.md](internal/keeping-the-gpu-busy.md).
-
 ## Reproducing
 
 Local gates (CPU, no spend):

@@ -86,14 +86,8 @@ Every borrowed component lives behind a narrow interface with tests asserting it
 reference backend. The engine owns scheduling, page tables, block allocation, batching,
 request state, sampling, benchmarking, and tracing.
 
-## Historical Qwen Public Baselines
+## Historical Qwen Backend
 
-The Qwen backend remains for reproducibility and older evidence:
-
-- the Qwen three-way benchmark in [benchmark.md](benchmark.md#historical-qwen-public-baseline);
-- the `llm-rlvr` rollout timing in
-  [internal/keeping-the-gpu-busy.md](internal/keeping-the-gpu-busy.md);
-- the pinned HF golden fixtures used for regression coverage.
-
-New benchmark work should use Esme unless the task is explicitly about reproducing the
-historical Qwen record.
+The Qwen backend remains for regression coverage: the pinned HF golden fixtures gate the
+single-request unit path (see [internal/fixture-format.md](internal/fixture-format.md)), and
+the historical Modal harnesses stay runnable for reproduction. New benchmark work uses Esme.
