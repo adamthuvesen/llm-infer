@@ -28,14 +28,14 @@ For any speed claim, the engine first has to match a known-good reference output
 prompt and model.
 
 For Esme bundles, the reference is the source bundle logits/generation contract. The
-full-recompute `PretrainBundleModel.logits()` path is the oracle; paged prefill/decode,
+full-recompute `PretrainBundleModel.logits()` path is the reference; paged prefill/decode,
 prefix caching, speculative decode, and preemption are validated against it.
 
 The Qwen reference uses the pinned HuggingFace full-recompute greedy output: the
 single-request unit path must produce exact token ids, and batched and paged paths are then
 checked against that behavior.
 
-bf16 greedy can diverge from an fp32 oracle on a genuine numerical tie. That is acceptable only
+bf16 greedy can diverge from an fp32 reference on a genuine numerical tie. That is acceptable only
 when the tie is traced and documented; a non-tie divergence reports no tok/s.
 
 ## Backends
@@ -54,7 +54,7 @@ The repo is in its intended state when these remain true:
 3. Continuous batching, chunked prefill, prefix caching, speculative decode, and preemption run
    through the shared engine path.
 4. Esme benchmark docs compare naive HF and `llm_infer` on pinned hardware with every row
-   oracle-gated.
+   reference-checked.
 5. The Qwen reference stays reproducible as a correctness anchor.
 
 ## Non-Goals

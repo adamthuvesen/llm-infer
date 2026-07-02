@@ -34,7 +34,7 @@ For the longer architecture map, see [docs/architecture.md](docs/architecture.md
 
 - `esme`: Esme export bundles, with `Esme-214M-Chat` as the headline path. Esme serves through
   real paged KV on the shared engine path and is parity-gated against the full-recompute
-  `PretrainBundleModel.logits()` oracle.
+  `PretrainBundleModel.logits()` reference.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs and examples
   use `esme`.
 - `qwen`: independent HF reference backend for
@@ -86,7 +86,7 @@ EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
 ## Benchmarks
 
 Every speed claim is gated first: a system reports tok/s only after its tokens match the
-fp32 `PretrainBundleModel.logits()` oracle (tie-tolerant, zero non-tie divergences).
+fp32 `PretrainBundleModel.logits()` reference (tie-tolerant, zero non-tie divergences).
 `llm_infer` runs the bf16 flash-attn path; the HF baseline runs a converted
 `Qwen3ForCausalLM` checkpoint emitted from the Esme bundle.
 
@@ -104,7 +104,7 @@ engine, while the naive baseline stays flat:
 
 ![Esme batch-size throughput curve](assets/fig-esme-batch-curve.svg)
 
-Each serving technique carries its own isolated, oracle-gated experiment:
+Each serving technique carries its own isolated, reference-checked experiment:
 
 - **Paged KV** — 256 concurrent requests peaked at 384 blocks = 1.5 GB of KV, allocated
   lazily as sequences grew (a contiguous max-length layout would reserve ~8 GB).
@@ -114,7 +114,7 @@ Each serving technique carries its own isolated, oracle-gated experiment:
   outputs; at 214M prefill is launch-bound, so the latency protection is honestly ~nil
   here and costs ~21% wall.
 - **Preemption** — 7 real evictions under a starved pool, 12/12 completions still
-  token-exact against the oracle.
+  token-exact against the reference.
 - **Speculative decoding** — **1.47x** batch-1 latency on repetition-heavy text
   (2.0 tokens per verify step); off by default, no headline claim.
 

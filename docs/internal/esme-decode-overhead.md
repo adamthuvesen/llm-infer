@@ -3,7 +3,7 @@
 Branch `adam/esme-decode-overhead`, base `786f821`. Goal: widen the Esme headline gap over
 naive HF by removing Python per-step overhead in the decode loop. Everything here ran on
 Modal A100-80GB, bf16 flash backend, greedy, prefix caching off, 64 new tokens, and every
-speed row passed the fp32 `PretrainBundleModel.logits()` oracle with the audited
+speed row passed the fp32 `PretrainBundleModel.logits()` reference with the audited
 tie-tolerant rule (`nontie == 0` on every row cited below). Harness:
 `scripts/modal_esme_decode_profile.py` (`profile` / `bench` / `ablate`).
 
@@ -84,7 +84,7 @@ deltas under ~±25% say nothing here.
 | window, classic `decode_many` | 234.9 | 648.7 | 1289.7 |
 | window + planned buffers (default) | 245.9 | 685.1 | 1380.8 |
 
-Every row: oracle agreement `nontie 0` (batch 8: 6 exact + 2 genuine bf16 ties; 32: all
+Every row: reference agreement `nontie 0` (batch 8: 6 exact + 2 genuine bf16 ties; 32: all
 exact; 128: 96 exact + 32 ties — the tie is the known esme-001 step-22 fp32 gap 0.0119).
 
 Attribution on one GPU: the deferred window alone (changes 2+4) is worth ~0–3% — as the
@@ -134,7 +134,7 @@ read path except `masked_select`) was shaped to be capture-friendly.
 ## Headline (pinned three-way) and variance
 
 `modal run scripts/modal_esme_three_way.py --command bench`, two fresh runs, both
-oracle-gated (llm_infer row: 6 exact + 2 ties, nontie 0):
+reference-checked (llm_infer row: 6 exact + 2 ties, nontie 0):
 
 | run | hf_sequential | llm_infer | llm_infer / HF |
 | --- | ---: | ---: | ---: |

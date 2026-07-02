@@ -14,7 +14,7 @@ distance is real, and it is deliberately not the story here.
 
 Every number below follows the repo rule: **match the reference before measuring speed.**
 A system reports tok/s only after its tokens agree with the fp32
-`PretrainBundleModel.logits()` oracle under the audited tie-tolerant rule (zero non-tie
+`PretrainBundleModel.logits()` reference under the audited tie-tolerant rule (zero non-tie
 divergences). A row that fails the gate reports no throughput. The gate profile
 (`exact / tie / non-tie`) is recorded with every row.
 
@@ -41,7 +41,7 @@ iterations, median wall-clock, both rows in one container.
 
 The engine is **26.9x** the naive baseline measured in the same run. Output-token totals
 differ slightly across systems because a genuine bf16 tie can change how soon a
-continuation hits EOS — every such flip was recomputed on the fp32 oracle and confirmed
+continuation hits EOS — every such flip was recomputed on the fp32 reference and confirmed
 inside the tie tolerance.
 
 ## Throughput vs concurrency
@@ -64,7 +64,7 @@ one container (A100-SXM4, 1410 MHz). Record:
 | 128 | 1,908.9 | 44.9 |
 | 256 | 2,748.5 | 45.4 |
 
-Reference gates (fp32 oracle, tie-tolerant): every row above has zero non-tie
+Reference gates (fp32, tie-tolerant): every row above has zero non-tie
 divergences — e.g. the llm_infer batch-256 row is 64 exact + 192 genuine bf16 ties of 256,
 and the HF floor rows are exact-or-tie throughout. The floor is measured at every level:
 the batch-8 anchor runs the full warmup + 3-iteration protocol (spread under 1%), the
@@ -82,10 +82,10 @@ decoding, prefix caching off, up to 256 new tokens per request with EOS stopping
 median wall-clock over 3 measured iterations after 1 warmup, with a fresh engine per
 iteration. All GPU runs are Modal A100-80GB.
 
-**Reference gate.** The oracle is fp32 greedy decode through direct
+**Reference gate.** The reference is fp32 greedy decode through direct
 `PretrainBundleModel.logits()` (full recompute, no cache). Timed systems run bf16; a bf16
 system may flip a token only on a genuine numerical tie — the first divergence is recomputed
-on the fp32 oracle and accepted only when the top-token margin is inside the audited 0.1
+on the fp32 reference and accepted only when the top-token margin is inside the audited 0.1
 tolerance. Anything else is a real divergence and the row reports no tok/s. The `llm_infer`
 rows additionally pass the equal-dtype flash gate (bf16 flash == bf16 `torch_naive` through
 the same engine path).
@@ -99,13 +99,13 @@ gallery on/off pair runs back to back on one GPU. Cross-date raw tok/s is not co
 same-run ratios are.
 
 **Regression tool.** `modal run scripts/modal_esme_three_way.py --command smoke|bench` is
-the cheap oracle-gated smoke workload (2x8 / 8x64 tokens). It exists to catch regressions
+the cheap reference-checked smoke workload (2x8 / 8x64 tokens). It exists to catch regressions
 before a full run; its numbers are not a published record.
 
 ## Technique gallery
 
 Each implemented technique carries one targeted, isolated experiment. All engine rows run
-the headline configuration (bf16 flash-attn); every row passed the fp32 oracle gate with
+the headline configuration (bf16 flash-attn); every row passed the fp32 reference gate with
 zero non-tie divergences. On/off pairs ran back to back in one container
 (`modal run scripts/modal_esme_technique_gallery.py --command gallery`, A100-SXM4 run
 2026-07-02; every ratio below reproduced within ~2% on a second, differently-clocked

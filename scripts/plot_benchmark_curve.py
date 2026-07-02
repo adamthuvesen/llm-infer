@@ -94,7 +94,7 @@ def card_layout(title: str, subtitle: str, conclusion: str) -> go.Layout:
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
         font={"family": FONT_FAMILY, "size": 12, "color": TICK_COLOR},
-        margin={"l": 84, "r": 84, "t": 118, "b": 96},
+        margin={"l": 84, "r": 84, "t": 118, "b": 118},
         showlegend=False,
         shapes=[
             {
@@ -132,7 +132,7 @@ def card_layout(title: str, subtitle: str, conclusion: str) -> go.Layout:
                 "xref": "paper",
                 "yref": "paper",
                 "x": -0.045,
-                "y": -0.185,
+                "y": -0.245,
                 "xanchor": "left",
                 "showarrow": False,
                 "font": {"family": FONT_FAMILY, "size": 12, "color": SUBTITLE_COLOR},
@@ -176,7 +176,7 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
             title="Esme-214M-Chat: serving throughput vs concurrency",
             subtitle=(
                 "Total tok/s vs concurrent chat requests - A100-80GB, up to 256 new tokens, "
-                "greedy, every point oracle-gated"
+                "greedy, every point checked for correct output"
             ),
             conclusion=(
                 "Conclusion: one shared paged-KV engine turns concurrency into throughput -"
@@ -228,7 +228,7 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
     llm_mid = min(2, len(llm_x) - 1)
     figure.add_annotation(
         {
-            "text": "llm_infer (this repo)",
+            "text": "llm_infer",
             "x": math.log10(llm_x[llm_mid]),
             "y": llm_y[llm_mid] + y_max * 0.13,
             "showarrow": False,
@@ -240,7 +240,6 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
         {
             "text": (
                 f"naive HF sequential (floor) - {min(hf_y):.0f}-{max(hf_y):.0f} tok/s"
-                " across all levels"
             ),
             "x": math.log10(hf_x[len(hf_x) // 2]),
             "y": hf_floor + y_max * 0.05,
@@ -254,10 +253,10 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
         {
             "text": f"<b>{gain_vs_floor:.0f}x the floor</b>",
             "x": math.log10(llm_x[-1]),
-            "y": llm_y[-1] - y_max * 0.075,
+            "y": llm_y[-1] + y_max * 0.02,
             "showarrow": False,
             "xanchor": "right",
-            "xshift": -10,
+            "xshift": -22,
             "font": {"family": FONT_FAMILY, "size": 14, "color": TITLE_COLOR},
         }
     )

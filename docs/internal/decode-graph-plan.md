@@ -34,7 +34,7 @@ Measured on the frozen Qwen rollout (accepted eager baseline at the time: 365.8 
 
 Carried forward from the archived plan, generalized to the current Esme gates:
 
-- The fp32 oracle gate (tie-tolerant, zero non-tie divergences) must pass on every
+- The fp32 reference gate (tie-tolerant, zero non-tie divergences) must pass on every
   measured row; a capture path that changes token outputs is rejected by default.
 - Speed must beat the current accepted same-container baseline; an improvement under ~10%
   does not pay for graph/scheduler complexity.

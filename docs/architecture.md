@@ -2,7 +2,7 @@
 
 `llm-infer` is a Python inference library with an OpenAI-compatible HTTP server on top. The
 primary path is Esme: `Esme-214M-Chat` loads from an export bundle, runs through the shared
-paged-KV engine, and is checked against the full-recompute bundle oracle before speed is
+paged-KV engine, and is checked against the full-recompute reference before speed is
 reported.
 
 ## Runtime Map
@@ -119,7 +119,7 @@ packs the ragged batch, and passes it to the active `AttentionBackend`.
 ## Reference Contract
 
 Esme speed rows are gated against direct bundle logits/generation. The full-recompute
-`PretrainBundleModel.logits()` path is the oracle; the paged prefill/decode path must agree
+`PretrainBundleModel.logits()` path is the reference; the paged prefill/decode path must agree
 with it before throughput is reported.
 
 Qwen is the independent HF reference for correctness tests, replaying frozen HuggingFace

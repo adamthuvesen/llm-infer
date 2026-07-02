@@ -1,7 +1,7 @@
 # Historical Qwen correctness-fixture format
 
 This document describes the historical Qwen golden fixture. Esme uses the direct
-bundle logits/generation contract as its oracle. The Qwen reference check
+bundle logits/generation contract as its reference. The Qwen reference check
 never re-runs HuggingFace at test time; instead it replays a **committed golden fixture**
 of HF greedy token ids and asserts the llm-infer engine reproduces them token-for-token.
 Change this format only with a matching change to `scripts/generate_goldens.py` and the

@@ -21,7 +21,7 @@ numerical tie and documented.
 - `esme`: Esme export bundles, with `Esme-214M-Chat` as the headline path. Internally these use
   the `llm_pretrain_dense_v1` DenseBackbone export format. Real paged KV through the same engine
   prefill/decode + scheduler path — prefix caching, speculative decode, and preemption,
-  all parity-gated. `PretrainBundleModel.logits()` stays the full-recompute reference oracle the
+  all parity-gated. `PretrainBundleModel.logits()` stays the full-recompute reference the
   paged path is validated against (exact greedy-token parity on the real bundle; cached logits
   within documented fp32 BLAS reduction-order noise, well below any decision margin). Flash-attn
   is off by default (the bundle uses the `torch_naive` backend). See `BackendCapabilities` in
