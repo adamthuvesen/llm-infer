@@ -9,11 +9,14 @@ A :class:`DecodeWindowPlan` does that bookkeeping once per window instead of onc
 (and the per-layer part not at all). At build time it reserves every block the window can
 need, uploads the packed slot layout and the per-step write slots in one copy each, and
 checks that no block is shared (copy-on-write can never trigger inside the window). Each
-step then advances with a handful of device kernels and zero host-to-device traffic:
+step then advances with a handful of device kernels, zero host-to-device traffic, and — key
+for CUDA-graph capture — **zero host syncs**:
 
-* ``begin_step`` scatters the step's write slots into the padded slot buffer and packs the
-  read indices with one ``masked_select`` — the exact same request-major order
-  ``PagedKVCache.plan_read_many`` produces.
+* ``begin_step`` scatters the step's write slots into the padded slot buffer and rebuilds the
+  packed read indices from host-known sizes (every request grows by exactly one token per
+  step, so the packed total is arithmetic, never a device-side count). The result is the
+  exact request-major order ``PagedKVCache.plan_read_many`` produces, without the
+  ``masked_select`` whose output-size query used to sync the host every step.
 * ``complete_step`` advances positions, cumulative lengths, and the Python ``BlockTable``
   lengths so engine invariants (release, accounting) keep holding.
 
@@ -47,10 +50,15 @@ class DecodeWindowPlan:
     cu_seqlens: torch.Tensor
     # (B+1,) int32: per-step cu_seqlens increment (+1 token per request == +row index).
     cu_step: torch.Tensor
-    col_arange: torch.Tensor  # (1, width) — compared against lengths to mask valid slots
+    # int64 twins of the two above — index arithmetic in the packed-read build needs long.
+    cu_seqlens_long: torch.Tensor
+    cu_step_long: torch.Tensor
+    # (max_total,): flat packed positions for the window's largest step, sliced per step.
+    flat_arange: torch.Tensor
     batch_arange: torch.Tensor  # (B,) — row indices for the per-step write-slot scatter
     base_lengths: list[int]  # host copy of each request's length at window open
     max_len: int  # host-tracked max read length for the upcoming step (no device sync)
+    total: int  # host-tracked packed size (sum of read lengths) for the upcoming step
     steps_used: int = 0
 
     @property
@@ -58,14 +66,26 @@ class DecodeWindowPlan:
         return int(self.write_slot_matrix.shape[0])
 
     def begin_step(self) -> tuple[torch.Tensor, KVReadPlan]:
-        """Write slots and packed read plan for the next decode step (device-only work)."""
+        """Write slots and packed read plan for the next decode step.
+
+        Device-only work with host-known output shapes: no kernel here ever needs a
+        device-to-host answer, so the step is sync-free and safe to run under
+        ``torch.cuda.set_sync_debug_mode``.
+        """
         if self.steps_used >= self.budget:
             raise ValueError(f"decode window exhausted: {self.steps_used}/{self.budget} steps")
         write_slots = self.write_slot_matrix[self.steps_used]
         self.read_slots[self.batch_arange, self.positions] = write_slots
-        read_mask = self.col_arange < (self.positions + 1).unsqueeze(1)
+        # Packed order is request-major: request i contributes its slots for positions
+        # 0..len_i (inclusive of this step's write). Row/column of packed entry p are
+        # ``rows[p] = i`` and ``cols[p] = p - cu_seqlens[i]`` — pure index arithmetic from
+        # sizes the host already tracks, so ``output_size`` keeps repeat_interleave sync-free.
+        rows = torch.repeat_interleave(
+            self.batch_arange, self.positions + 1, output_size=self.total
+        )
+        cols = self.flat_arange[: self.total] - self.cu_seqlens_long.index_select(0, rows)
         read_plan = KVReadPlan(
-            idx=self.read_slots.masked_select(read_mask),
+            idx=self.read_slots[rows, cols],
             cu_seqlens=self.cu_seqlens,
             lengths=[length + self.steps_used + 1 for length in self.base_lengths],
             max_len=self.max_len,
@@ -77,7 +97,9 @@ class DecodeWindowPlan:
         self.steps_used += 1
         self.positions += 1
         self.cu_seqlens += self.cu_step
+        self.cu_seqlens_long += self.cu_step_long
         self.max_len += 1
+        self.total += len(self.tables)
         for table in self.tables:
             table.length += 1
 
@@ -114,6 +136,7 @@ def build_decode_window_plan(
     cu_host = [0]
     for length in lengths:
         cu_host.append(cu_host[-1] + length + 1)
+    max_total = cu_host[-1] + (budget - 1) * len(tables)
     return DecodeWindowPlan(
         tables=list(tables),
         write_slot_matrix=torch.tensor(write_rows, dtype=torch.long, device=device).T.contiguous(),
@@ -121,8 +144,11 @@ def build_decode_window_plan(
         positions=torch.tensor(lengths, dtype=torch.long, device=device),
         cu_seqlens=torch.tensor(cu_host, dtype=torch.int32, device=device),
         cu_step=torch.arange(len(tables) + 1, dtype=torch.int32, device=device),
-        col_arange=torch.arange(width, dtype=torch.long, device=device).unsqueeze(0),
+        cu_seqlens_long=torch.tensor(cu_host, dtype=torch.long, device=device),
+        cu_step_long=torch.arange(len(tables) + 1, dtype=torch.long, device=device),
+        flat_arange=torch.arange(max_total, dtype=torch.long, device=device),
         batch_arange=torch.arange(len(tables), dtype=torch.long, device=device),
         base_lengths=lengths,
         max_len=max(lengths) + 1,
+        total=cu_host[-1],
     )
