@@ -18,8 +18,10 @@ varlen call stay out of the traced graph as one opaque custom op per layer:
   runner: a batch pads up to the nearest capture size, pad rows flow through the
   row-independent math and are skipped by the eager attention slice. ``mark_dynamic`` on
   the batch dim keeps every bucket above 1 on one compiled artifact (bucket 1 specializes,
-  as Dynamo always does); ``mark_static_address`` on the per-bucket input buffers keeps
-  CUDA-graph replays free of input copies.
+  as Dynamo always does). The buffers are deliberately *not* address-pinned: pinning adds
+  an object-identity guard per bucket, which blows Dynamo's recompile limit under
+  ``fullgraph``; compiler-managed CUDA graphs copy the two tiny ``(B,)`` inputs into their
+  own placeholders instead.
 * **Warmup at enable time, parity-checked.** Every bucket runs enough steps at startup to
   compile, record, and replay, so no compile cost can leak into a timed region — and each
   bucket's steps are compared against the eager planned path on the same synthetic
@@ -283,13 +285,13 @@ class CompiledDecodeRunner:
         device = self.model.device
         tokens = torch.zeros(size, dtype=torch.long, device=device)
         positions = torch.zeros(size, dtype=torch.long, device=device)
-        for buffer in (tokens, positions):
-            if hasattr(torch._dynamo, "mark_static_address"):
-                torch._dynamo.mark_static_address(buffer)
-            # Dynamo specializes size 1 regardless (0/1 specialization); marking it dynamic
-            # would raise, so only the >1 buckets share the dynamic-batch artifact.
-            if size > 1:
-                torch._dynamo.mark_dynamic(buffer, 0)
+        # Dynamo specializes size 1 regardless (0/1 specialization); marking it dynamic
+        # would raise, so only the >1 buckets share the dynamic-batch artifact. No
+        # mark_static_address: its per-tensor identity guard would cost one Dynamo entry
+        # per bucket and trip the recompile limit under fullgraph.
+        if size > 1:
+            torch._dynamo.mark_dynamic(tokens, 0)
+            torch._dynamo.mark_dynamic(positions, 0)
         return _CompiledBucket(size=size, tokens=tokens, positions=positions)
 
     @torch.no_grad()
