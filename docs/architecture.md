@@ -5,9 +5,6 @@ primary path is Esme: `Esme-214M-Chat` loads from an export bundle, runs through
 paged-KV engine, and is checked against the full-recompute bundle oracle before speed is
 reported.
 
-Qwen2.5-Coder remains in the repo for historical public-baseline reproduction and regression
-coverage.
-
 ## Runtime Map
 
 ```mermaid
@@ -39,7 +36,7 @@ flowchart TB
     subgraph model [model/]
         Runtime["ModelRuntime registry"]
         Esme["Esme bundle backend"]
-        Qwen["Qwen historical backend"]
+        Qwen["Qwen HF reference"]
     end
 
     subgraph kernels [kernels/]
@@ -70,13 +67,13 @@ flowchart TB
 
 | Module | Owns | Does not own |
 | --- | --- | --- |
-| [`model/`](../llm_infer/model/) | backend registry, capabilities, Esme bundle loader, Qwen historical backend | scheduling, block allocation, sampling policy |
+| [`model/`](../llm_infer/model/) | backend registry, capabilities, Esme bundle loader, Qwen HF reference backend | scheduling, block allocation, sampling policy |
 | [`kernels/`](../llm_infer/kernels/) | causal attention implementations behind `AttentionBackend` | RoPE, GQA expansion, paging |
 | [`kv_cache/`](../llm_infer/kv_cache/) | physical K/V tensor pool, block ids, scatter/gather | attention math, admission policy |
 | [`scheduler/`](../llm_infer/scheduler/) | waiting queue, running set, block budget reservation | physical block allocation |
 | [`serving/`](../llm_infer/serving/) | request lifecycle, engine step loop, sampler, server integration | model weights, backend choice |
 | [`tracing.py`](../llm_infer/tracing.py) | schema-versioned engine events for JSONL replay | synthetic visualization state |
-| [`benchmarks/`](../llm_infer/benchmarks/) | Esme and historical Qwen timing wrappers | reference correctness itself |
+| [`benchmarks/`](../llm_infer/benchmarks/) | Esme and Qwen reference timing wrappers | reference correctness itself |
 
 Dependency direction is intentionally simple:
 
@@ -125,8 +122,8 @@ Esme speed rows are gated against direct bundle logits/generation. The full-reco
 `PretrainBundleModel.logits()` path is the oracle; the paged prefill/decode path must agree
 with it before throughput is reported.
 
-Historical Qwen tests replay frozen HuggingFace full-recompute greedy fixtures. They remain
-useful regression coverage, but they are not the current model story.
+Qwen is the independent HF reference for correctness tests, replaying frozen HuggingFace
+full-recompute greedy fixtures.
 
 bf16 can produce genuine near-ties. The project allows those only when they are traced as
 within the documented tolerance; a non-tie divergence fails the reference gate.

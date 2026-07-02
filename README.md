@@ -5,8 +5,8 @@ measurement. It owns the runtime path: model forward pass, paged KV cache, sched
 sampler, serving loop, benchmark harness, and trace output.
 
 `Esme-214M-Chat` is the default documented model. Naive HuggingFace generation is the
-measured external baseline; Qwen2.5-Coder remains for historical public-baseline
-reproduction and regression coverage.
+measured external baseline; Qwen2.5-Coder is the independent HF reference for correctness
+regression.
 
 The core rule is simple: every speed claim must first match a known-good reference output on
 the same prompt and model. Experimental paths stay labeled experimental until they pass that
@@ -37,7 +37,7 @@ For the longer architecture map, see [docs/architecture.md](docs/architecture.md
   `PretrainBundleModel.logits()` oracle.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs and examples
   use `esme`.
-- `qwen`: historical public-baseline backend for
+- `qwen`: independent HF reference backend for
   `Qwen/Qwen2.5-Coder-3B-Instruct` at revision
   `488639f1ff808d1d3d0ba301aef8c11461451ec5`.
 
