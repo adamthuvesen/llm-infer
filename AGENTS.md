@@ -2,15 +2,15 @@
 
 `llm-infer` is a small inference engine focused on building real serving techniques
 and measuring them clearly. `Esme-214M-Chat` is the headline and default documented
-model. Qwen2.5-Coder remains only as historical public-baseline and regression
-coverage. Full scope and what the repo proves live in
+model. Qwen2.5-Coder is kept as the independent HuggingFace reference for
+correctness regression. Full scope and what the repo proves live in
 [`docs/scoping.md`](docs/scoping.md). Read it before proposing work.
 
 ## Core rule: match the reference before measuring speed
 
 For any speed claim, the engine first has to match a known-good reference output on
 the same prompt and model. For Esme bundles, the reference is the source bundle
-logits/generation contract. Historical Qwen checks use the pinned HuggingFace
+logits/generation contract. The Qwen reference uses the pinned HuggingFace
 full-recompute greedy output. Experimental paths are allowed, but they must be
 labeled as experimental until they pass those checks. There is no "correct-ish":
 exact token ids on the single-request unit path, or a divergence traced to a
@@ -28,19 +28,19 @@ numerical tie and documented.
   `llm_infer/model/interface.py`.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs/examples
   use `esme`.
-- `qwen`: historical public-baseline backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
+- `qwen`: independent HF reference backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
   `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the **Instruct** variant and its
-  chat template for old benchmark reproduction. Plain `-3B` is a different model and would
+  chat template for reference reproduction. Plain `-3B` is a different model and would
   invalidate the Qwen reference.
 
-Qwen's historical pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
+Qwen's revision pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
 Backend selection lives in `llm_infer/model/runtime.py`.
 
 ## Layout
 
 ```
 llm_infer/
-  model/             # backend registry, Esme/DenseBackbone loader, Qwen baseline, rope utils
+  model/             # backend registry, Esme/DenseBackbone loader, Qwen reference, rope utils
   kernels/           # AttentionBackend protocol, torch_naive reference, flash_attn_paged
   kv_cache/          # block allocator, block tables, paged page store
   scheduler/         # prefill/decode admission, continuous batching, optional preemption
@@ -48,7 +48,7 @@ llm_infer/
   benchmarks/        # shared workload + runners (Modal harnesses in scripts/)
 tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
 docs/                # scoping.md, architecture.md, benchmark.md; internal notes in docs/internal/
-scripts/             # generate_goldens, Qwen historical harnesses, Esme Modal harnesses,
+scripts/             # generate_goldens, Qwen reference harnesses, Esme Modal harnesses,
                      # modal_esme_reference_check, modal_esme_benchmark, merge_adapter,
                      # build_rollout_fixture, loadgen, kv trace fixture
 visualizer/          # schema-v3 KV trace replay UI
@@ -80,10 +80,10 @@ uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU reference check
 
 The local check is **CPU-runnable by design** — no GPU required, and the slow 3B
 reference checks are opt-in because they load the pinned Qwen model and can take minutes on CPU.
-The flash-attn backend is GPU-only; Esme and historical Qwen reference checks run on the target
+The flash-attn backend is GPU-only; Esme and Qwen reference checks run on the target
 GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
-Esme in `scripts/modal_esme_*` and Qwen retained in `scripts/modal_benchmark.py` /
-`scripts/modal_rollout.py` for historical reproduction.
+Esme in `scripts/modal_esme_*` and the Qwen reference in `scripts/modal_benchmark.py` /
+`scripts/modal_rollout.py`.
 
 ## Conventions
 
