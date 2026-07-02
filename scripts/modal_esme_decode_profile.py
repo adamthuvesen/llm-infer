@@ -17,6 +17,11 @@ flash-attn engine path (the headline configuration), greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command profile
     modal run scripts/modal_esme_decode_profile.py --command bench
     modal run scripts/modal_esme_decode_profile.py --command bench --batch-sizes 8,32,128
+    modal run scripts/modal_esme_decode_profile.py --command capture --batch-sizes 8,64,256
+
+``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
+probe, eager-vs-graphs launch counts, and the oracle-gated same-GPU ablation including the
+captured configuration.
 """
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ MEASURED_ITERS = 3
 # How many decode steps the torch.profiler slice covers — enough to average out per-step
 # jitter, short enough that profiler overhead stays a few seconds.
 PROFILER_STEPS = 16
+# Batch-size buckets the decode-graph runner captures. Includes 256 so the largest bench
+# batch replays from graphs instead of silently falling back to the eager window.
+CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 
 app = modal.App("llm-infer-esme-decode-profile")
 
@@ -127,17 +135,22 @@ def _decode_wall(runtime, num_requests: int) -> dict:
     }
 
 
-def _torch_profile(runtime, num_requests: int) -> dict:
+def _torch_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
     """GPU busy time vs CPU dispatch over a short decode slice, via torch.profiler.
 
     CUDA *event* spans include GPU idle gaps while the CPU is still issuing work, so they
     cannot separate busy from starved on a CPU-bound engine. Kineto's per-kernel times can:
     ``self_cuda_time_total`` sums actual kernel execution. CPU times here carry profiler
     overhead — use them for attribution, never as a wall claim.
+
+    A "step" below is one scheduler pass. With the deferred window (default size 8) one pass
+    runs a whole window, so per-token launch counts are the per-step counts divided by the
+    window size; the eager-vs-graphs comparison holds either way because both run the same
+    pass shape.
     """
     import torch
 
-    engine, _ = _build_engine(runtime, num_requests, "cuda")
+    engine, _ = _build_engine(runtime, num_requests, "cuda", config)
     _run_prefill_step(engine)
     torch.cuda.synchronize()
 
@@ -153,11 +166,15 @@ def _torch_profile(runtime, num_requests: int) -> dict:
     events = prof.key_averages()
     gpu_busy_ms = sum(evt.self_device_time_total for evt in events) / 1000.0
     cpu_total_ms = sum(evt.self_cpu_time_total for evt in events) / 1000.0
+    launch_calls = sum(evt.count for evt in events if evt.key == "cudaLaunchKernel")
+    graph_launches = sum(evt.count for evt in events if evt.key == "cudaGraphLaunch")
     top_cpu = sorted(events, key=lambda evt: evt.self_cpu_time_total, reverse=True)[:15]
     return {
         "profiled_steps": steps,
         "gpu_busy_ms_per_step": gpu_busy_ms / steps if steps else None,
         "profiler_cpu_ms_per_step": cpu_total_ms / steps if steps else None,
+        "cuda_launch_kernel_per_step": launch_calls / steps if steps else None,
+        "cuda_graph_launch_per_step": graph_launches / steps if steps else None,
         "top_ops_by_self_cpu": [
             {
                 "op": evt.key,
@@ -167,6 +184,41 @@ def _torch_profile(runtime, num_requests: int) -> dict:
             }
             for evt in top_cpu
         ],
+    }
+
+
+def _sync_probe(runtime, num_requests: int) -> dict:
+    """Host-sync inventory of the decode loop under ``torch.cuda.set_sync_debug_mode``.
+
+    Each engine step (one scheduler pass = one whole deferred window) runs with sync-debug
+    warnings recorded. The contract being checked: the first window is fully sync-free
+    (steps, staging flush, everything), and later windows show only the one staged-copy
+    ``event.synchronize`` per window boundary, consumed a window behind.
+    """
+    import warnings
+
+    import torch
+
+    engine, _ = _build_engine(runtime, num_requests, "cuda")
+    _run_prefill_step(engine)
+    torch.cuda.synchronize()
+
+    per_pass: list[list[str]] = []
+    torch.cuda.set_sync_debug_mode("warn")
+    try:
+        for _ in range(3):
+            if not engine.scheduler.has_work():
+                break
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                engine.step()
+            per_pass.append([str(warning.message) for warning in caught])
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize()
+    return {
+        "sync_warnings_per_pass": [len(messages) for messages in per_pass],
+        "messages": per_pass,
     }
 
 
@@ -353,11 +405,23 @@ def bench_decode(batch_sizes: list[int]) -> str:
 
 # Same-GPU ablation configs: one container measures all of them back to back, so the
 # comparison is free of Modal's machine-to-machine variance (GPU SKU, clocks, host CPU).
+# ``decode_graphs`` is a model-level toggle (the runner is captured once and reused), applied
+# by the harness around each row rather than by ``_build_engine``.
 ABLATION_CONFIGS: dict[str, dict] = {
     "per-step (window=1)": {"decode_window_size": 1},
     "window, classic decode_many": {"planned_decode": False},
     "window + planned buffers (default)": {},
+    "window + planned + cuda graphs": {"decode_graphs": True},
 }
+
+
+def _graph_runner(flash_runtime):
+    """Capture the decode-graph buckets once (outside any timed region) and return the runner."""
+    start = time.perf_counter()
+    runner = flash_runtime.model.enable_decode_graphs(CAPTURE_SIZES)
+    flash_runtime.model.decode_graphs = None  # rows opt in explicitly
+    print(f"[graphs] captured buckets {CAPTURE_SIZES} in {time.perf_counter() - start:.1f} s")
+    return runner
 
 
 @app.function(
@@ -385,10 +449,13 @@ def ablate_decode(batch_sizes: list[int]) -> str:
         device="cuda",
         attention_backend=FlashAttnPagedAttention(),
     )
+    runner = _graph_runner(flash_runtime)
     rows = []
     for size in batch_sizes:
         for label, config in ABLATION_CONFIGS.items():
+            flash_runtime.model.decode_graphs = runner if config.get("decode_graphs") else None
             row = _bench_batch(oracle_runtime, flash_runtime, size, config)
+            flash_runtime.model.decode_graphs = None
             row["config_label"] = label
             rows.append(row)
             tps = row["tokens_per_second"]
@@ -400,11 +467,91 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     return json.dumps({"rows": rows, "gpu": gpu_snapshot(), "versions": library_versions()})
 
 
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def capture_report(batch_sizes: list[int]) -> str:
+    """The one-container decode-graph report: sync probe, launch counts, oracle-gated A/B.
+
+    Everything runs on ONE GPU in one process so every comparison — sync warnings,
+    launches/step, eager-window vs captured tok/s — is like-for-like (Modal containers vary
+    ±20% machine to machine on this CPU-bound loop).
+    """
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+    from llm_infer.model.runtime import load_model_runtime
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    flash_runtime = load_model_runtime(
+        "esme",
+        bundle_path=Path(REMOTE_BUNDLE_PATH),
+        dtype=torch.bfloat16,
+        device="cuda",
+        attention_backend=FlashAttnPagedAttention(),
+    )
+    model = flash_runtime.model
+    runner = _graph_runner(flash_runtime)
+
+    sync = {}
+    for label, active in (("eager-window", None), ("cuda-graphs", runner)):
+        model.decode_graphs = active
+        sync[label] = _sync_probe(flash_runtime, 8)
+        print(f"[sync] {label}: warnings per pass {sync[label]['sync_warnings_per_pass']}")
+
+    launches = []
+    for size in batch_sizes:
+        for label, active in (("eager-window", None), ("cuda-graphs", runner)):
+            model.decode_graphs = active
+            profile = _torch_profile(flash_runtime, size)
+            launches.append({"batch_size": size, "config_label": label, **profile})
+            print(
+                f"[launches] batch={size} | {label}: "
+                f"cudaLaunchKernel/pass {profile['cuda_launch_kernel_per_step']:.0f}, "
+                f"graphLaunch/pass {profile['cuda_graph_launch_per_step']:.0f}, "
+                f"gpu busy/pass {profile['gpu_busy_ms_per_step']:.2f} ms"
+            )
+
+    bench_rows = []
+    for size in batch_sizes:
+        for label, config in ABLATION_CONFIGS.items():
+            model.decode_graphs = runner if config.get("decode_graphs") else None
+            row = _bench_batch(oracle_runtime, flash_runtime, size, config)
+            model.decode_graphs = None
+            row["config_label"] = label
+            bench_rows.append(row)
+            tps = row["tokens_per_second"]
+            print(
+                f"[bench] batch={size} | {label}: median {row['median_seconds']:.3f} s, "
+                f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
+            )
+
+    return json.dumps(
+        {
+            "sync_probe": sync,
+            "launches": launches,
+            "rows": bench_rows,
+            "capture_sizes": list(CAPTURE_SIZES),
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
 @app.local_entrypoint()
 def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str = "") -> None:
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
-    if command not in ("profile", "bench", "ablate"):
-        raise ValueError(f"command must be 'profile', 'bench', or 'ablate', got {command!r}")
+    if command not in ("profile", "bench", "ablate", "capture"):
+        raise ValueError(
+            f"command must be 'profile', 'bench', 'ablate', or 'capture', got {command!r}"
+        )
     sizes = _parse_batch_sizes(batch_sizes)
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-decode")
@@ -417,6 +564,8 @@ def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str
         record = json.loads(profile_decode.remote(sizes))
     elif command == "ablate":
         record = json.loads(ablate_decode.remote(sizes))
+    elif command == "capture":
+        record = json.loads(capture_report.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
