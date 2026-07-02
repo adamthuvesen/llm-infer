@@ -10,6 +10,7 @@ from typing import Literal
 
 import torch
 
+from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.interface import ModelRuntime
 from llm_infer.model.runtime import available_backends, load_model_runtime
 from llm_infer.serving.engine import InferenceEngine
@@ -28,6 +29,12 @@ DEFAULT_NUM_BLOCKS = 512
 DEFAULT_DECODE_WINDOW_SIZE = 8
 DEFAULT_BACKEND = "esme"
 BUNDLE_BACKENDS = frozenset({"dense", "esme"})
+# Decode-graph buckets the server captures at startup. Capture costs roughly 5 s per bucket
+# on an A100, so the serve default covers a handful of concurrent chat sessions (~25 s)
+# rather than the benchmark harnesses' full spread; a batch above the largest bucket falls
+# back to the eager planned window, which is correct, just slower. Tune via
+# --decode-graph-buckets.
+DEFAULT_DECODE_GRAPH_BUCKETS = (1, 2, 4, 8, 16)
 
 
 def build_app_from_runtime(
@@ -40,8 +47,19 @@ def build_app_from_runtime(
     prefill_chunk_size: int | None = None,
     prompt_lookup_speculative: SpeculativeDecodingConfig | None = None,
     decode_window_size: int = DEFAULT_DECODE_WINDOW_SIZE,
+    decode_graphs: bool = True,
+    decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
 ):
-    """Wire a loaded model runtime into the HTTP app."""
+    """Wire a loaded model runtime into the HTTP app.
+
+    Decode graphs are on by default: on a CUDA bundle model the piecewise decode-window
+    graphs are captured here, before the engine starts serving, so the capture cost lands
+    at startup, never inside a request. On CPU or non-bundle backends this is a no-op.
+    """
+    if decode_graphs:
+        capture_s = enable_decode_graphs_if_cuda(runtime.model, decode_graph_buckets)
+        if capture_s is not None:
+            print(f"decode graphs: captured buckets {decode_graph_buckets} in {capture_s:.1f} s")
     engine = InferenceEngine(
         runtime.model,
         block_size=block_size,
@@ -74,6 +92,15 @@ def _dtype(name: str) -> torch.dtype:
     if name == "float16":
         return torch.float16
     raise argparse.ArgumentTypeError("dtype must be one of: float32, bfloat16, float16")
+
+
+def _bucket_sizes(value: str) -> tuple[int, ...]:
+    sizes = tuple(int(part) for part in value.split(",") if part.strip())
+    if not sizes or any(size < 1 for size in sizes):
+        raise argparse.ArgumentTypeError(
+            f"decode-graph-buckets must be positive integers; got {value!r}"
+        )
+    return sizes
 
 
 def _positive_int(name: str) -> Callable[[str], int]:
@@ -135,6 +162,19 @@ def main() -> None:
         default=DEFAULT_DECODE_WINDOW_SIZE,
         help="Decode steps per EOS/stop host sync for all-greedy batches; 1 restores the "
         "classic per-step decode path.",
+    )
+    parser.add_argument(
+        "--no-decode-graphs",
+        dest="decode_graphs",
+        action="store_false",
+        help="Serve on the eager decode window instead of capturing CUDA graphs at startup.",
+    )
+    parser.add_argument(
+        "--decode-graph-buckets",
+        type=_bucket_sizes,
+        default=DEFAULT_DECODE_GRAPH_BUCKETS,
+        help="Comma-separated batch-size buckets to capture (~5 s each on an A100); batches "
+        "above the largest bucket decode on the eager window.",
     )
     parser.add_argument(
         "--preemption-policy",
@@ -203,6 +243,8 @@ def main() -> None:
             prefill_chunk_size=args.prefill_chunk_size,
             prompt_lookup_speculative=speculative,
             decode_window_size=args.decode_window_size,
+            decode_graphs=args.decode_graphs,
+            decode_graph_buckets=args.decode_graph_buckets,
         )
     except ValueError as exc:
         parser.error(str(exc))

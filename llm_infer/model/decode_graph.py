@@ -32,6 +32,7 @@ GPU the only delta left is the capture itself.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -47,6 +48,25 @@ if TYPE_CHECKING:
     from llm_infer.model.pretrain_bundle import PretrainBundleModel
 
 DEFAULT_CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128)
+
+
+def enable_decode_graphs_if_cuda(
+    model: object, capture_sizes: tuple[int, ...] = DEFAULT_CAPTURE_SIZES
+) -> float | None:
+    """Capture decode graphs when the model supports them on CUDA; return capture seconds.
+
+    The one call serving and benchmark entry points make at startup. Returns ``None`` (and
+    changes nothing) when the backend has no ``enable_decode_graphs`` (Qwen) or the model is
+    not on CUDA, where capture is impossible; the eager planned window keeps running there.
+    Callers log the returned capture time so the startup cost stays visible.
+    """
+    enable = getattr(model, "enable_decode_graphs", None)
+    device = getattr(model, "device", None)
+    if enable is None or device is None or device.type != "cuda":
+        return None
+    start = time.perf_counter()
+    enable(capture_sizes)
+    return time.perf_counter() - start
 
 
 def select_bucket(capture_sizes: tuple[int, ...], batch: int) -> int | None:
