@@ -32,6 +32,7 @@ from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
+from llm_infer.model.decode_graph import DEFAULT_CAPTURE_SIZES, DecodeGraphRunner
 from llm_infer.model.decode_plan import DecodeWindowPlan, build_decode_window_plan
 from llm_infer.model.layers import (
     expand_grouped_kv,
@@ -105,6 +106,10 @@ class PretrainBundleModel:
         # decode step. Same values, cast once. For an fp32 model ``to`` returns the weight
         # itself, so this caches nothing new.
         self._norm_weights_fp32: dict[str, torch.Tensor] = {}
+        # Piecewise CUDA-graph runner for the planned decode window (None = eager). Set via
+        # :meth:`enable_decode_graphs`; assign None to disable without dropping the capture
+        # (keep the runner object around and reassign it to re-enable).
+        self.decode_graphs: DecodeGraphRunner | None = None
 
     @classmethod
     def load(
@@ -319,6 +324,25 @@ class PretrainBundleModel:
             self._ensure_rope_rows(max(plan.base_lengths) + budget)
         return plan
 
+    def enable_decode_graphs(
+        self,
+        capture_sizes: tuple[int, ...] = DEFAULT_CAPTURE_SIZES,
+        *,
+        max_position: int = 8192,
+        mode: str = "graph",
+    ) -> DecodeGraphRunner:
+        """Capture the piecewise decode-window graphs now and route window steps through them.
+
+        Captures every bucket up front (so no capture cost can land inside a timed region)
+        and returns the runner. Batches above the largest bucket, or windows reaching past
+        ``max_position``, fall back to the eager planned path per window. ``mode="eager"``
+        skips capture and runs the same segment/buffer flow directly — the CPU test hook.
+        """
+        self.decode_graphs = DecodeGraphRunner(
+            self, capture_sizes=capture_sizes, max_position=max_position, mode=mode
+        )
+        return self.decode_graphs
+
     @torch.no_grad()
     def decode_window_step(
         self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
@@ -330,11 +354,19 @@ class PretrainBundleModel:
         bookkeeping comes from: write slots, read plan, and RoPE rows are views into the
         window's device buffers instead of per-step Python walks over block tables. Advances
         the plan (and each table's length) by one token.
+
+        With :attr:`decode_graphs` enabled the step replays captured segments instead; the
+        returned logits are then a view into a static buffer, valid only until the next step
+        (the engine consumes them immediately via argmax).
         """
         if int(token_ids.numel()) != len(plan.tables):
             raise ValueError(
                 f"tables/token_ids length mismatch: {len(plan.tables)} vs {token_ids.numel()}"
             )
+        if self.decode_graphs is not None:
+            logits = self.decode_graphs.window_step(cache, plan, token_ids)
+            if logits is not None:
+                return logits
         write_slots, read_plan = plan.begin_step()
         hidden = self.w["embed_tokens.weight"][token_ids.reshape(-1)].to(self.dtype)
         # max_len - 1 is the largest position this step touches; the table already covers the
