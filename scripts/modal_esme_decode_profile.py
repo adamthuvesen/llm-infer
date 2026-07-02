@@ -187,6 +187,89 @@ def _torch_profile(runtime, num_requests: int, config: dict | None = None) -> di
     }
 
 
+def _sync_op_isolation() -> dict:
+    """Sync-debug warning counts for the primitive ops the window flush is built from.
+
+    The pass-level probe counts warnings but the c10 message never names the caller; this
+    attributes them. Each case runs alone under ``set_sync_debug_mode("warn")`` with a
+    recording warnings context, so the count per op is exact. Pinned allocation appears
+    twice because the caching host allocator may behave differently cold vs warm.
+    """
+    import warnings
+
+    import torch
+
+    device_matrix = torch.randint(0, 100, (8, 8), dtype=torch.long, device="cuda")
+    lookup = torch.tensor([1, 2], dtype=torch.long, device="cuda")
+    host = torch.empty((8, 8), dtype=torch.long, pin_memory=True)
+    event = torch.cuda.Event()
+    repeats = torch.full((8,), 3, dtype=torch.long, device="cuda")
+    batch_arange = torch.arange(8, device="cuda")
+
+    cases = {
+        "empty_pinned_cold": lambda: torch.empty((16, 16), dtype=torch.long, pin_memory=True),
+        "empty_pinned_warm": lambda: torch.empty((16, 16), dtype=torch.long, pin_memory=True),
+        "copy_nonblocking_d2h_pinned": lambda: host.copy_(device_matrix, non_blocking=True),
+        "eos_mask_on_device": lambda: (device_matrix.unsqueeze(-1) == lookup).any(dim=-1),
+        "event_record": lambda: event.record(),
+        "event_synchronize": lambda: event.synchronize(),
+        "repeat_interleave_output_size": lambda: torch.repeat_interleave(
+            batch_arange, repeats, output_size=24
+        ),
+        "tolist_pinned_host": lambda: host.tolist(),
+        "argmax_device": lambda: torch.argmax(device_matrix, dim=-1),
+        "stack_device": lambda: torch.stack([device_matrix[0], device_matrix[1]]),
+    }
+    torch.cuda.synchronize()
+    counts: dict[str, int] = {}
+    torch.cuda.set_sync_debug_mode("warn")
+    try:
+        for name, run_case in cases.items():
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                run_case()
+            counts[name] = len(caught)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize()
+    return counts
+
+
+def _sync_first_site(runtime, num_requests: int) -> dict:
+    """Python stacks of every synchronizing op in one decode pass.
+
+    Sync-debug warnings are emitted synchronously in the calling thread, so the stack at
+    ``showwarning`` time names the exact call site — unlike the c10 message, which is the
+    same generic line for every sync source.
+    """
+    import traceback
+    import warnings
+
+    import torch
+
+    engine, _ = _build_engine(runtime, num_requests, "cuda")
+    _run_prefill_step(engine)
+    torch.cuda.synchronize()
+
+    sites: list[str] = []
+
+    def record_site(message, category, filename, lineno, file=None, line=None):
+        del message, category, filename, lineno, file, line
+        stack = traceback.format_stack(limit=14)
+        sites.append("".join(stack[:-1]))  # drop the record_site frame itself
+
+    torch.cuda.set_sync_debug_mode("warn")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.showwarning = record_site
+            engine.step()
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize()
+    return {"sync_sites": sites}
+
+
 def _sync_probe(runtime, num_requests: int) -> dict:
     """Host-sync inventory of the decode loop under ``torch.cuda.set_sync_debug_mode``.
 
@@ -471,6 +554,48 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     image=FLASH_IMAGE,
     gpu="A100-80GB",
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=30 * 60,
+)
+def sync_report(batch_sizes: list[int]) -> str:
+    """Sync-attribution probe only: op isolation, first-site traceback, per-pass counts."""
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+    from llm_infer.model.runtime import load_model_runtime
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    flash_runtime = load_model_runtime(
+        "esme",
+        bundle_path=Path(REMOTE_BUNDLE_PATH),
+        dtype=torch.bfloat16,
+        device="cuda",
+        attention_backend=FlashAttnPagedAttention(),
+    )
+    ops = _sync_op_isolation()
+    for name, count in ops.items():
+        print(f"[sync-ops] {name}: {count}")
+    size = batch_sizes[0]
+    first_site = _sync_first_site(flash_runtime, size)
+    for index, site in enumerate(first_site["sync_sites"]):
+        print(f"[sync-site] sync {index}:\n{site}")
+    probe = _sync_probe(flash_runtime, size)
+    print(f"[sync] eager-window: warnings per pass {probe['sync_warnings_per_pass']}")
+    return json.dumps(
+        {
+            "op_isolation": ops,
+            **first_site,
+            "pass_probe": probe,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
 def capture_report(batch_sizes: list[int]) -> str:
@@ -548,9 +673,10 @@ def capture_report(batch_sizes: list[int]) -> str:
 @app.local_entrypoint()
 def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str = "") -> None:
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
-    if command not in ("profile", "bench", "ablate", "capture"):
+    if command not in ("profile", "bench", "ablate", "capture", "sync"):
         raise ValueError(
-            f"command must be 'profile', 'bench', 'ablate', or 'capture', got {command!r}"
+            f"command must be 'profile', 'bench', 'ablate', 'capture', or 'sync', "
+            f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
     local_bundle = local_bundle_path(bundle_path)
@@ -566,6 +692,8 @@ def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str
         record = json.loads(ablate_decode.remote(sizes))
     elif command == "capture":
         record = json.loads(capture_report.remote(sizes))
+    elif command == "sync":
+        record = json.loads(sync_report.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {

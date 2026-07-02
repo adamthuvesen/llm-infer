@@ -137,14 +137,23 @@ def build_decode_window_plan(
     for length in lengths:
         cu_host.append(cu_host[-1] + length + 1)
     max_total = cu_host[-1] + (budget - 1) * len(tables)
+
+    def upload(values: list, dtype: torch.dtype) -> torch.Tensor:
+        # Build on the host, then a non_blocking upload: `torch.tensor(..., device=cuda)`
+        # ends in a blocking stream sync, which at window open would stall the CPU behind
+        # the previous window's queued GPU work (the GPU probe flagged exactly these five
+        # uploads). A pageable H2D copy is host-synchronous per CUDA semantics — the source
+        # is staged before return — so the temporary's lifetime is safe without the sync.
+        return torch.tensor(values, dtype=dtype).to(device, non_blocking=True)
+
     return DecodeWindowPlan(
         tables=list(tables),
-        write_slot_matrix=torch.tensor(write_rows, dtype=torch.long, device=device).T.contiguous(),
-        read_slots=torch.tensor(history_rows, dtype=torch.long, device=device),
-        positions=torch.tensor(lengths, dtype=torch.long, device=device),
-        cu_seqlens=torch.tensor(cu_host, dtype=torch.int32, device=device),
+        write_slot_matrix=upload(write_rows, torch.long).T.contiguous(),
+        read_slots=upload(history_rows, torch.long),
+        positions=upload(lengths, torch.long),
+        cu_seqlens=upload(cu_host, torch.int32),
         cu_step=torch.arange(len(tables) + 1, dtype=torch.int32, device=device),
-        cu_seqlens_long=torch.tensor(cu_host, dtype=torch.long, device=device),
+        cu_seqlens_long=upload(cu_host, torch.long),
         cu_step_long=torch.arange(len(tables) + 1, dtype=torch.long, device=device),
         flat_arange=torch.arange(max_total, dtype=torch.long, device=device),
         batch_arange=torch.arange(len(tables), dtype=torch.long, device=device),
