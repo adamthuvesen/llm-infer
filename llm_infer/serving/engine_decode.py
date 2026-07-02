@@ -25,22 +25,47 @@ class DecodeWindow:
     """Deferred-decode state for one stable all-greedy batch.
 
     While a window is open, each decode step's sampled tokens stay on device in ``pending``
-    (one ``(B,)`` long tensor per step) and no EOS/stop host sync happens. The flush is the
-    single host boundary: it materializes all pending tokens at once, records each request's
-    tokens up to its first EOS or length cap, and discards the rest. A request that hit EOS
-    mid-window therefore decodes a few throwaway tokens — bounded by ``budget - 1`` — in
-    exchange for one host sync per window instead of one per step.
+    (one ``(B,)`` long tensor per step) and no EOS/stop host sync happens. The flush *stages*
+    the window instead of syncing: one ``non_blocking`` device-to-host copy of (tokens, EOS
+    flags) into pinned buffers, consumed one window later (see :class:`PendingWindowFlush`).
+    A request that hit EOS mid-window therefore decodes throwaway tokens — bounded by the
+    current window's remainder plus one whole follow-up window — which are discarded at
+    consume time, never emitted. That is waste, not a correctness change: recorded tokens
+    stay identical to the per-step engine.
     """
 
     request_ids: tuple[str, ...]
     requests: list[Request]
     # How many steps this window may run: the sync interval, capped by the batch's smallest
-    # remaining token budget so no request can decode past its own max_new_tokens.
+    # remaining token budget (minus tokens still staged in an unconsumed flush) so no
+    # request can decode past its own max_new_tokens.
     budget: int
     pending: list[torch.Tensor] = field(default_factory=list)
     # Preallocated model-side step buffers (planned_decode backends); None falls back to
     # per-step ``decode_many`` bookkeeping inside the same window.
     plan: DecodeWindowPlan | None = None
+
+
+@dataclass
+class PendingWindowFlush:
+    """A flushed window's tokens, in flight to the host, consumed one window behind.
+
+    Staging instead of syncing keeps the flush off the step loop's critical path: the
+    device-to-host copy overlaps the *next* window's GPU work, and by the time that window
+    flushes, ``event`` has long signalled — the consume reads pinned memory without waiting
+    on the compute stream. The device ``matrix`` stays referenced here so the recorded
+    per-token views (and the next window's first input, ``matrix[-1]``) remain valid.
+    """
+
+    request_ids: tuple[str, ...]
+    requests: list[Request]
+    matrix: torch.Tensor  # (S, B) on the model device — record views + next window's input
+    tokens_host: torch.Tensor  # (S, B) on the host (pinned when the model is on CUDA)
+    # (S, B) bool EOS flags computed on device (single shared stop set), or None when the
+    # batch mixes stop sets — the consume then checks membership host-side per token.
+    eos_host: torch.Tensor | None
+    steps: int
+    event: torch.cuda.Event | None  # None on CPU, where the copy is already synchronous
 
 
 class EngineDecodeMixin(EngineMixinHost):
@@ -53,9 +78,9 @@ class EngineDecodeMixin(EngineMixinHost):
         if self._window_eligible(requests):
             self._decode_window_step(requests, result)
             return
-        # Leaving the deferred path (e.g. a sampled request joined the batch): flush the open
+        # Leaving the deferred path (e.g. a sampled request joined the batch): drain the open
         # window first so every request's recorded state is current, then decode the survivors.
-        self._flush_decode_window(result)
+        self._drain_decode_window(result)
         requests = [request for request in requests if not request.finished]
         if not requests:
             return
@@ -117,25 +142,43 @@ class EngineDecodeMixin(EngineMixinHost):
 
         The previous step's token tensor feeds the next forward directly, so within a window
         the loop never materializes tokens on the host. The window flushes when its budget is
-        reached; a batch-composition change (admission or a flush-released finisher) closes
-        the old window first and re-filters the batch.
+        reached — a *staged* non-blocking copy, consumed one window later, so consecutive
+        same-batch windows never block on the compute stream. A batch-composition change
+        (admission or a consume-released finisher) drains staged state first and re-filters
+        the batch.
         """
         window = self._decode_window
         ids = tuple(request.request_id for request in requests)
         if window is not None and window.request_ids != ids:
-            self._flush_decode_window(result)
+            self._drain_decode_window(result)
             window = None
             requests = [request for request in requests if not request.finished]
             if not requests:
                 return
             ids = tuple(request.request_id for request in requests)
         if window is None:
+            pending = self._pending_flush
+            if pending is not None:
+                # The staged window's tokens are not recorded yet, so the next window may
+                # pipeline behind it only when the batch is identical and no request could
+                # pass its length cap counting those staged steps. Otherwise consume now.
+                pipelined = pending.request_ids == ids and all(
+                    request.remaining_tokens - pending.steps >= 1 for request in requests
+                )
+                if not pipelined:
+                    self._drain_decode_window(result)
+                    pending = None
+                    requests = [request for request in requests if not request.finished]
+                    if not requests:
+                        return
+                    ids = tuple(request.request_id for request in requests)
+            staged_steps = pending.steps if pending is not None else 0
             window = DecodeWindow(
                 request_ids=ids,
                 requests=list(requests),
                 budget=min(
                     self.decode_window_size,
-                    min(request.remaining_tokens for request in requests),
+                    min(request.remaining_tokens for request in requests) - staged_steps,
                 ),
             )
             if self.capabilities.planned_decode:
@@ -149,9 +192,15 @@ class EngineDecodeMixin(EngineMixinHost):
         if window.pending:
             last_tokens = window.pending[-1]
         else:
-            last_tokens = torch.stack(
-                [request.last_token_tensor for request in requests]
-            ).to(self.model.device)
+            pending = self._pending_flush
+            if pending is not None and pending.request_ids == window.request_ids:
+                # Pipelined windows: the previous window's last sampled tokens are still on
+                # device (and not yet recorded) — feed them straight into this window.
+                last_tokens = pending.matrix[-1]
+            else:
+                last_tokens = torch.stack(
+                    [request.last_token_tensor for request in requests]
+                ).to(self.model.device)
         with self._record_time("decode"):
             if window.plan is not None:
                 logits = self.model.decode_window_step(self.cache, window.plan, last_tokens)
@@ -167,30 +216,88 @@ class EngineDecodeMixin(EngineMixinHost):
             self._flush_decode_window(result)
 
     def _flush_decode_window(self, result: StepResult) -> None:
-        """Close the open window: one host sync, then record/truncate/release per request.
+        """Close the open window: stage its host copy, then consume the *previous* stage.
 
-        Tokens after a request's first EOS (or its length cap) are decode overshoot and are
-        discarded; the tokens kept are exactly what the per-step path would have recorded, so
-        outputs stay token-for-token identical to the classic loop. Finished requests release
-        their whole block tables here, which also returns any overshoot KV.
+        The stage is one ``non_blocking`` device-to-host copy of (tokens, EOS flags) into
+        pinned buffers plus an event — no wait on the compute stream. The previously staged
+        window, whose copy has been in flight for a whole window of GPU work, is consumed
+        into request state here. Tokens after a request's first EOS (or its length cap) are
+        decode overshoot and are discarded at consume; the tokens kept are exactly what the
+        per-step path would have recorded, so outputs stay token-for-token identical to the
+        classic loop.
         """
         window = self._decode_window
         self._decode_window = None
-        if window is None or not window.pending:
-            return
+        previous = self._pending_flush
+        if window is not None and window.pending:
+            self._pending_flush = self._stage_window_flush(window)
+        if previous is not None and previous is not self._pending_flush:
+            self._consume_window_flush(previous, result)
+
+    def _drain_decode_window(self, result: StepResult) -> None:
+        """Flush the open window and consume every staged copy — request state is current after.
+
+        The synchronous companion to the pipelined flush, for boundaries that need recorded
+        state now: batch-composition changes, aborts, and leaving the window path.
+        """
+        self._flush_decode_window(result)
+        pending = self._pending_flush
+        self._pending_flush = None
+        if pending is not None:
+            self._consume_window_flush(pending, result)
+
+    def _stage_window_flush(self, window: DecodeWindow) -> PendingWindowFlush:
+        """Enqueue the window's device-to-host copy (pinned, non-blocking) without waiting."""
         matrix = torch.stack(window.pending)  # (S, B), on the model device
-        with self._record_host_time("cpu_gpu_sync"):
-            step_ids = matrix.cpu().tolist()  # host ints for EOS/stop decisions
-        for column, request in enumerate(window.requests):
-            for step, tokens in enumerate(step_ids):
+        eos_mask: torch.Tensor | None = None
+        eos_sets = {request.eos_token_ids for request in window.requests}
+        if len(eos_sets) == 1:
+            lookup = self._eos_lookup(next(iter(eos_sets)), matrix.device)
+            if lookup.numel():
+                eos_mask = (matrix.unsqueeze(-1) == lookup).any(dim=-1)
+        if matrix.is_cuda:
+            tokens_host = torch.empty(matrix.shape, dtype=matrix.dtype, pin_memory=True)
+            tokens_host.copy_(matrix, non_blocking=True)
+            eos_host: torch.Tensor | None = None
+            if eos_mask is not None:
+                eos_host = torch.empty(eos_mask.shape, dtype=torch.bool, pin_memory=True)
+                eos_host.copy_(eos_mask, non_blocking=True)
+            event = torch.cuda.Event()
+            event.record()
+        else:
+            tokens_host = matrix
+            eos_host = eos_mask
+            event = None
+        return PendingWindowFlush(
+            request_ids=window.request_ids,
+            requests=window.requests,
+            matrix=matrix,
+            tokens_host=tokens_host,
+            eos_host=eos_host,
+            steps=len(window.pending),
+            event=event,
+        )
+
+    def _consume_window_flush(self, pending: PendingWindowFlush, result: StepResult) -> None:
+        """Record a staged window into request state and release its finishers."""
+        if pending.event is not None:
+            with self._record_host_time("cpu_gpu_sync"):
+                pending.event.synchronize()
+        step_ids = pending.tokens_host.tolist()  # host ints for EOS/stop decisions
+        eos_rows = pending.eos_host.tolist() if pending.eos_host is not None else None
+        for column, request in enumerate(pending.requests):
+            for step in range(pending.steps):
                 if request.finished:
                     break
-                # Record the device-tensor view (keeps a request's generated tokens on one
-                # device — ``Request.generated`` stacks them); the host int drives the stop rule.
-                self._record(
-                    request, matrix[step, column], tokens[column] in request.eos_token_ids, result
+                is_eos = (
+                    eos_rows[step][column]
+                    if eos_rows is not None
+                    else step_ids[step][column] in request.eos_token_ids
                 )
-        self._release_finished_in(window.requests, result)
+                # Record the device-tensor view (keeps a request's generated tokens on one
+                # device — ``Request.generated`` stacks them); the host flag drives the stop rule.
+                self._record(request, pending.matrix[step, column], is_eos, result)
+        self._release_finished_in(pending.requests, result)
 
     def _params_for(self, request: Request) -> SamplingParams:
         """The request's own sampling params, or the engine default when it set none."""

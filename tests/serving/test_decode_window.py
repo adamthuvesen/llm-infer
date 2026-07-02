@@ -88,23 +88,32 @@ def test_window_outputs_match_per_step_engine_with_mid_run_eos(runtime) -> None:
     assert windowed == reference
 
 
-def test_window_runs_per_scheduler_pass_and_flushes_in_bursts(runtime) -> None:
-    """One scheduler pass runs a whole window: tokens arrive in window-sized bursts."""
+def test_window_runs_per_scheduler_pass_and_flushes_one_window_behind(runtime) -> None:
+    """One scheduler pass runs a whole window; a flushed window is consumed one window later."""
     engine = _engine(runtime, window=4)
     engine.add_request(Request("r0", [1, 4, 7], 9, frozenset()))
 
     prefill = engine.step()
     assert [len(tokens) for tokens in prefill.tokens.values()] == [1]
 
-    # Budget is min(window=4, remaining=8) = 4: the pass runs all 4 steps and flushes.
+    # Budget is min(window=4, remaining=8) = 4: the pass runs all 4 steps and stages the
+    # flush, but its tokens are not visible yet — the copy is consumed one window behind.
+    staged = engine.step()
+    assert not staged.tokens
+    assert engine._pending_flush is not None
+
+    # The next window pipelines behind the stage (budget 8-4=4); flushing it consumes the
+    # first window's tokens.
     first_burst = engine.step()
     assert [len(tokens) for tokens in first_burst.tokens.values()] == [4]
     assert not first_burst.finished
 
-    # The next pass drains the remaining budget (4 tokens) and finishes at the length cap.
+    # No budget remains beyond the staged steps, so the next pass drains: the second
+    # window's tokens land and the length cap finishes the request.
     second_burst = engine.step()
     assert [len(tokens) for tokens in second_burst.tokens.values()] == [4]
     assert second_burst.finished == ["r0"]
+    assert engine._pending_flush is None
 
 
 def test_window_budget_respects_length_cap(runtime) -> None:

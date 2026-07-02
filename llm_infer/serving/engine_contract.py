@@ -21,7 +21,7 @@ from llm_infer.tracing import TokenSource, TraceEventName, TraceRecorder
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
-    from llm_infer.serving.engine_decode import DecodeWindow
+    from llm_infer.serving.engine_decode import DecodeWindow, PendingWindowFlush
 
 
 class EngineMixinHost(Protocol):
@@ -45,6 +45,7 @@ class EngineMixinHost(Protocol):
     decode_window_size: int
     _eos_tensors: dict[frozenset[int], torch.Tensor]
     _decode_window: DecodeWindow | None
+    _pending_flush: PendingWindowFlush | None
 
     def _emit_trace(self, event: TraceEventName, **fields: object) -> None:
         ...

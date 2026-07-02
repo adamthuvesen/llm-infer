@@ -18,7 +18,7 @@ from llm_infer.model.interface import (
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler
-from llm_infer.serving.engine_decode import DecodeWindow, EngineDecodeMixin
+from llm_infer.serving.engine_decode import DecodeWindow, EngineDecodeMixin, PendingWindowFlush
 from llm_infer.serving.engine_preemption import EnginePreemptionMixin
 from llm_infer.serving.engine_prefill import EnginePrefillMixin
 from llm_infer.serving.engine_trace import EngineTraceMixin
@@ -117,9 +117,12 @@ class InferenceEngine(
         # Per-stop-set EOS comparison tensors, built once and reused across decode steps.
         self._eos_tensors: dict[frozenset[int], torch.Tensor] = {}
         # Deferred-decode window state: how many one-token decode steps may run between EOS/stop
-        # host syncs (1 = classic per-step sync), and the currently open window, if any.
+        # host boundaries (1 = classic per-step sync), the currently open window, and the
+        # staged flush of the previous window (consumed one window behind; see
+        # PendingWindowFlush in engine_decode).
         self.decode_window_size = decode_window_size
         self._decode_window: DecodeWindow | None = None
+        self._pending_flush: PendingWindowFlush | None = None
         # A window flush forced by abort() lands here and is merged into the next step's
         # result, so other requests' flushed tokens still reach the serving loop.
         self._stashed_flush: StepResult | None = None
@@ -147,14 +150,14 @@ class InferenceEngine(
         already finished or unknown returns ``False``. Must be called between steps (the
         serving loop owns the engine on one thread), never mid-forward.
 
-        An open deferred-decode window is flushed first so every request's recorded tokens are
-        current before any window member is dropped. The flushed tokens belong to *other*
-        still-streaming requests too, so they are stashed and merged into the next ``step()``
-        result rather than discarded.
+        An open deferred-decode window (and any staged flush pipelined behind it) is drained
+        first so every request's recorded tokens are current before any window member is
+        dropped. The drained tokens belong to *other* still-streaming requests too, so they
+        are stashed and merged into the next ``step()`` result rather than discarded.
         """
-        if self._decode_window is not None:
+        if self._decode_window is not None or self._pending_flush is not None:
             stashed = self._stashed_flush or StepResult()
-            self._flush_decode_window(stashed)
+            self._drain_decode_window(stashed)
             self._stashed_flush = stashed
         request = self._requests.pop(request_id, None)
         if request is None:
