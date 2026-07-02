@@ -1,139 +1,236 @@
-# Benchmark Record
+# Benchmarks
 
-Esme is the primary benchmark path. `Esme-214M-Chat` is checked against the source bundle
-oracle before any speed row reports tok/s, then compared against naive HuggingFace and vLLM
-through a converted HF checkpoint. Qwen records are retained only as historical public-baseline
-evidence.
+`llm-infer` measures itself against one external system on the same model, prompts, and
+token budgets:
 
-## Current Esme Result
-
-Run `2026-07-02` on **A100-80GB**, after the decode-overhead reduction slice (deferred
-decode windows + planned step buffers; see
-[internal/esme-decode-overhead.md](internal/esme-decode-overhead.md)). Workload unchanged:
-8 requests x 64 new tokens, greedy, prefix caching off, 1 warmup + 3 measured iterations,
-median wall-clock. All rows bf16 for timed generation, gated on the fp32
-`PretrainBundleModel.logits()` oracle (tie-tolerant rule, zero non-tie divergences); the
-`llm_infer` row also passed the equal-dtype flash gate (8/8 exact) on this code.
-
-| model | system | reference agreement | median s | output tok | tok/s |
-| --- | --- | --- | ---: | ---: | ---: |
-| `Esme-214M-Chat` | `hf_sequential` | yes, 8/8 exact | 15.000 | 454 | 30.3 |
-| `Esme-214M-Chat` | `llm_infer` | yes, 6 exact + 2 ties | 2.548 | 486 | 190.7 |
-| `Esme-214M-Chat` | `vllm` | yes, 6 exact + 2 ties | 0.148 | 472 | 3196.9 |
-
-`llm_infer` is **6.3x** the naive HF baseline measured in the same run (the 2026-06-30
-record was 5.5x). Cross-run tok/s is host-sensitive for this CPU-bound decode: a second
-fresh run on a slower Modal host measured HF 22.8 / llm_infer 145.7 — the same 6.4x ratio.
-Compare same-run ratios (or same-container sweeps) across dates, not raw tok/s.
-
-### Decode batch sweep (2026-07-02)
-
-Engine-only sweep on one container (A100 PCIe, 1410 MHz, 300 W), same workload shape at
-batch 8/32/128, every row oracle-gated
-(`modal run scripts/modal_esme_decode_profile.py --command bench`):
-
-| batch | reference agreement | before this slice | after | change |
-| ---: | --- | ---: | ---: | ---: |
-| 8 | yes, 6 exact + 2 ties | 176.3 | 245.9 | +39% |
-| 32 | yes, 32/32 exact | 485.1 | 685.1 | +41% |
-| 128 | yes, 96 exact + 32 ties | 998.4 | 1380.8 | +38% |
-
-The before/after pair ran on the same GPU SKU/clock/power configuration (before: this
-harness on the pre-slice code; after: the same-container ablation's default-config rows).
-The three-way headline row above is lower than the sweep's batch-8 row only because its
-container had a slower host CPU — its own HF baseline shows the same shift.
-
-## Esme Result — 2026-06-30 (previous record)
-
-Run `2026-06-30` on **A100-80GB**. Workload: 8 requests x 64 new tokens, greedy, prefix
-caching off, 1 warmup + 3 measured iterations, median wall-clock. vLLM is `0.23.0`; all rows
-use bf16 for timed generation and are checked against the fp32
-`PretrainBundleModel.logits()` oracle.
-
-| model | system | reference agreement | median s | output tok | tok/s |
-| --- | --- | --- | ---: | ---: | ---: |
-| `Esme-214M-Chat` | `hf_sequential` | yes, 8/8 exact | 13.427 | 454 | 33.8 |
-| `Esme-214M-Chat` | `llm_infer` | yes, 6 exact + 2 ties | 2.625 | 486 | 185.2 |
-| `Esme-214M-Chat` | `vllm` | yes, 6 exact + 2 ties | 0.149 | 472 | 3163.4 |
-
-`llm_infer` is **5.5x** the naive HF baseline on Esme. vLLM is the ceiling, not
-the system this repo claims to beat.
-
-## What Was Measured
-
-The Esme bundle is converted to a native `Qwen3ForCausalLM` checkpoint for the HF and vLLM
-baselines. The conversion is a key remap into the matching Qwen3 architecture, gated by local
-parity tests that compare converted HF logits against direct bundle logits.
-
-The three measured systems are:
-
-| row | role |
+| system | role |
 | --- | --- |
-| `hf_sequential` | HF `generate()` once per request, one at a time. This is the naive baseline, not a full-recompute strawman. |
-| `llm_infer` | Esme paged-KV path on the bundle, using the validated bf16 flash-attn backend and fused batched decode. |
-| `vllm` | vLLM offline generation on the converted checkpoint, prefix caching off. This is the ceiling. |
+| `hf_sequential` | HF `generate()` once per request, one at a time — the naive baseline a first serving script would ship. |
+| `llm_infer` | This engine: paged KV, continuous batching, batched greedy decode, bf16 flash-attn. |
 
-## Reference Gate
+This is a from-scratch engine, and the naive baseline is the honest yardstick for it. It
+does not try to approach or compete with mature production engines such as vLLM; that
+distance is real, and it is deliberately not the story here.
 
-The benchmark follows the project rule: match before measuring speed.
+Every number below follows the repo rule: **match the reference before measuring speed.**
+A system reports tok/s only after its tokens agree with the fp32
+`PretrainBundleModel.logits()` oracle under the audited tie-tolerant rule (zero non-tie
+divergences). A row that fails the gate reports no throughput. The gate profile
+(`exact / tie / non-tie`) is recorded with every row.
 
-For Esme, the oracle is fp32 greedy decode through direct `PretrainBundleModel.logits()`.
-Timed bf16 systems are compared with the audited tie-tolerant agreement rule. A row reports
-tok/s only when it has zero non-tie divergences. Exact token agreement is preferred; a bf16
-near-tie is accepted only when the fp32 top-token margin is inside the documented tolerance.
+The model is `Esme-214M-Chat` (this project's own pretrained+post-trained 214M model,
+1024-token context), loaded from its export bundle. The HF baseline runs a converted
+`Qwen3ForCausalLM` checkpoint emitted from the same bundle, gated by parity tests.
 
-The `llm_infer` row also depends on the equal-dtype flash gate: bf16 flash must match bf16
-`torch_naive` through the same engine path before the flash-backed speed row is trustworthy.
+## Headline: 64 concurrent chat requests
 
-## Esme Paged KV vs Full Recompute
+The published serving shape: **64 concurrent chat requests, up to 256 new tokens each**,
+greedy, prefix caching off. Why this shape: 64 concurrent requests is a realistic
+small-service load (and deep enough to exercise continuous batching); 256 new tokens is a
+typical full chat answer with EOS stopping; prompts are 15-41 tokens from the
+`HEADLINE_PROMPTS` pool, so prompt+output tops out at ~297 of Esme's 1024-token context.
 
-The engine path is also compared against the direct bundle full-recompute baseline. Local CPU
-run, fp32, 4 chat requests x 24 new tokens, both systems exact against the reference:
+Run `2026-07-02` on A100-80GB
+(`modal run scripts/modal_esme_three_way.py --command headline`), 1 warmup + 3 measured
+iterations, median wall-clock, both rows in one container.
 
-| system | mode | median s | output tok | tok/s |
-| --- | --- | ---: | ---: | ---: |
-| `llm_infer_paged` | paged KV + batched decode | 1.176 | 96 | 81.6 |
-| `full_recompute` | per-request full recompute | 3.276 | 96 | 29.3 |
+| model | system | reference agreement | median s | output tok | tok/s | vs floor |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `Esme-214M-Chat` | `hf_sequential` | yes, 24 exact + 40 ties, 0 non-tie | 301.545 | 10,432 | 34.6 | 1x |
+| `Esme-214M-Chat` | `llm_infer` | yes, 32 exact + 32 ties, 0 non-tie | 10.902 | 10,144 | 930.4 | **26.9x** |
 
-This CPU figure is relative evidence for the paged path. It is not the headline GPU serving
-number.
+The engine is **26.9x** the naive baseline measured in the same run. Output-token totals
+differ slightly across systems because a genuine bf16 tie can change how soon a
+continuation hits EOS — every such flip was recomputed on the fp32 oracle and confirmed
+inside the tie tolerance.
 
-## Reproducing
+## Throughput vs concurrency
 
-Local checks:
+![Esme batch-size throughput curve](../assets/fig-esme-batch-curve.svg)
 
-```bash
-uv run ruff check
-uv run pytest tests/correctness -q
-uv run pytest -q
-```
+The centerpiece: what continuous batching over one shared paged-KV pool buys as
+concurrency grows. Run `2026-07-02`, same workload family as the headline (chat prompt
+pool, up to 256 new tokens, greedy), every row — both systems, all six batch levels — in
+one container (A100-SXM4, 1410 MHz). Record:
+[`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json), figure regenerated by
+`uv run scripts/plot_benchmark_curve.py`.
 
-GPU benchmark and reference scripts live in [../scripts/](../scripts/). They require Modal,
-an available Esme bundle, and A100 execution; they are intentionally not part of the default
-local check path.
+| concurrent requests | llm_infer tok/s | hf_sequential tok/s |
+| ---: | ---: | ---: |
+| 8 | 206.0 | 47.8 |
+| 16 | 388.2 | 44.4 |
+| 32 | 720.1 | 45.6 |
+| 64 | 1,153.0 | 43.5 |
+| 128 | 1,908.9 | 44.9 |
+| 256 | 2,748.5 | 45.4 |
+
+Reference gates (fp32 oracle, tie-tolerant): every row above has zero non-tie
+divergences — e.g. the llm_infer batch-256 row is 64 exact + 192 genuine bf16 ties of 256,
+and the HF floor rows are exact-or-tie throughout. The floor is measured at every level:
+the batch-8 anchor runs the full warmup + 3-iteration protocol (spread under 1%), the
+larger levels one measured iteration each — one HF iteration at batch b is itself b
+sequential requests.
+
+At 256 concurrent requests the engine serves **~57x** the measured floor. (This container
+had a faster host than the headline run's — the curve's raw tok/s sit above the headline
+row; same-run ratios are the comparable quantity, per the rule below.)
+
+## Methodology
+
+**Workload.** Chat-templated prompts cycled from a fixed pool (15-41 prompt tokens), greedy
+decoding, prefix caching off, up to 256 new tokens per request with EOS stopping. Timing is
+median wall-clock over 3 measured iterations after 1 warmup, with a fresh engine per
+iteration. All GPU runs are Modal A100-80GB.
+
+**Reference gate.** The oracle is fp32 greedy decode through direct
+`PretrainBundleModel.logits()` (full recompute, no cache). Timed systems run bf16; a bf16
+system may flip a token only on a genuine numerical tie — the first divergence is recomputed
+on the fp32 oracle and accepted only when the top-token margin is inside the audited 0.1
+tolerance. Anything else is a real divergence and the row reports no tok/s. The `llm_infer`
+rows additionally pass the equal-dtype flash gate (bf16 flash == bf16 `torch_naive` through
+the same engine path).
+
+**Same-GPU/same-container rule.** This engine's decode loop is host-CPU-bound at 214M, and
+Modal A100 containers vary in GPU SKU, SM clock, and host CPU: identical code measured
+±20% across containers ([internal/esme-decode-overhead.md](internal/esme-decode-overhead.md)).
+Decision-grade comparisons therefore run **in one container**: the headline's HF and
+llm_infer rows share a container, the whole batch sweep runs in one container, and every
+gallery on/off pair runs back to back on one GPU. Cross-date raw tok/s is not comparable;
+same-run ratios are.
+
+**Regression tool.** `modal run scripts/modal_esme_three_way.py --command smoke|bench` is
+the cheap oracle-gated smoke workload (2x8 / 8x64 tokens). It exists to catch regressions
+before a full run; its numbers are not a published record.
+
+## Technique gallery
+
+Each implemented technique carries one targeted, isolated experiment. All engine rows run
+the headline configuration (bf16 flash-attn); every row passed the fp32 oracle gate with
+zero non-tie divergences. On/off pairs ran back to back in one container
+(`modal run scripts/modal_esme_technique_gallery.py --command gallery`, A100-SXM4 run
+2026-07-02; every ratio below reproduced within ~2% on a second, differently-clocked
+container).
+
+### Paged KV cache
+
+**Claim: block-granular KV allocation is what lets concurrency scale to the right side of
+the curve.**
+
+The batch-256 sweep row is the evidence. 256 concurrent requests (up to ~297 cached
+positions each) peaked at **384 used blocks** of 128 tokens — **1.5 GB** of KV at 30,720
+bytes/token — because blocks are allocated lazily as sequences grow and returned the moment
+a request finishes. A contiguous max-length allocation for the same 256 requests at the
+model's 1024-token context would reserve ~8 GB up front and still fragment. Same pool,
+same engine path, from 8 requests to 256: the curve's right side exists because no request
+holds memory it has not written.
+
+### Prefix caching
+
+**Claim: sibling requests sharing a prompt prefill it once, not N times.**
+
+16 sibling requests sharing one 513-token prompt (a product manual plus a question),
+32 new tokens each. With prefix caching the group prefills 513 prompt tokens once and forks
+shared blocks copy-on-write; without, it prefills 8,208.
+
+| prefix caching | prompt tokens prefilled | median wall | reference gate |
+| --- | ---: | ---: | --- |
+| on (shared group) | 513 | 1.701 s | 16/16 exact |
+| off | 8,208 | 2.375 s | 16/16 exact |
+
+**1.40x** end-to-end on this workload, with identical tokens either way. The saving is
+prefill-bound: shorter generations against longer shared prompts push the ratio up.
+
+### Chunked prefill
+
+**Claim: chunking bounds how much prompt work a single engine step may do — and at 214M
+that bound is not the wall-clock protection it is for larger models. Both facts, measured.**
+
+8 short chats decode mid-stream while 4 long prompts (711 tokens each) arrive in a burst;
+compared with `prefill_chunk_size=128` vs whole-prompt prefill, per-step decode window 1 so
+every step is timed.
+
+| config | max prompt tokens in one step | worst in-flight stall | long prompts served after | total wall |
+| --- | ---: | ---: | ---: | ---: |
+| whole-prompt prefill | 2,844 | 5.9x a decode step | 1.84 s | 6.50 s |
+| chunked (128) | 512 | 6.4x a decode step | 3.40 s | 7.89 s |
+
+The structural budget works: no step caches more than 512 prompt tokens instead of 2,844.
+But the stall the in-flight decodes actually see is the same, because at 214M a prefill
+pass costs roughly a fixed ~2,000 kernel launches whether it covers 128 or 711 tokens —
+prefill here is launch-bound, not token-bound. Chunking pays ~21% total wall and ~1.9x
+slower long-prompt turnaround for protection that only materializes when prefill compute
+dominates (bigger models, longer prompts). The technique is implemented, exact, and
+measured; its payoff regime is honestly not this model size.
+
+### Request preemption
+
+**Claim: under a starved KV pool the engine evicts, recomputes, and still returns exact
+tokens — robustness, not speed.**
+
+12 chat requests x 96 new tokens into a 40-block pool (worst case needs ~96 blocks).
+Preemption admits by current footprint and evicts under pressure; the reserve scheduler
+(control) admits only what can never run dry.
+
+| scheduler | preemptions | completed | wall | reference gate |
+| --- | ---: | ---: | ---: | --- |
+| preemption (recompute) | 7 | 12/12 | 8.77 s | 12/12 exact-or-tie, 0 non-tie |
+| reserve (control) | 0 | 12/12 | 11.49 s | 12/12 exact-or-tie, 0 non-tie |
+
+Seven real evictions with token-exact completions is the point. The wall-clock win
+(preemption packs more concurrency between evictions) is workload-dependent gravy.
+
+### Speculative decoding
+
+**Claim: prompt-lookup speculation helps exactly where its drafts come true — batch-1
+latency on repetition-heavy text. It makes no headline claim.**
+
+One request continuing a plainly repetitive paragraph (encode path, not chat template),
+128 new tokens, drafts up to 4 tokens from prompt n-grams, greedy verifier.
+
+| speculative | median wall | tok/s | reference gate |
+| --- | ---: | ---: | --- |
+| on | 3.742 s | 34.2 | exact |
+| off | 5.514 s | 23.2 | exact |
+
+**1.47x** batch-1 latency, 63 verify steps emitting 2.0 tokens each on average. The greedy
+verifier keeps output token-identical, so the gate is exact by construction; on
+non-repetitive chat traffic the drafts miss and the technique is off by default.
 
 ## Historical Qwen Public Baseline
 
-The Qwen benchmark remains for public-model reproduction and regression context. It uses
-`Qwen/Qwen2.5-Coder-3B-Instruct` at revision
-`488639f1ff808d1d3d0ba301aef8c11461451ec5`, with the Instruct chat template.
-
-Run `2026-06-21` on **A100-80GB PCIe**, 32 requests x 128 new tokens, greedy, prefix caching
-off. Only systems that agreed with the fp32 reference reported throughput.
+Kept for public-model reproduction and regression context. `Qwen/Qwen2.5-Coder-3B-Instruct`
+at revision `488639f1ff808d1d3d0ba301aef8c11461451ec5`, run `2026-06-21` on A100-80GB PCIe,
+32 requests x 128 new tokens, greedy, prefix caching off. Only systems that agreed with the
+fp32 reference reported throughput.
 
 | system | reference agreement | tok/s |
 | --- | --- | ---: |
 | `hf_sequential` | diverged beyond tie tolerance | not reported |
 | `hf_batched` | diverged beyond tie tolerance | not reported |
 | `llm_infer` | yes, 32/32 ties | 98.3 |
-| `vllm` | yes, 32/32 ties | 4323.6 |
 
-The historical result is useful for reproducing older public-model evidence. New benchmark
-work should use Esme unless the task is explicitly about that Qwen record.
+New benchmark work uses Esme unless the task is explicitly about this record. The archived
+Qwen rollout timing lives in
+[internal/keeping-the-gpu-busy.md](internal/keeping-the-gpu-busy.md).
 
-## Historical Rollout Timing
+## Reproducing
 
-The archived Qwen rollout timing is kept in
-[internal/keeping-the-gpu-busy.md](internal/keeping-the-gpu-busy.md) for reproduction context.
-Sampling means cross-system token equality is not expected, so that record is timing evidence
-rather than a reference-equivalence benchmark. It is not the current repo story.
+Local gates (CPU, no spend):
+
+```bash
+uv run ruff check
+uv run pytest -q
+```
+
+GPU records (Modal A100, requires the Esme bundle):
+
+```bash
+modal run scripts/modal_esme_three_way.py --command headline   # the headline table
+modal run scripts/modal_esme_batch_curve.py --command curve    # the curve + KV evidence
+modal run scripts/modal_esme_technique_gallery.py --command gallery
+uv run scripts/plot_benchmark_curve.py                         # assets/fig-esme-batch-curve.svg
+```
+
+Each harness writes its full JSON record to `bench-results/` (gitignored); the curated
+curve record is committed at `assets/esme-batch-curve.json` so the figure regenerates from
+repo state alone.

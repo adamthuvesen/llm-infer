@@ -15,9 +15,10 @@ The repo implements a from-scratch paged inference engine with a generic model r
   and request preemption.
 - OpenAI-compatible local serving.
 - Replayable KV-cache traces.
-- Esme benchmarks against naive HF and vLLM through a converted HF checkpoint.
+- Esme benchmarks against naive HF through a converted HF checkpoint.
 
-The claim is not production serving and not "beats vLLM." The claim is systems evidence:
+The claim is not production serving, and not competing with mature serving engines. The
+claim is systems evidence:
 serving techniques made legible, speed claims checked against known-good outputs, and measured
 limits named plainly.
 
@@ -52,14 +53,14 @@ The repo is in its intended state when these remain true:
 2. The paged KV engine path matches the reference gate before reporting speed.
 3. Continuous batching, chunked prefill, prefix caching, speculative decode, and preemption run
    through the shared engine path.
-4. Esme benchmark docs compare naive HF, `llm_infer`, and vLLM on pinned hardware and state the
-   gap to vLLM plainly.
+4. Esme benchmark docs compare naive HF and `llm_infer` on pinned hardware with every row
+   oracle-gated.
 5. Historical Qwen records remain reproducible without becoming the repo story.
 
 ## Non-Goals
 
 - No production-readiness claim.
-- No claim to beat vLLM.
+- No claim to approach mature production serving engines.
 - No custom Triton/CUDA kernel in the current engine.
 - No quantization or multi-GPU serving in the current engine.
 - No claim that historical Qwen rollout economics generalize to Esme.

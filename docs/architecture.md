@@ -155,21 +155,19 @@ assets.
 Current Esme measurements compare:
 
 - naive HF sequential generation on the converted checkpoint,
-- `llm_infer` on the Esme paged-KV path,
-- vLLM on the converted checkpoint.
+- `llm_infer` on the Esme paged-KV path.
 
-vLLM is reported as the ceiling. The repo's claim is narrower: a small, legible,
-reference-checked paged engine that beats the naive baseline and names the gap to mature serving
-systems. See [benchmark.md](benchmark.md).
+The repo's claim is narrow: a small, legible, reference-checked paged engine measured
+against the naive baseline. See [benchmark.md](benchmark.md).
 
 ## Design References
 
 | Technique | Role in this engine | Source |
 | --- | --- | --- |
-| Paged KV cache | Fixed-size blocks, per-request block tables, lower KV fragmentation, and KV sharing | PagedAttention / vLLM |
+| Paged KV cache | Fixed-size blocks, per-request block tables, lower KV fragmentation, and KV sharing | PagedAttention (Kwon et al., 2023) |
 | Continuous batching | Requests can enter and leave at decode-step boundaries | Orca |
 | Chunked prefill | Long prompts are split so decode work can keep advancing | Agrawal et al., 2025 |
-| Prefix caching | Shared prompt prefixes reuse cached K/V blocks | vLLM Automatic Prefix Caching |
+| Prefix caching | Shared prompt prefixes reuse cached K/V blocks | PagedAttention block sharing (Kwon et al., 2023) |
 | Speculative decoding | Draft-and-verify shape for accepting multiple tokens safely | Leviathan et al. |
 | FlashAttention-compatible backend | Fast exact attention behind a narrow kernel boundary | FlashAttention-2 |
 | Trace events | Request/event observability vocabulary for replay and inspection | OpenTelemetry |

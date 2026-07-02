@@ -21,8 +21,13 @@ genuine numerical ties counts as agreement and reports tok/s; a non-tie divergen
 its own image (it ships its own torch/CUDA); the HF + llm_infer leg runs
 in the shared flash CUDA image. Both functions are A100-80GB.
 
-    modal run scripts/modal_esme_three_way.py --command smoke   # N=2, 8 tokens, 1 iter
-    modal run scripts/modal_esme_three_way.py --command bench   # N=8, 64 tokens, 1 warmup + 3 iters
+    modal run scripts/modal_esme_three_way.py --command smoke     # N=2, 8 tokens, 1 iter
+    modal run scripts/modal_esme_three_way.py --command bench     # N=8, 64 tokens, 1+3 iters
+    modal run scripts/modal_esme_three_way.py --command headline  # N=64, 256 tokens, 1+3 iters
+
+``smoke``/``bench`` cycle the four short DEFAULT_PROMPTS (the cheap oracle-gated regression
+workload); ``headline`` is the published serving shape — 64 chat requests over the wider
+HEADLINE_PROMPTS pool, up to 256 new tokens each.
 """
 
 from __future__ import annotations
@@ -102,11 +107,18 @@ def convert_bundle_to_hf() -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def bench_vllm(num_requests: int, max_new_tokens: int, warmup: int, iters: int) -> str:
+def bench_vllm(
+    num_requests: int, max_new_tokens: int, warmup: int, iters: int, headline: bool
+) -> str:
     """Run the vLLM ceiling on the converted Qwen3 checkpoint; return tokens, timing, flags."""
     import torch
 
-    from llm_infer.benchmarks.esme_paged import _time, build_requests
+    from llm_infer.benchmarks.esme_paged import (
+        DEFAULT_PROMPTS,
+        HEADLINE_PROMPTS,
+        _time,
+        build_requests,
+    )
     from llm_infer.benchmarks.esme_three_way import run_vllm_esme
     from llm_infer.model.runtime import load_model_runtime
 
@@ -116,7 +128,8 @@ def bench_vllm(num_requests: int, max_new_tokens: int, warmup: int, iters: int) 
     runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cpu"
     )
-    requests = build_requests(runtime.tokenizer, num_requests)
+    prompts = HEADLINE_PROMPTS if headline else DEFAULT_PROMPTS
+    requests = build_requests(runtime.tokenizer, num_requests, prompts)
     decode_once, vllm_config = run_vllm_esme(
         Path(REMOTE_HF_PATH),
         requests,
@@ -140,12 +153,19 @@ def bench_vllm(num_requests: int, max_new_tokens: int, warmup: int, iters: int) 
     timeout=60 * 60,
 )
 def bench_hf_and_engine(
-    num_requests: int, max_new_tokens: int, warmup: int, iters: int, vllm_outputs: dict
+    num_requests: int,
+    max_new_tokens: int,
+    warmup: int,
+    iters: int,
+    vllm_outputs: dict,
+    headline: bool,
 ) -> str:
     """Run naive HF + llm_infer (flash) on the A100; tie-tolerant agreement vs the fp32 oracle."""
     import torch
 
     from llm_infer.benchmarks.esme_paged import (
+        DEFAULT_PROMPTS,
+        HEADLINE_PROMPTS,
         SystemTiming,
         build_requests,
         reference_outputs,
@@ -175,7 +195,8 @@ def bench_hf_and_engine(
     )
     if not flash_runtime.capabilities.flash_attention:
         raise AssertionError("Esme llm_infer row must run on the flash-attn backend")
-    requests = build_requests(oracle_runtime.tokenizer, num_requests)
+    prompts = HEADLINE_PROMPTS if headline else DEFAULT_PROMPTS
+    requests = build_requests(oracle_runtime.tokenizer, num_requests, prompts)
     needed = sum(math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests)
     num_blocks = needed + max(4, len(requests))
 
@@ -288,8 +309,11 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
         defaults = {"num_requests": 2, "max_new_tokens": 8, "warmup": 0, "iters": 1}
     elif command == "bench":
         defaults = {"num_requests": 8, "max_new_tokens": 64, "warmup": 1, "iters": 3}
+    elif command == "headline":
+        defaults = {"num_requests": 64, "max_new_tokens": 256, "warmup": 1, "iters": 3}
     else:
-        raise ValueError(f"command must be 'smoke' or 'bench', got {command!r}")
+        raise ValueError(f"command must be 'smoke', 'bench', or 'headline', got {command!r}")
+    headline = command == "headline"
     effective_num_requests = defaults["num_requests"]
     effective_max_new_tokens = defaults["max_new_tokens"]
     effective_warmup = defaults["warmup"]
@@ -307,7 +331,11 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
     print("[esme-3way] running vLLM (own image, A100) ...")
     vllm_res = json.loads(
         bench_vllm.remote(
-            effective_num_requests, effective_max_new_tokens, effective_warmup, effective_iters
+            effective_num_requests,
+            effective_max_new_tokens,
+            effective_warmup,
+            effective_iters,
+            headline,
         )
     )
     print("[esme-3way] running naive HF + llm_infer + oracle gate ...")
@@ -318,6 +346,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             effective_warmup,
             effective_iters,
             vllm_res["outputs"],
+            headline,
         )
     )
 
@@ -345,6 +374,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
                 "max_new_tokens": effective_max_new_tokens,
                 "warmup": effective_warmup,
                 "iters": effective_iters,
+                "prompt_pool": "headline" if headline else "default",
             },
             "vllm": vllm_res["config"],
             "num_blocks": main_res["num_blocks"],

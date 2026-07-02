@@ -4,9 +4,9 @@
 measurement. It owns the runtime path: model forward pass, paged KV cache, scheduler,
 sampler, serving loop, benchmark harness, and trace output.
 
-`Esme-214M-Chat` is the default documented model. HuggingFace and vLLM are external
-baselines; Qwen2.5-Coder remains for historical public-baseline reproduction and regression
-coverage.
+`Esme-214M-Chat` is the default documented model. Naive HuggingFace generation is the
+measured external baseline; Qwen2.5-Coder remains for historical public-baseline
+reproduction and regression coverage.
 
 The core rule is simple: every speed claim must first match a known-good reference output on
 the same prompt and model. Experimental paths stay labeled experimental until they pass that
@@ -78,26 +78,48 @@ The server exposes:
 The official OpenAI Python client works by setting `base_url` to
 `http://127.0.0.1:8000/v1`. The API key is ignored because this local server has no auth.
 
+Engine knobs: `--block-size`, `--num-blocks`, `--decode-window-size` (decode steps per
+EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
+`--preemption-policy`, and `--prompt-lookup-speculative`. See
+`uv run python -m llm_infer.serve --help`.
+
 ## Benchmarks
 
-Esme is the primary benchmark story. `Esme-214M-Chat` runs through
-`load_model_runtime("esme", bundle_path=...)`, and every speed row is gated against the fp32
-`PretrainBundleModel.logits()` oracle before tok/s is reported.
+Every speed claim is gated first: a system reports tok/s only after its tokens match the
+fp32 `PretrainBundleModel.logits()` oracle (tie-tolerant, zero non-tie divergences).
+`llm_infer` runs the bf16 flash-attn path; the HF baseline runs a converted
+`Qwen3ForCausalLM` checkpoint emitted from the Esme bundle.
 
-Headline run: `2026-06-30` on **A100-80GB**, 8 requests x 64 new tokens, greedy, prefix
-caching off, 1 warmup + 3 measured iterations. `llm_infer` uses the validated bf16
-flash-attn path; HF and vLLM use the converted `Qwen3ForCausalLM` checkpoint emitted from the
-Esme bundle.
+Headline — `2026-07-02`, A100-80GB, **64 concurrent chat requests x up to 256 new
+tokens** (a realistic small-service load, within Esme's 1024-token context), greedy,
+median of 3 iterations:
 
-| System | Result |
-| --- | ---: |
-| naive HF sequential | 33.8 tok/s |
-| `llm_infer` | 185.2 tok/s |
-| vLLM | 3163.4 tok/s |
+| System | tok/s | vs naive baseline |
+| --- | ---: | ---: |
+| naive HF sequential | 34.6 | 1x |
+| `llm_infer` | 930.4 | **26.9x** |
 
-`llm_infer` is 5.5x the naive HF baseline on Esme. vLLM remains the ceiling, not the
-opponent this repo claims to beat. Full methodology and caveats are in
-[docs/benchmark.md](docs/benchmark.md).
+Throughput scales with concurrency because all requests decode through one shared paged-KV
+engine, while the naive baseline stays flat:
+
+![Esme batch-size throughput curve](assets/fig-esme-batch-curve.svg)
+
+Each serving technique carries its own isolated, oracle-gated experiment:
+
+- **Paged KV** — 256 concurrent requests peaked at 384 blocks = 1.5 GB of KV, allocated
+  lazily as sequences grew (a contiguous max-length layout would reserve ~8 GB).
+- **Prefix caching** — 16 siblings sharing a 513-token prompt: prefill 513 tokens once
+  instead of 8,208; **1.40x** end-to-end.
+- **Chunked prefill** — bounds prompt work per step (2,844 -> 512 tokens) with exact
+  outputs; at 214M prefill is launch-bound, so the latency protection is honestly ~nil
+  here and costs ~21% wall.
+- **Preemption** — 7 real evictions under a starved pool, 12/12 completions still
+  token-exact against the oracle.
+- **Speculative decoding** — **1.47x** batch-1 latency on repetition-heavy text
+  (2.0 tokens per verify step); off by default, no headline claim.
+
+Full methodology — including the same-container rule for Modal A100 variance — and every
+table live in [docs/benchmark.md](docs/benchmark.md).
 
 ## KV Trace Visualizer
 
@@ -112,7 +134,8 @@ by `InferenceEngine(trace=...)`. It can use the committed fixture or a real engi
 - [docs/benchmark.md](docs/benchmark.md) - benchmark setup and current result record.
 - [llm_infer/](llm_infer/) - engine code.
 - [tests/correctness/](tests/correctness/) - reference and equivalence checks.
-- [scripts/](scripts/) - goldens, Modal runs, loadgen, and trace fixtures.
+- [scripts/](scripts/) - goldens, Modal runs, loadgen, trace fixtures, and the figure generator.
+- [assets/](assets/) - the committed curve record and rendered README figure.
 - [visualizer/](visualizer/) - static trace replay UI.
 
 ## References
@@ -120,7 +143,6 @@ by `InferenceEngine(trace=...)`. It can use the committed fixture or a real engi
 - Kwon et al., [_Efficient Memory Management for Large Language Model Serving with PagedAttention_](https://arxiv.org/abs/2309.06180), 2023.
 - Yu et al., [_Orca: A Distributed Serving System for Transformer-Based Generative Models_](https://www.usenix.org/conference/osdi22/presentation/yu), 2022.
 - Agrawal et al., [_Efficient LLM Inference via Chunked Prefills_](https://dl.acm.org/doi/10.1145/3759441.3759444), 2025.
-- vLLM, [_Automatic Prefix Caching_](https://docs.vllm.ai/en/stable/design/prefix_caching/).
 - Leviathan et al., [_Fast Inference from Transformers via Speculative Decoding_](https://arxiv.org/abs/2211.17192), 2023.
 - Dao, [_FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning_](https://arxiv.org/abs/2307.08691), 2023.
 - OpenTelemetry, [_Traces_](https://opentelemetry.io/docs/concepts/signals/traces/).

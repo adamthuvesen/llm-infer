@@ -91,19 +91,22 @@ def run_hf_sequential_esme(
     return decode_once
 
 
-def run_vllm_esme(
+def build_vllm_llm(
     hf_checkpoint: Path | str,
-    requests: list[EsmeBenchRequest],
     *,
-    max_new_tokens: int,
-    eos_token_ids: frozenset[int],
+    max_model_len: int,
     gpu_memory_utilization: float = 0.6,
-) -> tuple[DecodeOnce, dict[str, object]]:
-    """Build the vLLM greedy offline-generate closure (prefix caching off) and its pinned config."""
-    import vllm
-    from vllm import LLM, SamplingParams
+) -> tuple[object, dict[str, object]]:
+    """Build ONE vLLM engine (prefix caching off) plus its pinned config.
 
-    max_model_len = max(len(req.prompt_ids) for req in requests) + max_new_tokens
+    A process gets exactly one engine: vLLM's memory reservation
+    (``gpu_memory_utilization``) is never returned while the process lives, so a second
+    ``LLM()`` in the same process fails engine-core startup on free-memory checks.
+    Multi-workload runs reuse this engine via :func:`vllm_decode_closure`.
+    """
+    import vllm
+    from vllm import LLM
+
     llm = LLM(
         model=str(hf_checkpoint),
         dtype="bfloat16",
@@ -112,6 +115,28 @@ def run_vllm_esme(
         tensor_parallel_size=1,
         gpu_memory_utilization=gpu_memory_utilization,
     )
+    config = {
+        "version": vllm.__version__,
+        "dtype": "bfloat16",
+        "enable_prefix_caching": False,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "max_model_len": max_model_len,
+        "tensor_parallel_size": 1,
+        "served_checkpoint": "converted Qwen3 (from Esme bundle)",
+    }
+    return llm, config
+
+
+def vllm_decode_closure(
+    llm: object,
+    requests: list[EsmeBenchRequest],
+    *,
+    max_new_tokens: int,
+    eos_token_ids: frozenset[int],
+) -> DecodeOnce:
+    """The greedy offline-generate closure for one workload on an already-built engine."""
+    from vllm import SamplingParams
+
     params = SamplingParams(
         temperature=0.0,
         max_tokens=max_new_tokens,
@@ -123,21 +148,33 @@ def run_vllm_esme(
     ids_by_index = [req.request_id for req in requests]
 
     def decode_once() -> dict[str, list[int]]:
-        results = llm.generate(prompts, params, use_tqdm=False)
+        results = llm.generate(prompts, params, use_tqdm=False)  # type: ignore[attr-defined]
         return {
             ids_by_index[i]: [int(token) for token in results[i].outputs[0].token_ids]
             for i in range(len(results))
         }
 
-    config = {
-        "version": vllm.__version__,
-        "dtype": "bfloat16",
-        "enable_prefix_caching": False,
-        "gpu_memory_utilization": gpu_memory_utilization,
-        "max_model_len": max_model_len,
-        "tensor_parallel_size": 1,
-        "served_checkpoint": "converted Qwen3 (from Esme bundle)",
-    }
+    return decode_once
+
+
+def run_vllm_esme(
+    hf_checkpoint: Path | str,
+    requests: list[EsmeBenchRequest],
+    *,
+    max_new_tokens: int,
+    eos_token_ids: frozenset[int],
+    gpu_memory_utilization: float = 0.6,
+) -> tuple[DecodeOnce, dict[str, object]]:
+    """Build the vLLM greedy offline-generate closure (prefix caching off) and its pinned config."""
+    max_model_len = max(len(req.prompt_ids) for req in requests) + max_new_tokens
+    llm, config = build_vllm_llm(
+        hf_checkpoint,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+    )
+    decode_once = vllm_decode_closure(
+        llm, requests, max_new_tokens=max_new_tokens, eos_token_ids=eos_token_ids
+    )
     return decode_once, config
 
 

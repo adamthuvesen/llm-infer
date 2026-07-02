@@ -64,6 +64,20 @@ DEFAULT_PROMPTS = (
     "Name two practical checks before trusting a benchmark.",
 )
 
+# The headline serving shape cycles a wider pool of chat-length prompts so a 64-request
+# batch is not sixteen copies of four questions. Lengths vary from one-liners to
+# paragraph-sized asks — the mix a small chat service actually sees.
+HEADLINE_PROMPTS = (
+    *DEFAULT_PROMPTS,
+    "Summarize what a paged KV cache does and why serving systems use one.",
+    "I have a CSV with columns user_id, plan, and mrr. Walk me through finding the "
+    "plan with the highest total mrr using pandas.",
+    "Draft a short, friendly message telling my team the deploy is delayed until "
+    "tomorrow morning because the migration needs another review pass.",
+    "What is the difference between throughput and latency in a serving benchmark, "
+    "and when should I care about each one?",
+)
+
 
 def build_requests(
     tokenizer: object, num_requests: int, prompts: tuple[str, ...] = DEFAULT_PROMPTS
@@ -98,16 +112,21 @@ def reference_outputs(
     max_new_tokens: int,
     eos_token_ids: frozenset[int],
 ) -> dict[str, list[int]]:
-    """fp32-class reference: direct ``PretrainBundleModel.logits()`` greedy decode per request."""
-    return {
-        req.request_id: greedy_decode(
-            model,
-            list(req.prompt_ids),
-            max_new_tokens=max_new_tokens,
-            eos_token_ids=set(eos_token_ids),
-        )
-        for req in requests
-    }
+    """fp32-class reference: direct ``PretrainBundleModel.logits()`` greedy decode per request.
+
+    Benchmark workloads cycle a small prompt pool, so large batches repeat prompts; greedy
+    oracle outputs are identical per prompt and are computed once per unique prompt.
+    """
+    by_prompt: dict[tuple[int, ...], list[int]] = {}
+    for req in requests:
+        if req.prompt_ids not in by_prompt:
+            by_prompt[req.prompt_ids] = greedy_decode(
+                model,
+                list(req.prompt_ids),
+                max_new_tokens=max_new_tokens,
+                eos_token_ids=set(eos_token_ids),
+            )
+    return {req.request_id: list(by_prompt[req.prompt_ids]) for req in requests}
 
 
 def _matches_reference(
