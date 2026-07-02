@@ -6,8 +6,10 @@ one image definition, baked once and cached, then reused by all of them. Any div
 harnesses (a different torch/transformers pin, a reordered layer) silently invalidates the cache.
 
 flash-attn installs from a prebuilt wheel: torch 2.8.0 on CUDA 12.8 plus the matching
-``flash-attn==2.8.3.post1`` wheel by direct URL from the GitHub release. Since nothing compiles,
-a CUDA runtime base is enough (no ``-devel``, no toolchain).
+``flash-attn==2.8.3.post1`` wheel by direct URL from the GitHub release. Nothing CUDA compiles
+at build time, so a CUDA runtime base is enough (no ``-devel``). ``build-essential`` ships a
+host C toolchain anyway: torch.compile's Triton backend builds its kernel launcher stubs with
+``cc`` at runtime, and without one Inductor fails with "Failed to find C compiler".
 
 flash-attn ships two wheels per release — one per torch C++ ABI (``cxx11abiTRUE`` /
 ``cxx11abiFALSE``). Installing the wrong one imports but fails at the first kernel call. So the ABI
@@ -87,7 +89,8 @@ def build_flash_image() -> modal.Image:
     """
     return (
         modal.Image.from_registry(CUDA_IMAGE, add_python="3.11")
-        .apt_install("git")
+        # build-essential: host cc for Triton's runtime launcher builds (torch.compile).
+        .apt_install("git", "build-essential")
         # torch first — flash-attn's wheel is built against this exact torch + CUDA.
         .pip_install(f"torch=={TORCH_VERSION}", extra_options=f"--index-url {TORCH_CUDA_INDEX}")
         # flash-attn prebuilt wheel, ABI chosen from the installed torch, then guarded (two RUN
