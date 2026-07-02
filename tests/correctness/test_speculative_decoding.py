@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from llm_infer.kv_cache import BlockTable, PagedKVCache
@@ -296,6 +297,38 @@ def test_no_draft_uses_normal_decode_path() -> None:
 
     assert speculative == baseline == script
     assert model.decode_tokens_calls == 0
+
+
+def test_accepted_draft_tokens_are_recorded_as_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted draft tokens reach ``Request.record`` as tensors, never Python ints.
+
+    A request's generated tokens must all live on the model device — ``Request.generated``
+    stacks them, so on CUDA a Python int (which ``record`` wraps as a CPU tensor) mixed with
+    device tensors raises. CPU runs cannot see that crash, so pin the invariant at the record
+    boundary: every token the speculative path records is already a tensor.
+    """
+    prompt = [1, 2, 3, 1, 2]
+    script = [3, 1, 2, 9]  # both draft tokens accepted, so accepted-draft recording is exercised
+
+    recorded: list[object] = []
+    original_record = Request.record
+
+    def spying_record(
+        self: Request, token_id: int | torch.Tensor, *, is_eos: bool | None = None
+    ) -> None:
+        recorded.append(token_id)
+        original_record(self, token_id, is_eos=is_eos)
+
+    monkeypatch.setattr(Request, "record", spying_record)
+    output, model = _run(prompt=prompt, script=script, speculative=True)
+
+    assert output == script
+    assert model.decode_tokens_calls == 1
+    assert all(isinstance(token, torch.Tensor) for token in recorded), (
+        f"speculative path recorded Python ints: {[type(t).__name__ for t in recorded]}"
+    )
 
 
 def test_eos_in_accepted_draft_stops_before_extra_verifier_token() -> None:

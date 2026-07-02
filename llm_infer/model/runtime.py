@@ -254,6 +254,7 @@ def _load_bundle_runtime(
         prefix_caching=DENSE_CAPABILITIES.prefix_caching,
         speculative=DENSE_CAPABILITIES.speculative,
         flash_attention=isinstance(resolved_backend, FlashAttnPagedAttention),
+        planned_decode=DENSE_CAPABILITIES.planned_decode,
     )
     return ModelRuntime(
         backend_id=backend_id,

@@ -484,10 +484,17 @@ async def run_engine_workload(
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    # Submit every request before the engine loop starts: a consumer's ``stream()`` call
+    # enqueues its submission synchronously before its first await, so one loop pass here
+    # registers the whole workload. Starting the engine first races admission against the
+    # step loop — a shared-prefix group could be split across steps and prefill its
+    # siblings separately, which the workload's trace expectations must not depend on.
+    consumers = [asyncio.create_task(consume(spec)) for spec in workload.requests]
+    await asyncio.sleep(0)
     async_engine.start()
     wall_start = time.perf_counter()
     try:
-        client_results = await asyncio.gather(*(consume(spec) for spec in workload.requests))
+        client_results = await asyncio.gather(*consumers)
     finally:
         async_engine.stop()
     wall_s = time.perf_counter() - wall_start

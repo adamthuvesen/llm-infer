@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -12,10 +13,34 @@ from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row
 
 if TYPE_CHECKING:
+    from llm_infer.model.decode_plan import DecodeWindowPlan
     from llm_infer.serving.engine import StepResult
     from llm_infer.serving.engine_contract import EngineMixinHost
 else:
     EngineMixinHost = object
+
+
+@dataclass
+class DecodeWindow:
+    """Deferred-decode state for one stable all-greedy batch.
+
+    While a window is open, each decode step's sampled tokens stay on device in ``pending``
+    (one ``(B,)`` long tensor per step) and no EOS/stop host sync happens. The flush is the
+    single host boundary: it materializes all pending tokens at once, records each request's
+    tokens up to its first EOS or length cap, and discards the rest. A request that hit EOS
+    mid-window therefore decodes a few throwaway tokens — bounded by ``budget - 1`` — in
+    exchange for one host sync per window instead of one per step.
+    """
+
+    request_ids: tuple[str, ...]
+    requests: list[Request]
+    # How many steps this window may run: the sync interval, capped by the batch's smallest
+    # remaining token budget so no request can decode past its own max_new_tokens.
+    budget: int
+    pending: list[torch.Tensor] = field(default_factory=list)
+    # Preallocated model-side step buffers (planned_decode backends); None falls back to
+    # per-step ``decode_many`` bookkeeping inside the same window.
+    plan: DecodeWindowPlan | None = None
 
 
 class EngineDecodeMixin(EngineMixinHost):
@@ -25,6 +50,15 @@ class EngineDecodeMixin(EngineMixinHost):
             requests = self._make_decode_room(requests)
             if not requests:
                 return
+        if self._window_eligible(requests):
+            self._decode_window_step(requests, result)
+            return
+        # Leaving the deferred path (e.g. a sampled request joined the batch): flush the open
+        # window first so every request's recorded state is current, then decode the survivors.
+        self._flush_decode_window(result)
+        requests = [request for request in requests if not request.finished]
+        if not requests:
+            return
         if self.speculative is None:
             self._decode_normal(requests, result)
             return
@@ -52,12 +86,111 @@ class EngineDecodeMixin(EngineMixinHost):
                 last_tokens,
             )
         with self._record_time("sampling"):
-            tokens = self._sample_rows(logits, requests)
-        eos_flags = self._eos_flags(torch.stack(tokens), requests)
+            batched = self._sample_rows(logits, requests)
+        tokens = list(batched.unbind(0))
+        eos_flags = self._eos_flags(batched, requests)
         for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
             self._record(request, token, is_eos, result)
         self._trace_decode_step(requests, list(tokens), token_source="decode")
         self._release_finished_in(requests, result)
+
+    def _window_eligible(self, requests: list[Request]) -> bool:
+        """Whether this decode batch may run in a deferred window (device-side stop tracking).
+
+        The window trades per-step host syncs for one sync per ``budget`` steps, which is only
+        safe when nothing per step needs host data: every row greedy (no RNG, no penalty
+        history), no speculation (drafts read generated ids), no preemption (victim selection
+        inspects live state), no tracing (events are per-token), and no prefix sharing (a
+        finisher's blocks must not stay referenced past its recorded EOS by a sibling fork).
+        """
+        return (
+            self.decode_window_size > 1
+            and self.speculative is None
+            and not self.preemption
+            and self.trace is None
+            and all(request.prefix_group_id is None for request in requests)
+            and all(self._params_for(request).is_greedy for request in requests)
+        )
+
+    def _decode_window_step(self, requests: list[Request], result: StepResult) -> None:
+        """One deferred decode step: batched forward + on-device argmax, no host sync.
+
+        The previous step's token tensor feeds the next forward directly, so within a window
+        the loop never materializes tokens on the host. The window flushes when its budget is
+        reached; a batch-composition change (admission or a flush-released finisher) closes
+        the old window first and re-filters the batch.
+        """
+        window = self._decode_window
+        ids = tuple(request.request_id for request in requests)
+        if window is not None and window.request_ids != ids:
+            self._flush_decode_window(result)
+            window = None
+            requests = [request for request in requests if not request.finished]
+            if not requests:
+                return
+            ids = tuple(request.request_id for request in requests)
+        if window is None:
+            window = DecodeWindow(
+                request_ids=ids,
+                requests=list(requests),
+                budget=min(
+                    self.decode_window_size,
+                    min(request.remaining_tokens for request in requests),
+                ),
+            )
+            if self.capabilities.planned_decode:
+                window.plan = self.model.open_decode_window(
+                    self.cache,
+                    [request.block_table for request in requests],
+                    window.budget,
+                )
+            self._decode_window = window
+
+        if window.pending:
+            last_tokens = window.pending[-1]
+        else:
+            last_tokens = torch.stack(
+                [request.last_token_tensor for request in requests]
+            ).to(self.model.device)
+        with self._record_time("decode"):
+            if window.plan is not None:
+                logits = self.model.decode_window_step(self.cache, window.plan, last_tokens)
+            else:
+                logits = self.model.decode_many(
+                    self.cache,
+                    [request.block_table for request in requests],
+                    last_tokens,
+                )
+        with self._record_time("sampling"):
+            window.pending.append(torch.argmax(logits, dim=-1))
+        if len(window.pending) >= window.budget:
+            self._flush_decode_window(result)
+
+    def _flush_decode_window(self, result: StepResult) -> None:
+        """Close the open window: one host sync, then record/truncate/release per request.
+
+        Tokens after a request's first EOS (or its length cap) are decode overshoot and are
+        discarded; the tokens kept are exactly what the per-step path would have recorded, so
+        outputs stay token-for-token identical to the classic loop. Finished requests release
+        their whole block tables here, which also returns any overshoot KV.
+        """
+        window = self._decode_window
+        self._decode_window = None
+        if window is None or not window.pending:
+            return
+        matrix = torch.stack(window.pending)  # (S, B), on the model device
+        with self._record_host_time("cpu_gpu_sync"):
+            step_ids = matrix.cpu().tolist()  # host ints for EOS/stop decisions
+        for column, request in enumerate(window.requests):
+            for step, tokens in enumerate(step_ids):
+                if request.finished:
+                    break
+                # Record the device-tensor view (keeps a request's generated tokens on one
+                # device — ``Request.generated`` stacks them); the host int drives the stop rule.
+                self._record(
+                    request, matrix[step, column], tokens[column] in request.eos_token_ids, result
+                )
+        self._release_finished_in(window.requests, result)
 
     def _params_for(self, request: Request) -> SamplingParams:
         """The request's own sampling params, or the engine default when it set none."""
@@ -69,18 +202,22 @@ class EngineDecodeMixin(EngineMixinHost):
             logits, self._params_for(request), request.generated, request.generator(logits.device)
         )
 
-    def _sample_rows(self, logits: torch.Tensor, requests: list[Request]) -> list[torch.Tensor]:
+    def _sample_rows(self, logits: torch.Tensor, requests: list[Request]) -> torch.Tensor:
         """Sample one token per row of ``(B, vocab)`` logits, each under its own request.
 
-        Greedy rows take the vectorized argmax (no RNG); the rest are sampled per row under that
-        request's params, against its own generated history, from its own seeded generator — so a
-        request's draw is independent of its batchmates. Returns scalar long tensors on device.
+        An all-greedy batch — the benchmark and reference path — is one batched argmax, no
+        per-row Python at all. Otherwise greedy rows take a vectorized argmax over their subset
+        (no RNG) and the rest are sampled per row under that request's params, against its own
+        generated history, from its own seeded generator — so a request's draw is independent
+        of its batchmates. Returns a ``(B,)`` long tensor on the logits' device.
         """
         if logits.ndim != 2:
             raise ValueError(f"expected 2-D logits, got shape {tuple(logits.shape)}")
         params = [self._params_for(request) for request in requests]
-        tokens: list[torch.Tensor | None] = [None] * len(requests)
+        if all(p.is_greedy for p in params):
+            return torch.argmax(logits, dim=-1)
 
+        tokens: list[torch.Tensor | None] = [None] * len(requests)
         greedy_rows = [i for i, p in enumerate(params) if p.is_greedy]
         if greedy_rows:
             index = torch.tensor(greedy_rows, device=logits.device)
@@ -99,7 +236,7 @@ class EngineDecodeMixin(EngineMixinHost):
             if token is None:
                 raise RuntimeError("sampled fewer tokens than requests")
             filled.append(token)
-        return filled
+        return torch.stack(filled)
 
     def _decode_budget(self, request: Request) -> int:
         """Worst-case tokens this request may append in one decode step — for room reservation.
@@ -180,8 +317,10 @@ class EngineDecodeMixin(EngineMixinHost):
         verifier_tokens = torch.argmax(logits, dim=-1)
         accepted = self._accepted_prefix_length(verifier_tokens[:-1], draft_tensor)
 
-        emitted: list[int | torch.Tensor] = []
-        emitted.extend(draft[:accepted])
+        # Record accepted draft tokens as views of the on-device draft tensor, not the Python
+        # ints they were drafted from: a request's generated tokens must all live on the model
+        # device (``Request.generated`` stacks them; a CPU/CUDA mix would raise there).
+        emitted: list[int | torch.Tensor] = list(draft_tensor[:accepted].unbind())
         if not self._contains_eos(emitted, request):
             if accepted == len(draft):
                 emitted.append(verifier_tokens[-1])
@@ -259,12 +398,9 @@ class EngineDecodeMixin(EngineMixinHost):
             raise ValueError(f"token/request count mismatch: {len(flat)} vs {len(requests)}")
         eos_sets = {request.eos_token_ids for request in requests}
         if len(eos_sets) == 1:
-            eos = torch.tensor(
-                sorted(next(iter(eos_sets))),
-                dtype=torch.long,
-                device=flat.device,
+            mask = (flat.unsqueeze(-1) == self._eos_lookup(next(iter(eos_sets)), flat.device)).any(
+                dim=-1
             )
-            mask = (flat.unsqueeze(-1) == eos).any(dim=-1)
             with self._record_host_time("cpu_gpu_sync"):
                 return [bool(flag) for flag in mask.cpu().tolist()]
 
@@ -273,6 +409,19 @@ class EngineDecodeMixin(EngineMixinHost):
             for token, request in zip(flat, requests, strict=True):
                 flags.append(int(token.cpu().item()) in request.eos_token_ids)
         return flags
+
+    def _eos_lookup(self, eos_token_ids: frozenset[int], device: torch.device) -> torch.Tensor:
+        """The EOS-id comparison tensor for one stop set, built once per engine and reused.
+
+        Rebuilding this tensor every decode step is a host-to-device copy in the hot loop; the
+        stop sets in play are tiny and stable, so a per-engine cache removes it. The engine's
+        device is fixed for its lifetime, so the set alone is a sufficient key.
+        """
+        cached = self._eos_tensors.get(eos_token_ids)
+        if cached is None:
+            cached = torch.tensor(sorted(eos_token_ids), dtype=torch.long, device=device)
+            self._eos_tensors[eos_token_ids] = cached
+        return cached
 
     def _is_eos(self, token: int | torch.Tensor, request: Request) -> bool:
         if isinstance(token, torch.Tensor):

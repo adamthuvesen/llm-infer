@@ -22,6 +22,7 @@ import asyncio
 from pathlib import Path
 
 import httpx
+import pytest
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
@@ -256,6 +257,30 @@ def test_esme_preemption_through_serving_path_matches_reference(tmp_path: Path) 
             f"{request_id}: preempted serving output diverged from the recompute reference "
             f"(served={tight[request_id]}, reference={expected})"
         )
+
+
+def test_build_app_passes_decode_window_size_to_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``build_app_from_runtime(decode_window_size=...)`` reaches the engine unchanged.
+
+    The CLI's ``--decode-window-size`` funnels through this kwarg, so pinning the passthrough
+    here covers the serve entrypoint's only engine-tuning path for the decode window.
+    """
+    import llm_infer.serve as serve_module
+
+    runtime = _esme_runtime(tmp_path)
+    captured: dict[str, object] = {}
+    real_engine = serve_module.InferenceEngine
+
+    def capturing_engine(*args: object, **kwargs: object) -> InferenceEngine:
+        captured.update(kwargs)
+        return real_engine(*args, **kwargs)
+
+    monkeypatch.setattr(serve_module, "InferenceEngine", capturing_engine)
+    build_app_from_runtime(runtime, block_size=8, num_blocks=32, decode_window_size=3)
+
+    assert captured["decode_window_size"] == 3
 
 
 def test_esme_serving_rejects_unknown_model_id(tmp_path: Path) -> None:

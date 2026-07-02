@@ -11,7 +11,7 @@ import torch
 from llm_infer.kv_cache.block_allocator import BlockPoolEvent
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
-from llm_infer.model.interface import CausalLMBackend
+from llm_infer.model.interface import BackendCapabilities, CausalLMBackend
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler
 from llm_infer.serving.request import Request
@@ -21,6 +21,7 @@ from llm_infer.tracing import TokenSource, TraceEventName, TraceRecorder
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.engine_decode import DecodeWindow
 
 
 class EngineMixinHost(Protocol):
@@ -32,6 +33,7 @@ class EngineMixinHost(Protocol):
 
     model: CausalLMBackend
     cache: PagedKVCache
+    capabilities: BackendCapabilities
     scheduler: Scheduler
     default_sampling: SamplingParams
     profiler: TimingProfiler | None
@@ -40,6 +42,9 @@ class EngineMixinHost(Protocol):
     speculative: PromptLookupDraft | None
     trace: TraceRecorder | None
     preemption_count: int
+    decode_window_size: int
+    _eos_tensors: dict[frozenset[int], torch.Tensor]
+    _decode_window: DecodeWindow | None
 
     def _emit_trace(self, event: TraceEventName, **fields: object) -> None:
         ...

@@ -86,7 +86,11 @@ def _paged_cache_for(model: QwenModel, *, num_blocks: int = 8, block_size: int =
 
 def test_active_decode_advances_between_prefill_chunks() -> None:
     model = ChunkedModel()
-    engine = InferenceEngine(model, block_size=4, num_blocks=8, prefill_chunk_size=2)
+    # decode_window_size=1: this test pins per-step token *visibility* while another request
+    # chunk-prefills; a deferred decode window batches that visibility into flush steps.
+    engine = InferenceEngine(
+        model, block_size=4, num_blocks=8, prefill_chunk_size=2, decode_window_size=1
+    )
     active = Request("active", [1], 4, frozenset({63}))
     long = Request("long", [2, 3, 4, 5, 6], 2, frozenset({63}))
     engine.add_request(active)

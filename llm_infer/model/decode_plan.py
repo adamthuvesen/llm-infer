@@ -1,0 +1,128 @@
+"""Preallocated device-side buffers for a planned decode window.
+
+The classic ``decode_many`` rebuilds its bookkeeping from Python block tables every step:
+per-layer ``prepare_write``/``physical_slot`` walks, a packed read plan re-listed from every
+request's whole history, and fresh host-to-device copies for slots, positions, and RoPE rows.
+At small-model batch sizes that Python work — not the GPU — is the decode wall.
+
+A :class:`DecodeWindowPlan` does that bookkeeping once per window instead of once per step
+(and the per-layer part not at all). At build time it reserves every block the window can
+need, uploads the packed slot layout and the per-step write slots in one copy each, and
+checks that no block is shared (copy-on-write can never trigger inside the window). Each
+step then advances with a handful of device kernels and zero host-to-device traffic:
+
+* ``begin_step`` scatters the step's write slots into the padded slot buffer and packs the
+  read indices with one ``masked_select`` — the exact same request-major order
+  ``PagedKVCache.plan_read_many`` produces.
+* ``complete_step`` advances positions, cumulative lengths, and the Python ``BlockTable``
+  lengths so engine invariants (release, accounting) keep holding.
+
+The plan is windowed, not global: the engine opens one per decode window over a stable
+batch and drops it at the flush, so batch-composition changes never invalidate live buffers.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+
+from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
+
+
+@dataclass
+class DecodeWindowPlan:
+    """Reusable decode-step buffers for one window over a fixed request batch."""
+
+    tables: list[BlockTable]
+    # (budget, B): row ``s`` holds each request's physical write slot for window step ``s``.
+    write_slot_matrix: torch.Tensor
+    # (B, width): each request's physical slots for positions 0..len-1, zero-padded; grown by
+    # one scattered column per step. ``width`` covers the whole window, so it never reallocates.
+    read_slots: torch.Tensor
+    # (B,): each request's next token position — the RoPE position and write column.
+    positions: torch.Tensor
+    # (B+1,) int32: packed-read cumulative lengths for the *upcoming* step.
+    cu_seqlens: torch.Tensor
+    # (B+1,) int32: per-step cu_seqlens increment (+1 token per request == +row index).
+    cu_step: torch.Tensor
+    col_arange: torch.Tensor  # (1, width) — compared against lengths to mask valid slots
+    batch_arange: torch.Tensor  # (B,) — row indices for the per-step write-slot scatter
+    base_lengths: list[int]  # host copy of each request's length at window open
+    max_len: int  # host-tracked max read length for the upcoming step (no device sync)
+    steps_used: int = 0
+
+    @property
+    def budget(self) -> int:
+        return int(self.write_slot_matrix.shape[0])
+
+    def begin_step(self) -> tuple[torch.Tensor, KVReadPlan]:
+        """Write slots and packed read plan for the next decode step (device-only work)."""
+        if self.steps_used >= self.budget:
+            raise ValueError(f"decode window exhausted: {self.steps_used}/{self.budget} steps")
+        write_slots = self.write_slot_matrix[self.steps_used]
+        self.read_slots[self.batch_arange, self.positions] = write_slots
+        read_mask = self.col_arange < (self.positions + 1).unsqueeze(1)
+        read_plan = KVReadPlan(
+            idx=self.read_slots.masked_select(read_mask),
+            cu_seqlens=self.cu_seqlens,
+            lengths=[length + self.steps_used + 1 for length in self.base_lengths],
+            max_len=self.max_len,
+        )
+        return write_slots, read_plan
+
+    def complete_step(self) -> None:
+        """Advance to the next step: device counters plus the Python table lengths."""
+        self.steps_used += 1
+        self.positions += 1
+        self.cu_seqlens += self.cu_step
+        self.max_len += 1
+        for table in self.tables:
+            table.length += 1
+
+
+def build_decode_window_plan(
+    cache: PagedKVCache, tables: list[BlockTable], budget: int
+) -> DecodeWindowPlan | None:
+    """Build window buffers for ``tables``, or ``None`` when the batch is not plan-safe.
+
+    Plan-safety means no request's blocks are shared (refcount 1 everywhere): the planned
+    write path skips ``prepare_write``, so a copy-on-write append must be impossible. The
+    engine already keeps prefix-group requests off the window path; this check makes the
+    invariant loud rather than assumed. Reserves every block the window needs up front.
+    """
+    if budget < 1:
+        raise ValueError(f"budget must be >= 1; got {budget}")
+    if not tables:
+        raise ValueError("a decode window needs at least one table")
+    for table in tables:
+        if any(cache.allocator.refcount(block) > 1 for block in table.blocks):
+            return None
+
+    device = cache.key.device
+    lengths = [table.length for table in tables]
+    width = max(lengths) + budget
+
+    write_rows: list[list[int]] = []
+    history_rows: list[list[int]] = []
+    for table, length in zip(tables, lengths, strict=True):
+        table.reserve(budget)
+        write_rows.append(table.physical_slots(length, budget))
+        history_rows.append(table.physical_slots(0, length) + [0] * (width - length))
+
+    cu_host = [0]
+    for length in lengths:
+        cu_host.append(cu_host[-1] + length + 1)
+    return DecodeWindowPlan(
+        tables=list(tables),
+        write_slot_matrix=torch.tensor(write_rows, dtype=torch.long, device=device).T.contiguous(),
+        read_slots=torch.tensor(history_rows, dtype=torch.long, device=device),
+        positions=torch.tensor(lengths, dtype=torch.long, device=device),
+        cu_seqlens=torch.tensor(cu_host, dtype=torch.int32, device=device),
+        cu_step=torch.arange(len(tables) + 1, dtype=torch.int32, device=device),
+        col_arange=torch.arange(width, dtype=torch.long, device=device).unsqueeze(0),
+        batch_arange=torch.arange(len(tables), dtype=torch.long, device=device),
+        base_lengths=lengths,
+        max_len=max(lengths) + 1,
+    )

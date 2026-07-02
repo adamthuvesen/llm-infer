@@ -101,6 +101,15 @@ prepare tensors, paging, RoPE positions, and GQA layout; attention backends comp
 The batch changes over time: finished requests leave, waiting requests enter, and long prompts
 can prefill across several steps without fully blocking decode work.
 
+For an all-greedy batch with no speculation, preemption, tracing, or prefix sharing, the
+engine runs decode in **deferred windows** (`decode_window_size`, default 8; 1 restores the
+per-step path): up to a window of decode steps runs per scheduler pass with sampled tokens
+kept on device, EOS/stop decided at one host sync per window, and — on bundle backends —
+per-step paging bookkeeping replaced by preallocated window buffers
+(`llm_infer/model/decode_plan.py`). Outputs are token-for-token identical to the per-step
+path; tokens become visible in window-sized bursts. See
+[internal/esme-decode-overhead.md](internal/esme-decode-overhead.md) for the measurements.
+
 ## Paged KV Cache
 
 K/V rows live in fixed-size physical blocks. Each request has a `BlockTable` mapping logical

@@ -58,6 +58,10 @@ class FlashAttnPagedAttention:
                 "flash-attn is not available; FlashAttnPagedAttention needs a CUDA build "
                 "of flash-attn. Run it on the target GPU (Modal A100), not the CPU host."
             )
+        # Decode-batch cu_seqlens_q is always 0..B — cache the arange instead of launching a
+        # fresh one per layer per decode step. Sliced views serve any batch up to the cached
+        # size; the cache regrows (and re-pins its device) when a bigger batch arrives.
+        self._decode_cu_seqlens_q: torch.Tensor | None = None
 
     def forward(
         self,
@@ -118,7 +122,7 @@ class FlashAttnPagedAttention:
         k = key.contiguous().to(_KERNEL_DTYPE)
         v = value.contiguous().to(_KERNEL_DTYPE)
 
-        cu_seqlens_q = torch.arange(batch + 1, dtype=torch.int32, device=q.device)
+        cu_seqlens_q = self._decode_arange(batch + 1, q.device)
         out = flash_attn_varlen_func(
             q,
             k,
@@ -132,3 +136,12 @@ class FlashAttnPagedAttention:
             causal=True,
         )
         return out.to(out_dtype)
+
+    def _decode_arange(self, size: int, device: torch.device) -> torch.Tensor:
+        """The cached 0..size-1 int32 arange for decode ``cu_seqlens_q`` (a sliced view)."""
+        cached = self._decode_cu_seqlens_q
+        if cached is None or cached.numel() < size or cached.device != device:
+            cached = torch.arange(max(size, 2 * (0 if cached is None else cached.numel())),
+                                  dtype=torch.int32, device=device)
+            self._decode_cu_seqlens_q = cached
+        return cached[:size]

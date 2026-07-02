@@ -18,7 +18,7 @@ from llm_infer.model.interface import (
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler
-from llm_infer.serving.engine_decode import EngineDecodeMixin
+from llm_infer.serving.engine_decode import DecodeWindow, EngineDecodeMixin
 from llm_infer.serving.engine_preemption import EnginePreemptionMixin
 from llm_infer.serving.engine_prefill import EnginePrefillMixin
 from llm_infer.serving.engine_trace import EngineTraceMixin
@@ -62,9 +62,12 @@ class InferenceEngine(
         trace: TraceRecorder | None = None,
         trace_clock: Callable[[], float] | None = None,
         capabilities: BackendCapabilities | None = None,
+        decode_window_size: int = 8,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
+        if decode_window_size < 1:
+            raise ValueError(f"decode_window_size must be >= 1; got {decode_window_size}")
         self.model = model
         self.capabilities = capabilities or _infer_capabilities(model)
         if speculative is not None and not self.capabilities.speculative:
@@ -111,6 +114,15 @@ class InferenceEngine(
         self._trace_total_tokens = 0
         self._last_traced_batch_size = 0
         self._requests: dict[str, Request] = {}
+        # Per-stop-set EOS comparison tensors, built once and reused across decode steps.
+        self._eos_tensors: dict[frozenset[int], torch.Tensor] = {}
+        # Deferred-decode window state: how many one-token decode steps may run between EOS/stop
+        # host syncs (1 = classic per-step sync), and the currently open window, if any.
+        self.decode_window_size = decode_window_size
+        self._decode_window: DecodeWindow | None = None
+        # A window flush forced by abort() lands here and is merged into the next step's
+        # result, so other requests' flushed tokens still reach the serving loop.
+        self._stashed_flush: StepResult | None = None
         # Observability only: a running tally of preemptions for the serving metrics endpoint.
         # Read live at scrape time; it never influences scheduling or decoding.
         self.preemption_count = 0
@@ -134,7 +146,16 @@ class InferenceEngine(
         boundary and its budget released, exactly like the finish-sweep. Idempotent: a request
         already finished or unknown returns ``False``. Must be called between steps (the
         serving loop owns the engine on one thread), never mid-forward.
+
+        An open deferred-decode window is flushed first so every request's recorded tokens are
+        current before any window member is dropped. The flushed tokens belong to *other*
+        still-streaming requests too, so they are stashed and merged into the next ``step()``
+        result rather than discarded.
         """
+        if self._decode_window is not None:
+            stashed = self._stashed_flush or StepResult()
+            self._flush_decode_window(stashed)
+            self._stashed_flush = stashed
         request = self._requests.pop(request_id, None)
         if request is None:
             return False
@@ -158,7 +179,8 @@ class InferenceEngine(
         (``decode_many``) rather than one forward each — the fused-batch decode that makes
         continuous batching a throughput win, not just a scheduling one.
         """
-        result = StepResult()
+        result = self._stashed_flush or StepResult()
+        self._stashed_flush = None
         self._trace_step = self._step_index
         self._step_index += 1
         try:
@@ -192,6 +214,13 @@ class InferenceEngine(
 
             if to_decode:
                 self._decode_requests(to_decode, result)
+                # Multi-step scheduling: with a deferred window open and nothing waiting to
+                # admit, run the window's remaining steps in this same scheduler pass — the
+                # admission/classification bookkeeping above is per pass, not per token. A
+                # non-empty waiting queue keeps the classic one-step-per-pass cadence so a
+                # mid-window finisher can free blocks for admission at the next pass.
+                while self._decode_window is not None and not self.scheduler.waiting:
+                    self._decode_window_step(self._decode_window.requests, result)
 
             # Finishers are freed inside each prefill/decode op (see _release_finished_in), so by
             # here the running set already excludes them; nothing left to sweep.

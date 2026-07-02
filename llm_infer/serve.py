@@ -25,6 +25,7 @@ from llm_infer.serving.speculative import SpeculativeDecodingConfig
 # chat sessions of the lengths this server is demoed at; tune via the CLI for a real load.
 DEFAULT_BLOCK_SIZE = 64
 DEFAULT_NUM_BLOCKS = 512
+DEFAULT_DECODE_WINDOW_SIZE = 8
 DEFAULT_BACKEND = "esme"
 BUNDLE_BACKENDS = frozenset({"dense", "esme"})
 
@@ -38,6 +39,7 @@ def build_app_from_runtime(
     preemption_policy: Literal["off", "recompute"] = "off",
     prefill_chunk_size: int | None = None,
     prompt_lookup_speculative: SpeculativeDecodingConfig | None = None,
+    decode_window_size: int = DEFAULT_DECODE_WINDOW_SIZE,
 ):
     """Wire a loaded model runtime into the HTTP app."""
     engine = InferenceEngine(
@@ -49,6 +51,7 @@ def build_app_from_runtime(
         preemption=preemption_policy == "recompute",
         prefill_chunk_size=prefill_chunk_size,
         speculative=prompt_lookup_speculative,
+        decode_window_size=decode_window_size,
     )
     metrics = ServerMetrics()
     async_engine = AsyncInferenceEngine(engine, metrics=metrics)
@@ -127,6 +130,13 @@ def main() -> None:
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
     parser.add_argument("--num-blocks", type=int, default=DEFAULT_NUM_BLOCKS)
     parser.add_argument(
+        "--decode-window-size",
+        type=_positive_int("decode_window_size"),
+        default=DEFAULT_DECODE_WINDOW_SIZE,
+        help="Decode steps per EOS/stop host sync for all-greedy batches; 1 restores the "
+        "classic per-step decode path.",
+    )
+    parser.add_argument(
         "--preemption-policy",
         choices=("off", "recompute"),
         default="off",
@@ -192,6 +202,7 @@ def main() -> None:
             preemption_policy=args.preemption_policy,
             prefill_chunk_size=args.prefill_chunk_size,
             prompt_lookup_speculative=speculative,
+            decode_window_size=args.decode_window_size,
         )
     except ValueError as exc:
         parser.error(str(exc))

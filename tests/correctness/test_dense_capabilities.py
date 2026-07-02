@@ -33,7 +33,13 @@ def test_logit_soft_cap_changes_logits(tmp_path: Path) -> None:
 
 def test_dense_advertises_paged_kv_capabilities() -> None:
     assert DENSE_CAPABILITIES.paged_kv is True
-    assert DENSE_CAPABILITIES == QWEN_CAPABILITIES
+    # Dense bundles are full peers of Qwen on the shared engine path...
+    assert DENSE_CAPABILITIES.prefix_caching == QWEN_CAPABILITIES.prefix_caching
+    assert DENSE_CAPABILITIES.speculative == QWEN_CAPABILITIES.speculative
+    assert DENSE_CAPABILITIES.flash_attention == QWEN_CAPABILITIES.flash_attention
+    # ...plus the planned decode window, which only the bundle model implements.
+    assert DENSE_CAPABILITIES.planned_decode is True
+    assert QWEN_CAPABILITIES.planned_decode is False
 
 
 def test_dense_accepts_prefix_group_id(tmp_path: Path) -> None:

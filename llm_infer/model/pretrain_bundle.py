@@ -32,6 +32,7 @@ from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
+from llm_infer.model.decode_plan import DecodeWindowPlan, build_decode_window_plan
 from llm_infer.model.layers import (
     expand_grouped_kv,
     linear_projection,
@@ -93,6 +94,17 @@ class PretrainBundleModel:
         self.qk_norm = config.qk_norm
         self.device = self.w["embed_tokens.weight"].device
         self.profiler: TimingProfiler | None = None
+        # Cached RoPE cos/sin rows in the model dtype, one row per absolute position; grown on
+        # demand and indexed by the decode paths so per-step trig and host-to-device position
+        # copies disappear. Same values as computing each row directly — the cache is the whole
+        # ``rope_tables_for_positions(arange(n))`` table, cast once instead of once per layer.
+        self._rope_rows_cos: torch.Tensor | None = None
+        self._rope_rows_sin: torch.Tensor | None = None
+        # RMSNorm weights pre-cast to fp32, keyed by weight name. rms_norm runs in fp32, so a
+        # bf16 model otherwise re-casts every norm weight on every call — 4 per layer per
+        # decode step. Same values, cast once. For an fp32 model ``to`` returns the weight
+        # itself, so this caches nothing new.
+        self._norm_weights_fp32: dict[str, torch.Tensor] = {}
 
     @classmethod
     def load(
@@ -147,7 +159,7 @@ class PretrainBundleModel:
             )
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self.w["norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
             return self._apply_logit_soft_cap(hidden @ self._lm_head().T)
 
     @torch.no_grad()
@@ -178,7 +190,7 @@ class PretrainBundleModel:
         table.length = seq_len
 
         with self._profile("logits"):
-            last = rms_norm(hidden[-1:], self.w["norm.weight"], self.rms_eps)
+            last = rms_norm(hidden[-1:], self._norm_weight("norm.weight"), self.rms_eps)
             return self._apply_logit_soft_cap((last @ self._lm_head().T)[-1])
 
     @torch.no_grad()
@@ -226,7 +238,7 @@ class PretrainBundleModel:
         table.length = end_pos
 
         with self._profile("logits"):
-            last = rms_norm(hidden[-1:], self.w["norm.weight"], self.rms_eps)
+            last = rms_norm(hidden[-1:], self._norm_weight("norm.weight"), self.rms_eps)
             return self._apply_logit_soft_cap((last @ self._lm_head().T)[-1])
 
     @torch.no_grad()
@@ -275,10 +287,9 @@ class PretrainBundleModel:
             cache.prepare_write(table, pos, 1)
         hidden = self.w["embed_tokens.weight"][ids].to(self.dtype)  # (B, hidden)
 
-        # One RoPE cos/sin row per request, each at the request's own absolute position.
-        cos, sin = self._rope_for_positions(
-            torch.tensor(positions, dtype=torch.float32, device=self.device)
-        )
+        # One RoPE cos/sin row per request, each at the request's own absolute position — from
+        # the cached table, already in model dtype, so the per-layer apply_rope cast is a no-op.
+        cos, sin = self._rope_rows(positions)
         read_plan = cache.plan_read_many(tables, new_lengths)
         for layer in range(self.num_layers):
             hidden = self._apply_decoder_layer(
@@ -292,7 +303,57 @@ class PretrainBundleModel:
             table.length = new_length
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self.w["norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
+            return self._apply_logit_soft_cap(hidden @ self._lm_head().T)  # (B, vocab)
+
+    def open_decode_window(
+        self, cache: PagedKVCache, tables: list[BlockTable], budget: int
+    ) -> DecodeWindowPlan | None:
+        """Build planned-decode buffers for a stable batch, or ``None`` when not plan-safe.
+
+        Also grows the cached RoPE table to cover every position the window can reach, so
+        :meth:`decode_window_step` never allocates or syncs for positions.
+        """
+        plan = build_decode_window_plan(cache, tables, budget)
+        if plan is not None:
+            self._ensure_rope_rows(max(plan.base_lengths) + budget)
+        return plan
+
+    @torch.no_grad()
+    def decode_window_step(
+        self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """One planned decode step: :meth:`decode_many` math from preallocated buffers.
+
+        Identical per request to the classic batched decode — same projections, QK-norm, RoPE,
+        paged write/gather, packed attention, and logits — differing only in where the
+        bookkeeping comes from: write slots, read plan, and RoPE rows are views into the
+        window's device buffers instead of per-step Python walks over block tables. Advances
+        the plan (and each table's length) by one token.
+        """
+        if int(token_ids.numel()) != len(plan.tables):
+            raise ValueError(
+                f"tables/token_ids length mismatch: {len(plan.tables)} vs {token_ids.numel()}"
+            )
+        write_slots, read_plan = plan.begin_step()
+        hidden = self.w["embed_tokens.weight"][token_ids.reshape(-1)].to(self.dtype)
+        # max_len - 1 is the largest position this step touches; the table already covers the
+        # whole window (open_decode_window grew it), so this is a cheap host-side check.
+        cos_table, sin_table = self._ensure_rope_rows(plan.max_len)
+        cos = cos_table.index_select(0, plan.positions)
+        sin = sin_table.index_select(0, plan.positions)
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._decode_attention_planned(
+                    x, p, cos, sin, lyr, cache, write_slots, read_plan
+                ),
+            )
+        plan.complete_step()
+
+        with self._profile("logits"):
+            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
             return self._apply_logit_soft_cap(hidden @ self._lm_head().T)  # (B, vocab)
 
     @torch.no_grad()
@@ -331,7 +392,7 @@ class PretrainBundleModel:
         table.length = end_pos
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self.w["norm.weight"], self.rms_eps)
+            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
             return self._apply_logit_soft_cap(hidden @ self._lm_head().T)
 
     def release_table(self, table: BlockTable) -> None:
@@ -348,11 +409,11 @@ class PretrainBundleModel:
         """
         prefix = f"layers.{layer}."
         residual = hidden
-        x = rms_norm(hidden, self.w[prefix + "input_norm.weight"], self.rms_eps)
+        x = rms_norm(hidden, self._norm_weight(prefix + "input_norm.weight"), self.rms_eps)
         hidden = residual + attention(x, prefix, layer)
 
         residual = hidden
-        x = rms_norm(hidden, self.w[prefix + "post_attention_norm.weight"], self.rms_eps)
+        x = rms_norm(hidden, self._norm_weight(prefix + "post_attention_norm.weight"), self.rms_eps)
         return residual + self._mlp(x, prefix)
 
     def _attention(
@@ -466,6 +527,44 @@ class PretrainBundleModel:
         )
         return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)  # (B, hidden)
 
+    def _decode_attention_planned(
+        self,
+        x: torch.Tensor,
+        prefix: str,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        write_slots: torch.Tensor,
+        read_plan: KVReadPlan,
+    ) -> torch.Tensor:
+        """Batched decode attention fed from planned buffers.
+
+        Same math as :meth:`_decode_attention_batched`; the write lands at precomputed physical
+        slots (``write_rows``) and the gather reuses the window's packed read plan, so no block
+        table is touched inside the layer loop.
+        """
+        q, k, v = self._project_heads(x, prefix)
+        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+
+        with self._profile("kv_write"):
+            cache.write_rows(
+                layer,
+                write_slots,
+                k.transpose(0, 1).contiguous(),
+                v.transpose(0, 1).contiguous(),
+            )
+
+        queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
+        with self._profile("kv_read_gather"):
+            k_hist, v_hist = cache.read_many_plan(layer, read_plan)
+        k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
+
+        attn = self.backend.forward_decode_batch_packed(
+            queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
+        )
+        return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)  # (B, hidden)
+
     def _qk_norm_rope(
         self,
         q: torch.Tensor,
@@ -481,8 +580,8 @@ class PretrainBundleModel:
         is correct to cache once at write time.
         """
         if self.qk_norm:
-            q = rms_norm(q, self.w[prefix + "attn.q_norm.weight"], self.rms_eps)
-            k = rms_norm(k, self.w[prefix + "attn.k_norm.weight"], self.rms_eps)
+            q = rms_norm(q, self._norm_weight(prefix + "attn.q_norm.weight"), self.rms_eps)
+            k = rms_norm(k, self._norm_weight(prefix + "attn.k_norm.weight"), self.rms_eps)
         return apply_rope(q, cos, sin), apply_rope(k, cos, sin)
 
     def _project_heads(
@@ -536,6 +635,14 @@ class PretrainBundleModel:
             return nullcontext()
         return self.profiler.record(name)
 
+    def _norm_weight(self, name: str) -> torch.Tensor:
+        """The named RMSNorm weight pre-cast to fp32 (cast once, reused every call)."""
+        cached = self._norm_weights_fp32.get(name)
+        if cached is None:
+            cached = self.w[name].to(torch.float32)
+            self._norm_weights_fp32[name] = cached
+        return cached
+
     def _lm_head(self) -> torch.Tensor:
         if self.tie_word_embeddings:
             return self.w["embed_tokens.weight"].to(self.dtype)
@@ -544,6 +651,27 @@ class PretrainBundleModel:
     def _rope_tables(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         positions = torch.arange(seq_len, dtype=torch.float32, device=self.device)
         return self._rope_for_positions(positions)
+
+    def _rope_rows(self, positions: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Cached RoPE cos/sin rows (model dtype) for host-known integer positions."""
+        cos_table, sin_table = self._ensure_rope_rows(max(positions) + 1)
+        index = torch.tensor(positions, dtype=torch.long, device=self.device)
+        return cos_table.index_select(0, index), sin_table.index_select(0, index)
+
+    def _ensure_rope_rows(self, min_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Grow the cached RoPE table to at least ``min_len`` rows (doubling to limit rebuilds).
+
+        Rows are the full-table form of :meth:`_rope_for_positions` — the same outer-product
+        and trig per element, computed once — cast once to the model dtype (the cast
+        ``apply_rope`` would otherwise repeat per layer per step).
+        """
+        cached = 0 if self._rope_rows_cos is None else int(self._rope_rows_cos.shape[0])
+        if self._rope_rows_cos is None or self._rope_rows_sin is None or cached < min_len:
+            size = max(min_len, 2 * cached, 256)
+            cos, sin = self._rope_tables(size)
+            self._rope_rows_cos = cos.to(self.dtype)
+            self._rope_rows_sin = sin.to(self.dtype)
+        return self._rope_rows_cos, self._rope_rows_sin
 
     def _rope_for_positions(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Cos/sin tables for arbitrary absolute positions. Shape ``(len(positions), head_dim)``.

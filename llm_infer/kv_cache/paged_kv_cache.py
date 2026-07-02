@@ -173,6 +173,23 @@ class PagedKVCache:
         key_rows[idx] = key
         value_rows[idx] = value
 
+    def write_rows(
+        self,
+        layer: int,
+        slots: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        """Store one K/V row per request at precomputed physical ``slots`` — no table walk.
+
+        The planned decode window computes every write slot once at window open, so per layer
+        this is just two indexed stores. The caller owns copy-on-write safety: slots must come
+        from unshared tables (``build_decode_window_plan`` refuses shared blocks up front).
+        """
+        key_rows, value_rows = self._layer_rows(layer)
+        key_rows[slots] = key
+        value_rows[slots] = value
+
     def read(self, table: BlockTable, layer: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather K/V for positions ``0 .. length-1`` as ``(length, num_kv_heads, head_dim)``."""
         idx = torch.as_tensor(

@@ -16,12 +16,18 @@ from llm_infer.profiling import TimingProfiler
 
 @dataclass(frozen=True)
 class BackendCapabilities:
-    """Feature flags for a loaded backend — engine rejects unsupported combos up front."""
+    """Feature flags for a loaded backend — engine rejects unsupported combos up front.
+
+    ``planned_decode`` means the model implements ``open_decode_window`` /
+    ``decode_window_step`` (the preallocated-buffer decode path the engine's deferred window
+    uses); the engine only calls those methods when this flag is set.
+    """
 
     paged_kv: bool
     prefix_caching: bool
     speculative: bool
     flash_attention: bool
+    planned_decode: bool = False
 
 
 QWEN_CAPABILITIES = BackendCapabilities(
@@ -40,6 +46,7 @@ DENSE_CAPABILITIES = BackendCapabilities(
     prefix_caching=True,
     speculative=True,
     flash_attention=False,
+    planned_decode=True,
 )
 
 

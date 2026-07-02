@@ -7,6 +7,44 @@ evidence.
 
 ## Current Esme Result
 
+Run `2026-07-02` on **A100-80GB**, after the decode-overhead reduction slice (deferred
+decode windows + planned step buffers; see
+[internal/esme-decode-overhead.md](internal/esme-decode-overhead.md)). Workload unchanged:
+8 requests x 64 new tokens, greedy, prefix caching off, 1 warmup + 3 measured iterations,
+median wall-clock. All rows bf16 for timed generation, gated on the fp32
+`PretrainBundleModel.logits()` oracle (tie-tolerant rule, zero non-tie divergences); the
+`llm_infer` row also passed the equal-dtype flash gate (8/8 exact) on this code.
+
+| model | system | reference agreement | median s | output tok | tok/s |
+| --- | --- | --- | ---: | ---: | ---: |
+| `Esme-214M-Chat` | `hf_sequential` | yes, 8/8 exact | 15.000 | 454 | 30.3 |
+| `Esme-214M-Chat` | `llm_infer` | yes, 6 exact + 2 ties | 2.548 | 486 | 190.7 |
+| `Esme-214M-Chat` | `vllm` | yes, 6 exact + 2 ties | 0.148 | 472 | 3196.9 |
+
+`llm_infer` is **6.3x** the naive HF baseline measured in the same run (the 2026-06-30
+record was 5.5x). Cross-run tok/s is host-sensitive for this CPU-bound decode: a second
+fresh run on a slower Modal host measured HF 22.8 / llm_infer 145.7 — the same 6.4x ratio.
+Compare same-run ratios (or same-container sweeps) across dates, not raw tok/s.
+
+### Decode batch sweep (2026-07-02)
+
+Engine-only sweep on one container (A100 PCIe, 1410 MHz, 300 W), same workload shape at
+batch 8/32/128, every row oracle-gated
+(`modal run scripts/modal_esme_decode_profile.py --command bench`):
+
+| batch | reference agreement | before this slice | after | change |
+| ---: | --- | ---: | ---: | ---: |
+| 8 | yes, 6 exact + 2 ties | 176.3 | 245.9 | +39% |
+| 32 | yes, 32/32 exact | 485.1 | 685.1 | +41% |
+| 128 | yes, 96 exact + 32 ties | 998.4 | 1380.8 | +38% |
+
+The before/after pair ran on the same GPU SKU/clock/power configuration (before: this
+harness on the pre-slice code; after: the same-container ablation's default-config rows).
+The three-way headline row above is lower than the sweep's batch-8 row only because its
+container had a slower host CPU — its own HF baseline shows the same shift.
+
+## Esme Result — 2026-06-30 (previous record)
+
 Run `2026-06-30` on **A100-80GB**. Workload: 8 requests x 64 new tokens, greedy, prefix
 caching off, 1 warmup + 3 measured iterations, median wall-clock. vLLM is `0.23.0`; all rows
 use bf16 for timed generation and are checked against the fp32
