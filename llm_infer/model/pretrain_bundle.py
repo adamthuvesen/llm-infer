@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -55,6 +56,9 @@ from llm_infer.model.pretrain_bundle_loader import (
 )
 from llm_infer.model.rope_utils import apply_rope, rms_norm
 from llm_infer.profiling import TimingProfiler
+
+if TYPE_CHECKING:
+    from llm_infer.model.decode_compile import CompiledDecodeRunner
 
 __all__ = ["BUNDLE_FORMAT", "PretrainBundleError", "PretrainBundleModel"]
 
@@ -106,10 +110,11 @@ class PretrainBundleModel:
         # decode step. Same values, cast once. For an fp32 model ``to`` returns the weight
         # itself, so this caches nothing new.
         self._norm_weights_fp32: dict[str, torch.Tensor] = {}
-        # Piecewise CUDA-graph runner for the planned decode window (None = eager). Set via
-        # :meth:`enable_decode_graphs`; assign None to disable without dropping the capture
-        # (keep the runner object around and reassign it to re-enable).
-        self.decode_graphs: DecodeGraphRunner | None = None
+        # Fast-path runner for the planned decode window (None = eager): the piecewise
+        # CUDA-graph runner from :meth:`enable_decode_graphs` or the torch.compile runner
+        # from :meth:`enable_decode_compile`. Assign None to disable without dropping the
+        # capture (keep the runner object around and reassign it to re-enable).
+        self.decode_graphs: DecodeGraphRunner | CompiledDecodeRunner | None = None
 
     @classmethod
     def load(
@@ -340,6 +345,33 @@ class PretrainBundleModel:
         """
         self.decode_graphs = DecodeGraphRunner(
             self, capture_sizes=capture_sizes, max_position=max_position, mode=mode
+        )
+        return self.decode_graphs
+
+    def enable_decode_compile(
+        self,
+        capture_sizes: tuple[int, ...] = DEFAULT_CAPTURE_SIZES,
+        *,
+        max_position: int = 8192,
+        mode: str | None = "reduce-overhead",
+        compile_backend: str = "inductor",
+    ) -> CompiledDecodeRunner:
+        """Compile the decode-window step now and route window steps through it.
+
+        The torch.compile counterpart to :meth:`enable_decode_graphs` — same slot, same
+        window contract, same eager fallbacks. Compiles and warms up every bucket up front
+        (parity-checked against the eager planned path), so no compile cost can land inside
+        a timed region. ``compile_backend="eager"`` skips Inductor and runs the traced
+        graph directly — the CPU test hook.
+        """
+        from llm_infer.model.decode_compile import CompiledDecodeRunner
+
+        self.decode_graphs = CompiledDecodeRunner(
+            self,
+            capture_sizes=capture_sizes,
+            max_position=max_position,
+            mode=mode,
+            compile_backend=compile_backend,
         )
         return self.decode_graphs
 
