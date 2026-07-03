@@ -30,12 +30,15 @@ The output-token totals differ slightly because a genuine bf16 tie can change wh
 continuation reaches EOS. Those flips were checked against the fp32 reference before tok/s was
 reported.
 
+The curve below is a separate same-container batch sweep. Its 64-request row is not expected
+to equal the headline row exactly; compare raw tok/s only inside one run.
+
 ## Throughput Curve
 
 ![Esme batch-size throughput curve](../assets/fig-esme-batch-curve.svg)
 
-Same workload family as the headline: chat prompts from a fixed pool, greedy decoding, up to
-256 new tokens per request, prefix caching off. The committed record is
+Separate sweep, same workload family as the headline: chat prompts from a fixed pool, greedy
+decoding, up to 256 new tokens per request, prefix caching off. The committed record is
 [`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json), and the figure regenerates
 from repo state with:
 
@@ -52,8 +55,7 @@ uv run scripts/plot_benchmark_curve.py
 | 128 | 1,908.9 | 44.9 |
 | 256 | 2,748.5 | 45.4 |
 
-At 256 concurrent requests, the engine serves about **57x** the measured naive-HF floor in
-that same run.
+At 256 concurrent requests, the engine serves **60.5x** the same-row measured naive-HF floor.
 
 ## Method
 

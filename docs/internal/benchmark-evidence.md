@@ -39,10 +39,11 @@ Run `2026-07-02`, A100-80GB, 64 concurrent chat requests, up to 256 new tokens, 
 
 ## Curve Evidence
 
-The committed curve record checks both plotted systems at every batch size against the fp32
-reference, with zero non-tie divergences. At batch 256, the engine peaked at 384 used
-128-token blocks: about 1.5 GB of KV at 30,720 bytes/token. A contiguous max-length layout for
-256 requests at Esme's 1024-token context would reserve about 8 GB up front.
+The committed curve record is a separate same-container batch sweep from the headline table.
+It checks both plotted systems at every batch size against the fp32 reference, with zero
+non-tie divergences. At batch 256, the engine peaked at 384 used 128-token blocks: about
+1.5 GB of KV at 30,720 bytes/token. A contiguous max-length layout for 256 requests at Esme's
+1024-token context would reserve about 8 GB up front.
 
 | concurrent requests | llm_infer tok/s | hf_sequential tok/s |
 | ---: | ---: | ---: |
@@ -52,6 +53,8 @@ reference, with zero non-tie divergences. At batch 256, the engine peaked at 384
 | 64 | 1,153.0 | 43.5 |
 | 128 | 1,908.9 | 44.9 |
 | 256 | 2,748.5 | 45.4 |
+
+At 256 concurrent requests, the engine is 60.5x the same-row measured naive-HF floor.
 
 ## Technique Gallery
 

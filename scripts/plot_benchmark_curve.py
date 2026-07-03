@@ -40,9 +40,8 @@ AXIS_COLOR = "#cfd5df"
 GRID_COLOR = "#eef1f6"
 BORDER_COLOR = "#d9dde7"
 TICK_COLOR = "#6b7280"
-BLUE = "#636efa"
-GREEN = "#00cc96"
-RED = "#ef553b"
+BLUE = "#2563eb"
+NEUTRAL = "#64748b"
 CARD_WIDTH = 920
 CARD_HEIGHT = 560
 
@@ -131,9 +130,9 @@ def card_layout(title: str, subtitle: str, conclusion: str) -> go.Layout:
                 "text": conclusion,
                 "xref": "paper",
                 "yref": "paper",
-                "x": -0.045,
+                "x": 0.5,
                 "y": -0.245,
-                "xanchor": "left",
+                "xanchor": "center",
                 "showarrow": False,
                 "font": {"family": FONT_FAMILY, "size": 12, "color": SUBTITLE_COLOR},
             },
@@ -168,20 +167,20 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
     the naive baseline, so nothing else is drawn."""
     llm_x, llm_y = _series(by_system["llm_infer"])
     hf_x, hf_y = _series(by_system["hf_sequential"])
-    hf_floor = hf_y[0]  # the anchor row (full warmup+3-iteration protocol)
-    gain_vs_floor = llm_y[-1] / hf_floor
+    hf_by_batch = dict(zip(hf_x, hf_y, strict=True))
+    final_hf = hf_by_batch[llm_x[-1]]
+    gain_vs_same_row_hf = llm_y[-1] / final_hf
 
     figure = go.Figure(
         layout=card_layout(
-            title="Esme-214M-Chat: serving throughput vs concurrency",
+            title="Esme-214M-Chat: batch-sweep serving throughput",
             subtitle=(
-                "Total tok/s vs concurrent chat requests - A100-80GB, up to 256 new tokens, "
-                "greedy, every point checked for correct output"
+                "Same-run A100-80GB sweep - total output tok/s by concurrent chat requests, "
+                "up to 256 new tokens"
             ),
             conclusion=(
-                "Conclusion: one shared paged-KV engine turns concurrency into throughput -"
-                f" {llm_y[0]:,.0f} tok/s at {llm_x[0]} requests to {llm_y[-1]:,.0f} at"
-                f" {llm_x[-1]}, {gain_vs_floor:.0f}x the flat naive-HF floor."
+                f"{llm_y[0]:,.0f} -> {llm_y[-1]:,.0f} tok/s from {llm_x[0]} to"
+                f" {llm_x[-1]} requests; {gain_vs_same_row_hf:.1f}x same-row naive HF."
             ),
         )
     )
@@ -194,8 +193,8 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
             y=hf_y,
             mode="lines+markers",
             name="naive HF sequential",
-            line={"color": RED, "width": 1.4, "dash": "dash"},
-            marker={"size": 7, "color": RED},
+            line={"color": NEUTRAL, "width": 1.4, "dash": "dash"},
+            marker={"size": 7, "color": "#ffffff", "line": {"color": NEUTRAL, "width": 1.5}},
         )
     )
     figure.add_trace(
@@ -238,18 +237,18 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
     )
     figure.add_annotation(
         {
-            "text": (f"naive HF sequential (floor) - {min(hf_y):.0f}-{max(hf_y):.0f} tok/s"),
+            "text": (f"naive HF sequential floor: {min(hf_y):.0f}-{max(hf_y):.0f} tok/s"),
             "x": math.log10(hf_x[len(hf_x) // 2]),
-            "y": hf_floor + y_max * 0.05,
+            "y": final_hf + y_max * 0.05,
             "showarrow": False,
             "xanchor": "left",
             "xshift": 14,
-            "font": {"family": FONT_FAMILY, "size": 13, "color": RED},
+            "font": {"family": FONT_FAMILY, "size": 13, "color": NEUTRAL},
         }
     )
     figure.add_annotation(
         {
-            "text": f"<b>{gain_vs_floor:.0f}x the floor</b>",
+            "text": f"<b>{gain_vs_same_row_hf:.1f}x vs same-row HF</b>",
             "x": math.log10(llm_x[-1]),
             "y": llm_y[-1] + y_max * 0.02,
             "showarrow": False,

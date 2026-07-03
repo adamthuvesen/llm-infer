@@ -122,8 +122,9 @@ median of 3 iterations:
 | naive HF sequential | 34.6 | 1x |
 | `llm_infer` | 930.4 | **26.9x** |
 
-Throughput scales with concurrency because all requests decode through one shared paged-KV
-engine, while the naive baseline stays flat:
+A separate batch-sweep run shows the shape behind that headline point. Throughput scales
+with concurrency because all requests decode through one shared paged-KV engine, while the
+naive baseline stays flat:
 
 ![Esme batch-size throughput curve](assets/fig-esme-batch-curve.svg)
 
