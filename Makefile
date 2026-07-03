@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := check
-.PHONY: install fmt lint test check
+.PHONY: install fmt lint test evidence-check check
 
 install:  ## Sync the dev environment
 	uv sync --extra dev --extra serving
@@ -14,5 +14,8 @@ lint:  ## Lint and format-check (no changes)
 
 test:  ## Run unit tests
 	uv run python -m pytest
+
+evidence-check:  ## Check committed benchmark evidence and figure regeneration
+	uv run scripts/check_benchmark_evidence.py
 
 check: lint test  ## The gate: lint + format-check + unit tests

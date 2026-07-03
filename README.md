@@ -1,16 +1,20 @@
 # llm-infer
 
-`llm-infer` is a small Python inference engine focused on real serving techniques and clear
-measurement. It owns the runtime path: model forward pass, paged KV cache, scheduler,
-sampler, serving loop, benchmark harness, and trace output.
+`llm-infer` is a small Python inference engine for learning, research, and measurement. The
+goal is to make real serving techniques easy to inspect, to check outputs before making speed
+claims, and to state the limits. This is not a production server or an attempt to match mature inference
+engines.
 
-`Esme-214M-Chat` is the default documented model. Naive HuggingFace generation is the
-measured external baseline; Qwen2.5-Coder is the independent HF reference for correctness
-regression.
+It owns the runtime path: model forward pass, paged KV cache, scheduler, sampler, serving
+loop, benchmark harness, and trace output.
 
-The core rule is simple: every speed claim must first match a known-good reference output on
+`Esme-214M-Chat` is the default model throughout the docs. Naive HuggingFace generation is
+the external baseline speed is measured against; Qwen2.5-Coder is the independent HuggingFace
+reference for catching correctness regressions.
+
+The core rule: every speed claim must first match a known-good reference output on
 the same prompt and model. Experimental paths stay labeled experimental until they pass that
-gate.
+check.
 
 ## What Is Here
 
@@ -33,8 +37,8 @@ For the longer architecture map, see [docs/architecture.md](docs/architecture.md
 ## Backends
 
 - `esme`: Esme export bundles, with `Esme-214M-Chat` as the headline path. Esme serves through
-  real paged KV on the shared engine path and is parity-gated against the full-recompute
-  `PretrainBundleModel.logits()` reference.
+  real paged KV on the shared engine path and is checked for exact parity against the
+  full-recompute `PretrainBundleModel.logits()` reference.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs and examples
   use `esme`.
 - `qwen`: independent HF reference backend for
@@ -85,10 +89,8 @@ EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
 
 ## Benchmarks
 
-Every speed claim is gated first: a system reports tok/s only after its tokens match the
-fp32 `PretrainBundleModel.logits()` reference (tie-tolerant, zero non-tie divergences).
-`llm_infer` runs the bf16 flash-attn path; the HF baseline runs a converted
-`Qwen3ForCausalLM` checkpoint emitted from the Esme bundle.
+A system reports tok/s only after its tokens match the fp32 `PretrainBundleModel.logits()`
+reference, with traced numerical ties the only allowed difference.
 
 Headline — `2026-07-02`, A100-80GB, **64 concurrent chat requests x up to 256 new
 tokens** (a realistic small-service load, within Esme's 1024-token context), greedy,
@@ -104,22 +106,8 @@ engine, while the naive baseline stays flat:
 
 ![Esme batch-size throughput curve](assets/fig-esme-batch-curve.svg)
 
-Each serving technique carries its own isolated, reference-checked experiment:
-
-- **Paged KV** — 256 concurrent requests peaked at 384 blocks = 1.5 GB of KV, allocated
-  lazily as sequences grew (a contiguous max-length layout would reserve ~8 GB).
-- **Prefix caching** — 16 siblings sharing a 513-token prompt: prefill 513 tokens once
-  instead of 8,208; **1.40x** end-to-end.
-- **Chunked prefill** — bounds prompt work per step (2,844 -> 512 tokens) with exact
-  outputs; at 214M prefill is launch-bound, so the latency protection is honestly ~nil
-  here and costs ~21% wall.
-- **Preemption** — 7 real evictions under a starved pool, 12/12 completions still
-  token-exact against the reference.
-- **Speculative decoding** — **1.47x** batch-1 latency on repetition-heavy text
-  (2.0 tokens per verify step); off by default, no headline claim.
-
-Full methodology — including the same-container rule for Modal A100 variance — and every
-table live in [docs/benchmark.md](docs/benchmark.md).
+Methodology and the committed curve record are summarized in
+[docs/benchmark.md](docs/benchmark.md).
 
 ## KV Trace Visualizer
 
@@ -134,7 +122,7 @@ by `InferenceEngine(trace=...)`. It can use the committed fixture or a real engi
 - [docs/benchmark.md](docs/benchmark.md) - benchmark setup and current result record.
 - [llm_infer/](llm_infer/) - engine code.
 - [tests/correctness/](tests/correctness/) - reference and equivalence checks.
-- [scripts/](scripts/) - goldens, Modal runs, loadgen, trace fixtures, and the figure generator.
+- [scripts/](scripts/) - goldens, loadgen, trace fixtures, and the figure generator.
 - [assets/](assets/) - the committed curve record and rendered README figure.
 - [visualizer/](visualizer/) - static trace replay UI.
 

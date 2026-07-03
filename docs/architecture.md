@@ -104,8 +104,8 @@ per-step path): up to a window of decode steps runs per scheduler pass with samp
 kept on device, EOS/stop decided at one host sync per window, and — on bundle backends —
 per-step paging bookkeeping replaced by preallocated window buffers
 (`llm_infer/model/decode_plan.py`). Outputs are token-for-token identical to the per-step
-path; tokens become visible in window-sized bursts. See
-[internal/esme-decode-overhead.md](internal/esme-decode-overhead.md) for the measurements.
+path; tokens become visible in window-sized bursts. Benchmark impact is summarized in
+[benchmark.md](benchmark.md).
 
 ## Paged KV Cache
 
