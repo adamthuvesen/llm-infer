@@ -238,9 +238,7 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
     )
     figure.add_annotation(
         {
-            "text": (
-                f"naive HF sequential (floor) - {min(hf_y):.0f}-{max(hf_y):.0f} tok/s"
-            ),
+            "text": (f"naive HF sequential (floor) - {min(hf_y):.0f}-{max(hf_y):.0f} tok/s"),
             "x": math.log10(hf_x[len(hf_x) // 2]),
             "y": hf_floor + y_max * 0.05,
             "showarrow": False,

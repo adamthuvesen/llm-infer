@@ -100,9 +100,7 @@ def test_batch_above_largest_bucket_falls_back_to_eager(runtime) -> None:
     model = runtime.model
     model.decode_graphs = None
     plain = _run_window(model, 3)
-    runner = model.enable_decode_compile(
-        capture_sizes=(1, 2), mode=None, compile_backend="eager"
-    )
+    runner = model.enable_decode_compile(capture_sizes=(1, 2), mode=None, compile_backend="eager")
     assert runner.bucket_for(len(_PROMPTS)) is None
     fallback = _run_window(model, 3)
     for expected, got in zip(plain, fallback, strict=True):

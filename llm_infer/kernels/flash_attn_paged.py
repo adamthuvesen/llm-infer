@@ -141,7 +141,10 @@ class FlashAttnPagedAttention:
         """The cached 0..size-1 int32 arange for decode ``cu_seqlens_q`` (a sliced view)."""
         cached = self._decode_cu_seqlens_q
         if cached is None or cached.numel() < size or cached.device != device:
-            cached = torch.arange(max(size, 2 * (0 if cached is None else cached.numel())),
-                                  dtype=torch.int32, device=device)
+            cached = torch.arange(
+                max(size, 2 * (0 if cached is None else cached.numel())),
+                dtype=torch.int32,
+                device=device,
+            )
             self._decode_cu_seqlens_q = cached
         return cached[:size]

@@ -58,9 +58,10 @@ def _stream_completions(runtime) -> list[list[str]]:
 
     async def go() -> list[list[str]]:
         transport = httpx.ASGITransport(app=app)
-        async with app.router.lifespan_context(app), httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        ):
             return list(await asyncio.gather(*(one(client, p) for p in _PROMPTS)))
 
     return asyncio.run(go())

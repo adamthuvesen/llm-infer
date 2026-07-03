@@ -205,9 +205,7 @@ def sweep(
 
     def gated_row(system: str, size: int, requests, outputs, per_iter: list[float]) -> dict:
         reference = reference_for(requests)
-        agreement = tie_tolerant_agreement(
-            oracle_runtime.model, requests, outputs, reference, eos
-        )
+        agreement = tie_tolerant_agreement(oracle_runtime.model, requests, outputs, reference, eos)
         tokens = total_output_tokens(outputs, eos)
         median_s = statistics.median(per_iter)
         return {
@@ -332,9 +330,7 @@ def sweep(
         size = vllm_row["batch_size"]
         requests = build_requests(flash_runtime.tokenizer, size, HEADLINE_PROMPTS)
         outputs = {k: normalize_at_eos(v, eos) for k, v in vllm_row["outputs"].items()}
-        row = gated_row(
-            "vllm", size, requests, outputs, [float(vllm_row["median_seconds"])]
-        )
+        row = gated_row("vllm", size, requests, outputs, [float(vllm_row["median_seconds"])])
         row["separate_container"] = True
         rows.append(row)
         tps = row["tokens_per_second"]
@@ -385,9 +381,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         )
     print(f"[esme-curve] one-container sweep: llm_infer {llm_infer_batches}, HF {hf_specs}")
     sweep_res = json.loads(
-        sweep.remote(
-            llm_infer_batches, hf_specs, max_new_tokens, warmup, iters, vllm_res["rows"]
-        )
+        sweep.remote(llm_infer_batches, hf_specs, max_new_tokens, warmup, iters, vllm_res["rows"])
     )
 
     record = {

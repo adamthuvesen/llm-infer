@@ -272,9 +272,7 @@ class AsyncInferenceEngine:
                 if stream is None:
                     continue
                 self._metrics.requests_admitted_total.inc()
-                self._metrics.queue_time_seconds.observe(
-                    max(0.0, admitted_s - stream.submitted_s)
-                )
+                self._metrics.queue_time_seconds.observe(max(0.0, admitted_s - stream.submitted_s))
         for request_id, tokens in result.tokens.items():
             stream = self._streams.get(request_id)
             if stream is None:

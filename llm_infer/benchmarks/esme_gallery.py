@@ -146,9 +146,7 @@ def run_prefix_cache_on_off(
         median_s, outputs = _time(
             lambda g=group: run_once(g), warmup=warmup, iters=iters, sync=sync
         )
-        agreement, tokens = _gate(
-            oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens
-        )
+        agreement, tokens = _gate(oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens)
         timings.append(GalleryTiming(label, median_s, tokens, agreement))
 
     on, off = timings
@@ -403,9 +401,7 @@ def run_speculative_batch1(
             capabilities=engine_runtime.capabilities,
             speculative=config,
         )
-        engine.add_request(
-            Request(requests[0].request_id, list(prompt_ids), max_new_tokens, eos)
-        )
+        engine.add_request(Request(requests[0].request_id, list(prompt_ids), max_new_tokens, eos))
         return engine.run()
 
     timings: list[GalleryTiming] = []
@@ -413,9 +409,7 @@ def run_speculative_batch1(
         median_s, outputs = _time(
             lambda c=config: run_once(c), warmup=warmup, iters=iters, sync=sync
         )
-        agreement, tokens = _gate(
-            oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens
-        )
+        agreement, tokens = _gate(oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens)
         timings.append(GalleryTiming(label, median_s, tokens, agreement))
 
     # Acceptance profile from one traced pass: how many tokens each verify step emitted.
@@ -432,7 +426,8 @@ def run_speculative_batch1(
     engine.add_request(Request(requests[0].request_id, list(prompt_ids), max_new_tokens, eos))
     engine.run()
     speculative_steps = [
-        event for event in trace.events
+        event
+        for event in trace.events
         if event.event == "decode_step" and event.token_source == "speculative"
     ]
     emitted = [len(event.token_ids or []) for event in speculative_steps]
@@ -451,9 +446,7 @@ def run_speculative_batch1(
             off.median_seconds / on.median_seconds if on.median_seconds > 0 else None
         ),
         "verify_steps": len(speculative_steps),
-        "mean_tokens_per_verify_step": (
-            sum(emitted) / len(emitted) if emitted else None
-        ),
+        "mean_tokens_per_verify_step": (sum(emitted) / len(emitted) if emitted else None),
     }
 
 

@@ -198,9 +198,9 @@ class EngineDecodeMixin(EngineMixinHost):
                 # device (and not yet recorded) — feed them straight into this window.
                 last_tokens = pending.matrix[-1]
             else:
-                last_tokens = torch.stack(
-                    [request.last_token_tensor for request in requests]
-                ).to(self.model.device)
+                last_tokens = torch.stack([request.last_token_tensor for request in requests]).to(
+                    self.model.device
+                )
         with self._record_time("decode"):
             if window.plan is not None:
                 logits = self.model.decode_window_step(self.cache, window.plan, last_tokens)

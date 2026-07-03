@@ -547,9 +547,10 @@ async def run_asgi_http_workload(
         return await _run_blocking_http(client, spec, runtime.model_id, start)
 
     wall_start = time.perf_counter()
-    async with app.router.lifespan_context(app), httpx.AsyncClient(
-        transport=transport, base_url="http://test", timeout=timeout
-    ) as client:
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=transport, base_url="http://test", timeout=timeout) as client,
+    ):
         before_metrics = _parse_metrics((await client.get("/metrics")).text)
         client_results = await asyncio.gather(*(one(client, spec) for spec in workload.requests))
         after_metrics = _parse_metrics((await client.get("/metrics")).text)
@@ -1189,9 +1190,7 @@ def _empty_public_metrics() -> dict[str, object]:
     }
 
 
-def _sample_delta(
-    before: dict[str, float], after: dict[str, float], name: str
-) -> float | None:
+def _sample_delta(before: dict[str, float], after: dict[str, float], name: str) -> float | None:
     value = after.get(name)
     if value is None:
         return None

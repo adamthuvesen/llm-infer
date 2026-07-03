@@ -75,9 +75,7 @@ _ACTIVE_STEP: _ActiveStep | None = None
 # Keeps Inductor's graph partitioner from capturing through the op on torch builds that
 # split at cudagraph_unsafe ops; harmless (empty) elsewhere — the warmup parity check is
 # what actually rejects a build that captures through it anyway.
-_ATTENTION_OP_TAGS = (
-    (torch.Tag.cudagraph_unsafe,) if hasattr(torch.Tag, "cudagraph_unsafe") else ()
-)
+_ATTENTION_OP_TAGS = (torch.Tag.cudagraph_unsafe,) if hasattr(torch.Tag, "cudagraph_unsafe") else ()
 
 torch.library.define(
     "llm_infer::paged_decode_attention",

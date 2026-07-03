@@ -87,9 +87,7 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
         else {}
     )
     requests = build_requests(runtime.tokenizer, num_requests)
-    needed = sum(
-        math.ceil((len(req.prompt_ids) + MAX_NEW_TOKENS) / BLOCK_SIZE) for req in requests
-    )
+    needed = sum(math.ceil((len(req.prompt_ids) + MAX_NEW_TOKENS) / BLOCK_SIZE) for req in requests)
     engine = InferenceEngine(
         runtime.model,
         block_size=BLOCK_SIZE,
@@ -444,9 +442,7 @@ def profile_decode(batch_sizes: list[int]) -> str:
             f"gpu busy/step {kineto['gpu_busy_ms_per_step']:.2f} ms, "
             f"decode tok/s {wall['decode_tokens_per_second']:.1f}"
         )
-    return json.dumps(
-        {"results": results, "gpu": gpu_snapshot(), "versions": library_versions()}
-    )
+    return json.dumps({"results": results, "gpu": gpu_snapshot(), "versions": library_versions()})
 
 
 @app.function(
@@ -744,8 +740,7 @@ def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
     if command not in ("profile", "bench", "ablate", "capture", "sync"):
         raise ValueError(
-            f"command must be 'profile', 'bench', 'ablate', 'capture', or 'sync', "
-            f"got {command!r}"
+            f"command must be 'profile', 'bench', 'ablate', 'capture', or 'sync', got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
     local_bundle = local_bundle_path(bundle_path)
