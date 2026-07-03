@@ -1,4 +1,9 @@
-"""Shared Esme Modal bundle path, validation, and staging helpers."""
+"""Shared Esme Modal bundle path, validation, and staging helpers.
+
+Bundle lookup order is explicit: ``--bundle-path``, then ``ESME_BUNDLE_PATH``,
+then the standard sibling checkout export at
+``../esme-posttrain/exports/esme-214m-chat``.
+"""
 
 from __future__ import annotations
 
@@ -8,19 +13,22 @@ from pathlib import Path
 
 import modal
 
-DEFAULT_LOCAL_BUNDLE = Path("/Users/adamthuvesen/dev/menti/esme-posttrain/exports/esme-214m-chat")
 VOLUME_NAME = "llm-infer-esme-bundles"
 ESME_BUNDLE_DIR = "esme-214m-chat"
 ESME_BUNDLE_MOUNT = "/esme-bundles"
 REMOTE_BUNDLE_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_BUNDLE_DIR}"
 REQUIRED_BUNDLE_FILES = ("manifest.json", "config.json", "tokenizer.json", "weights.pt")
+ESME_BUNDLE_ENV = "ESME_BUNDLE_PATH"
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SIBLING_LOCAL_BUNDLE = REPO_ROOT.parent / "esme-posttrain" / "exports" / ESME_BUNDLE_DIR
 
 
 def local_bundle_path(bundle_path: str) -> Path:
     if bundle_path:
         return Path(bundle_path).expanduser()
-    env_path = os.environ.get("ESME_BUNDLE_PATH")
-    return Path(env_path).expanduser() if env_path else DEFAULT_LOCAL_BUNDLE
+    env_path = os.environ.get(ESME_BUNDLE_ENV)
+    return Path(env_path).expanduser() if env_path else SIBLING_LOCAL_BUNDLE
 
 
 def validate_local_bundle(bundle_path: Path) -> dict[str, object]:

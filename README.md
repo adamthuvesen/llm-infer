@@ -6,7 +6,9 @@ claims, and to state the limits. This is not a production server or an attempt t
 engines.
 
 It owns the runtime path: model forward pass, paged KV cache, scheduler, sampler, serving
-loop, benchmark harness, and trace output.
+loop, benchmark harness, and trace output. It consumes export bundles from
+[`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain) and
+[`esme-posttrain`](https://github.com/adamthuvesen/esme-posttrain).
 
 `Esme-214M-Chat` is the default model throughout the docs. Naive HuggingFace generation is
 the external baseline speed is measured against; Qwen2.5-Coder is the independent HuggingFace
@@ -45,6 +47,22 @@ For the longer architecture map, see [docs/architecture.md](docs/architecture.md
   `Qwen/Qwen2.5-Coder-3B-Instruct` at revision
   `488639f1ff808d1d3d0ba301aef8c11461451ec5`.
 
+## Related Repositories
+
+These repositories are separate codebases connected by model artifacts and
+measurement questions:
+
+- [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain): trains
+  `Esme-214M-Base` from scratch.
+- [`esme-posttrain`](https://github.com/adamthuvesen/esme-posttrain): adapts
+  the base checkpoint with SFT, DPO, and verifier-backed RLVR.
+- [`llm-infer`](https://github.com/adamthuvesen/llm-infer): loads, serves, and
+  benchmarks exported Esme checkpoints.
+- [`llm-rlvr`](https://github.com/adamthuvesen/llm-rlvr): provides a reusable
+  RLVR harness with text-to-SQL as the reference task.
+- [`grpo-decomp`](https://github.com/adamthuvesen/grpo-decomp): measures where
+  GRPO gains come from, separating reliability from new capability.
+
 ## Install
 
 Python 3.11+ is required. Dependencies are managed with `uv`.
@@ -70,6 +88,9 @@ Start Esme from a local export bundle:
 export ESME_BUNDLE_PATH=/path/to/esme-214m-chat
 uv run python -m llm_infer.serve --backend esme --bundle "$ESME_BUNDLE_PATH" --open
 ```
+
+The Modal Esme scripts use `--bundle-path`, then `ESME_BUNDLE_PATH`, then the standard
+sibling checkout fallback `../esme-posttrain/exports/esme-214m-chat`.
 
 The server exposes:
 

@@ -9,8 +9,9 @@ printed — a system that diverges reports no throughput, only its measured toke
 count and wall-clock.
 
 The local entrypoint stages the serving bundle files into the repo-scoped Modal
-volume ``llm-infer-esme-bundles`` under ``/esme-214m-chat``. By default it reads
-the local headline bundle path, or set ``ESME_BUNDLE_PATH`` / ``--bundle-path``.
+volume ``llm-infer-esme-bundles`` under ``/esme-214m-chat``. Set
+``--bundle-path`` or ``ESME_BUNDLE_PATH``; otherwise it tries the standard sibling
+checkout export at ``../esme-posttrain/exports/esme-214m-chat``.
 
     modal run scripts/modal_esme_benchmark.py --command smoke
     modal run scripts/modal_esme_benchmark.py --command bench
