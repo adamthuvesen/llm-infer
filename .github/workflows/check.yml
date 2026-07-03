@@ -16,7 +16,7 @@ jobs:
           enable-cache: true
 
       - name: Install dev dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra serving
 
       - name: Lint and unit tests
         run: make check

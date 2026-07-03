@@ -2,7 +2,7 @@
 .PHONY: install fmt lint test check
 
 install:  ## Sync the dev environment
-	uv sync --extra dev
+	uv sync --extra dev --extra serving
 
 fmt:  ## Auto-format and apply safe lint fixes
 	uv run ruff format .
