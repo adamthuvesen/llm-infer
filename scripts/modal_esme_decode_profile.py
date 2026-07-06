@@ -2,8 +2,8 @@
 
 At 214M the engine is CPU-bound in decode: the GPU finishes each step's kernels in ~1-2 ms
 while Python orchestration takes tens of ms. This harness measures where that per-step wall
-time goes and tracks it across overhead-reduction changes. Two commands, both on the bf16
-flash-attn engine path (the headline configuration), greedy, prefix caching off:
+time goes and tracks it across overhead-reduction changes. The main commands run the default
+bf16 CUDA Esme attention path, greedy, prefix caching off:
 
 * ``--command profile`` — diagnostic only, never a speed claim. Per batch size it reports
   (a) plain decode wall per step (no instrumentation), (b) GPU busy per step and the top ops
@@ -18,6 +18,7 @@ flash-attn engine path (the headline configuration), greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command bench
     modal run scripts/modal_esme_decode_profile.py --command bench --batch-sizes 8,32,128
     modal run scripts/modal_esme_decode_profile.py --command capture --batch-sizes 8,64,256
+    modal run scripts/modal_esme_decode_profile.py --command serve-smoke
 
 ``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
 probe, launch counts, and the oracle-gated same-GPU ablation across the eager window, the
@@ -420,7 +421,6 @@ def profile_decode(batch_sizes: list[int]) -> str:
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -429,7 +429,6 @@ def profile_decode(batch_sizes: list[int]) -> str:
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
     results = []
     for size in batch_sizes:
@@ -442,7 +441,14 @@ def profile_decode(batch_sizes: list[int]) -> str:
             f"gpu busy/step {kineto['gpu_busy_ms_per_step']:.2f} ms, "
             f"decode tok/s {wall['decode_tokens_per_second']:.1f}"
         )
-    return json.dumps({"results": results, "gpu": gpu_snapshot(), "versions": library_versions()})
+    return json.dumps(
+        {
+            "results": results,
+            "attention_backend": type(runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
 
 
 @app.function(
@@ -456,7 +462,6 @@ def bench_decode(batch_sizes: list[int]) -> str:
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -468,7 +473,6 @@ def bench_decode(batch_sizes: list[int]) -> str:
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
     rows = []
     for size in batch_sizes:
@@ -480,7 +484,14 @@ def bench_decode(batch_sizes: list[int]) -> str:
             f"tokens {row['total_output_tokens']}, "
             f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
         )
-    return json.dumps({"rows": rows, "gpu": gpu_snapshot(), "versions": library_versions()})
+    return json.dumps(
+        {
+            "rows": rows,
+            "attention_backend": type(flash_runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
 
 
 # Same-GPU ablation configs: one container measures all of them back to back, so the
@@ -554,7 +565,6 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -566,7 +576,6 @@ def ablate_decode(batch_sizes: list[int]) -> str:
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
     graph_runner = _graph_runner(flash_runtime)
     compile_runner, compile_meta = _compile_runner(flash_runtime)
@@ -587,6 +596,7 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     return json.dumps(
         {
             "rows": rows,
+            "attention_backend": type(flash_runtime.model.backend).__name__,
             "compile": compile_meta,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
@@ -605,7 +615,6 @@ def sync_report(batch_sizes: list[int]) -> str:
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -614,7 +623,6 @@ def sync_report(batch_sizes: list[int]) -> str:
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
     ops = _sync_op_isolation()
     for name, count in ops.items():
@@ -630,6 +638,49 @@ def sync_report(batch_sizes: list[int]) -> str:
             "op_isolation": ops,
             **first_site,
             "pass_probe": probe,
+            "attention_backend": type(flash_runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=30 * 60,
+)
+def serve_smoke() -> str:
+    """Build the HTTP app far enough to run FlashInfer warmup and decode-graph capture."""
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serve import build_app_from_runtime
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    runtime = load_model_runtime(
+        "esme",
+        bundle_path=Path(REMOTE_BUNDLE_PATH),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    start = time.perf_counter()
+    build_app_from_runtime(
+        runtime,
+        block_size=64,
+        num_blocks=64,
+        device="cuda",
+        decode_graph_buckets=(1, 2),
+    )
+    startup_s = time.perf_counter() - start
+    return json.dumps(
+        {
+            "app_built": True,
+            "startup_s": startup_s,
+            "decode_graph_buckets": [1, 2],
+            "attention_backend": type(runtime.model.backend).__name__,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
         }
@@ -653,6 +704,7 @@ def capture_report(batch_sizes: list[int]) -> str:
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+    from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -669,6 +721,22 @@ def capture_report(batch_sizes: list[int]) -> str:
     model = flash_runtime.model
     graph_runner = _graph_runner(flash_runtime)
     compile_runner, compile_meta = _compile_runner(flash_runtime)
+    flashinfer_meta: dict[str, object] = {"available": False}
+    flashinfer_runtime = None
+    flashinfer_graph_runner = None
+    try:
+        flashinfer_runtime = load_model_runtime(
+            "esme",
+            bundle_path=Path(REMOTE_BUNDLE_PATH),
+            dtype=torch.bfloat16,
+            device="cuda",
+            attention_backend=FlashInferPagedAttention(),
+        )
+        flashinfer_graph_runner = _graph_runner(flashinfer_runtime)
+        flashinfer_meta["available"] = True
+    except RuntimeError as exc:
+        flashinfer_meta["error"] = str(exc)
+        print(f"[flashinfer] unavailable: {exc}")
 
     sync = {}
     for label, active in (("eager-window", None), ("cuda-graphs", graph_runner)):
@@ -676,16 +744,21 @@ def capture_report(batch_sizes: list[int]) -> str:
         sync[label] = _sync_probe(flash_runtime, 8)
         print(f"[sync] {label}: warnings per pass {sync[label]['sync_warnings_per_pass']}")
 
-    launch_configs = (
-        ("eager-window", None),
-        ("cuda-graphs", graph_runner),
-        ("torch-compile", compile_runner),
-    )
+    launch_configs = [
+        ("eager-window", flash_runtime, None),
+        ("cuda-graphs", flash_runtime, graph_runner),
+        ("torch-compile", flash_runtime, compile_runner),
+    ]
+    if flashinfer_runtime is not None and flashinfer_graph_runner is not None:
+        launch_configs.append(
+            ("cuda graphs + flashinfer paged decode", flashinfer_runtime, flashinfer_graph_runner)
+        )
     launches = []
     for size in batch_sizes:
-        for label, active in launch_configs:
-            model.decode_graphs = active
-            profile = _torch_profile(flash_runtime, size)
+        for label, row_runtime, active in launch_configs:
+            row_runtime.model.decode_graphs = active
+            profile = _torch_profile(row_runtime, size)
+            row_runtime.model.decode_graphs = None
             launches.append({"batch_size": size, "config_label": label, **profile})
             print(
                 f"[launches] batch={size} | {label}: "
@@ -713,6 +786,18 @@ def capture_report(batch_sizes: list[int]) -> str:
                 f"[bench] batch={size} | {label}: median {row['median_seconds']:.3f} s, "
                 f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
             )
+        if flashinfer_runtime is not None and flashinfer_graph_runner is not None:
+            flashinfer_runtime.model.decode_graphs = flashinfer_graph_runner
+            row = _bench_batch(oracle_runtime, flashinfer_runtime, size, {"decode_graphs": True})
+            flashinfer_runtime.model.decode_graphs = None
+            row["config_label"] = "window + planned + cuda graphs + flashinfer paged decode"
+            bench_rows.append(row)
+            tps = row["tokens_per_second"]
+            print(
+                f"[bench] batch={size} | {row['config_label']}: "
+                f"median {row['median_seconds']:.3f} s, "
+                f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
+            )
     counters_after = dynamo_counters_snapshot()
     recompile_audit = {
         "before_bench": counters_before,
@@ -729,6 +814,7 @@ def capture_report(batch_sizes: list[int]) -> str:
             "rows": bench_rows,
             "capture_sizes": list(CAPTURE_SIZES),
             "compile": {**compile_meta, "recompile_audit": recompile_audit},
+            "flashinfer": flashinfer_meta,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
         }
@@ -738,9 +824,10 @@ def capture_report(batch_sizes: list[int]) -> str:
 @app.local_entrypoint()
 def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str = "") -> None:
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
-    if command not in ("profile", "bench", "ablate", "capture", "sync"):
+    if command not in ("profile", "bench", "ablate", "capture", "sync", "serve-smoke"):
         raise ValueError(
-            f"command must be 'profile', 'bench', 'ablate', 'capture', or 'sync', got {command!r}"
+            "command must be 'profile', 'bench', 'ablate', 'capture', 'sync', "
+            f"or 'serve-smoke', got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
     local_bundle = local_bundle_path(bundle_path)
@@ -748,7 +835,7 @@ def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str
 
     print(
         f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, greedy, "
-        f"bf16 flash, prefix caching off"
+        f"bf16 default attention, prefix caching off"
     )
     if command == "profile":
         record = json.loads(profile_decode.remote(sizes))
@@ -758,6 +845,8 @@ def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str
         record = json.loads(capture_report.remote(sizes))
     elif command == "sync":
         record = json.loads(sync_report.remote(sizes))
+    elif command == "serve-smoke":
+        record = json.loads(serve_smoke.remote())
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
@@ -767,7 +856,7 @@ def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str
         "max_new_tokens": MAX_NEW_TOKENS,
         "warmup": WARMUP_ITERS,
         "iters": MEASURED_ITERS,
-        "backend": "FlashAttnPagedAttention (bf16)",
+        "backend": f"{record.get('attention_backend', 'comparison')} (bf16)",
         "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
         "repro_command": (
             f"modal run scripts/modal_esme_decode_profile.py --command {command} "

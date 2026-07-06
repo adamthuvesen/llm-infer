@@ -8,10 +8,8 @@ torch-importing conversion runs **remotely** in :func:`convert_bundle_to_hf` on 
 writes the HF checkpoint back to the volume. Then it runs:
 
 * ``hf_sequential`` — naive HF ``Qwen3ForCausalLM.generate()`` per request (the floor).
-* ``llm_infer`` — this engine's Esme paged-KV path on the bundle, bf16 on the **flash-attn**
-  backend (the fast path). flash is correct: bf16 flash ==
-  bf16 torch_naive exactly; its only divergence from the fp32 oracle is whole-model bf16 rounding,
-  counted as a genuine tie by the tie-tolerant agreement below.
+* ``llm_infer`` — this engine's Esme paged-KV path on the bundle, bf16 on the default CUDA
+  attention backend. Today that is FlashInfer paged decode.
 * ``vllm`` — vLLM offline generate on the converted checkpoint (the ceiling).
 
 Agreement uses the audited tie-tolerant rule against the fp32 oracle
@@ -55,9 +53,8 @@ BLOCK_SIZE = 128
 
 app = modal.App("llm-infer-esme-three-way")
 
-# HF + llm_infer image: the one shared flash-attn image (scripts/modal_flash_image.py), because the
-# llm_infer row runs on FlashAttnPagedAttention. flash-attn installs from a prebuilt wheel there
-# (no source compile); importing the shared definition keeps every GPU harness on one cached build.
+# HF + llm_infer image: the shared GPU image (scripts/modal_flash_image.py). It carries both
+# flash-attn and FlashInfer so default Esme CUDA rows match serving.
 esme_image = FLASH_IMAGE
 
 # vLLM image: vLLM pulls its own torch + CUDA, so it must not share the flash env. Same two env
@@ -172,34 +169,31 @@ def bench_hf_and_engine(
     )
     from llm_infer.benchmarks.esme_three_way import run_three_way, tie_tolerant_agreement
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.decode_graph import DEFAULT_CAPTURE_SIZES, enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()  # pick up the HF checkpoint convert_bundle_to_hf committed to the volume
-    # Reference oracle: fp32 PretrainBundleModel.logits() (torch_naive). The llm_infer row runs bf16
-    # on the flash-attn backend — the fast path. flash is
-    # correct: bf16 flash == bf16 torch_naive exactly; its only divergence from the fp32 oracle is
-    # whole-model bf16 rounding (esme-001 step 22, fp32 gap 0.0119), which the tie-tolerant
-    # agreement (the audited tie rule, tolerance 0.1) counts as a genuine tie, not a bug. See
-    # scripts/modal_esme_flash_divergence_probe.py and docs/benchmark.md.
+    # Reference oracle: fp32 PretrainBundleModel.logits() (torch_naive). The llm_infer row
+    # uses the same default backend as serving: FlashInfer on CUDA bf16 bundle runs.
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    flash_runtime = load_model_runtime(
+    engine_runtime = load_model_runtime(
         "esme",
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
-    if not flash_runtime.capabilities.flash_attention:
-        raise AssertionError("Esme llm_infer row must run on the flash-attn backend")
+    if not engine_runtime.capabilities.flash_attention:
+        raise AssertionError("Esme llm_infer row must run on a fused CUDA attention backend")
     # The llm_infer row runs what serving runs: decode-window CUDA graphs, captured up front
     # so no capture cost lands inside a timed iteration. The oracle stays eager fp32.
-    capture_s = enable_decode_graphs_if_cuda(flash_runtime.model)
-    print(f"[esme-3way] decode graphs: captured {DEFAULT_CAPTURE_SIZES} in {capture_s:.1f} s")
+    capture_s = enable_decode_graphs_if_cuda(engine_runtime.model)
+    print(
+        f"[esme-3way] {type(engine_runtime.model.backend).__name__}: "
+        f"captured {DEFAULT_CAPTURE_SIZES} in {capture_s:.1f} s"
+    )
     prompts = HEADLINE_PROMPTS if headline else DEFAULT_PROMPTS
     requests = build_requests(oracle_runtime.tokenizer, num_requests, prompts)
     needed = sum(math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests)
@@ -216,7 +210,7 @@ def bench_hf_and_engine(
         iters=iters,
         device="cuda",
         include_vllm=False,
-        llm_infer_runtime=flash_runtime,
+        llm_infer_runtime=engine_runtime,
     )
 
     # Gate the passed-in vLLM tokens with the SAME tie-tolerant rule against the fp32 oracle.
@@ -267,6 +261,7 @@ def bench_hf_and_engine(
                 "capture_sizes": list(DEFAULT_CAPTURE_SIZES),
                 "capture_s": capture_s,
             },
+            "attention_backend": type(engine_runtime.model.backend).__name__,
         }
     )
 
@@ -388,6 +383,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             "vllm": vllm_res["config"],
             "num_blocks": main_res["num_blocks"],
             "decode_graphs": main_res["decode_graphs"],
+            "attention_backend": main_res.get("attention_backend"),
             "repro_command": f"modal run scripts/modal_esme_three_way.py --command {command}",
         },
     }

@@ -1,15 +1,14 @@
-"""One shared Modal flash-attn image for every GPU harness.
+"""One shared Modal GPU image for every flash attention harness.
 
-The GPU harnesses use the same image: a CUDA base with torch + flash-attn + transformers.
+The GPU harnesses use the same image: a CUDA base with torch + flash-attn + FlashInfer.
 Defining it once — instead of copy-pasting the recipe into each harness — means there is exactly
 one image definition, baked once and cached, then reused by all of them. Any divergence between
 harnesses (a different torch/transformers pin, a reordered layer) silently invalidates the cache.
 
 flash-attn installs from a prebuilt wheel: torch 2.8.0 on CUDA 12.8 plus the matching
-``flash-attn==2.8.3.post1`` wheel by direct URL from the GitHub release. Nothing CUDA compiles
-at build time, so a CUDA runtime base is enough (no ``-devel``). ``build-essential`` ships a
-host C toolchain anyway: torch.compile's Triton backend builds its kernel launcher stubs with
-``cc`` at runtime, and without one Inductor fails with "Failed to find C compiler".
+``flash-attn==2.8.3.post1`` wheel by direct URL from the GitHub release. FlashInfer is the
+default Esme CUDA decode backend and can JIT a shape-specific paged decode op, so this shared
+image uses CUDA ``-devel`` and carries ``nvcc``.
 
 flash-attn ships two wheels per release — one per torch C++ ABI (``cxx11abiTRUE`` /
 ``cxx11abiFALSE``). Installing the wrong one imports but fails at the first kernel call. So the ABI
@@ -18,7 +17,9 @@ and a guard then imports flash-attn and re-checks torch/ABI agreement — a wron
 loudly instead of producing a silently broken image.
 
 ``transformers>=4.51`` (Qwen3 support, needed by the Esme HF/vLLM checkpoint) sits after the
-flash-attn layer and satisfies the project's ``>=4.43`` lower bound too.
+flash-attn layer and satisfies the project's ``>=4.43`` lower bound too. The image also carries
+the lightweight serving deps so the same blessed GPU image can run `python -m llm_infer.serve`
+and the server startup smoke.
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ import modal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
-# CUDA 12.8 RUNTIME base — nothing compiles (flash-attn is a prebuilt wheel), so no devel toolkit
-# is needed. 12.8 matches the torch 2.8.0 cu128 build below and the flash-attn cu12 wheel.
-CUDA_IMAGE = "nvidia/cuda:12.8.1-runtime-ubuntu22.04"
+# CUDA devel is intentional: FlashInfer's paged decode wrapper may JIT through nvcc at startup.
+CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu22.04"
+FLASHINFER_VERSION = "0.6.14"
 
 # Pinned stack that ships a prebuilt flash-attn wheel (no source build):
 #   torch 2.8.0 (cu128) + flash-attn 2.8.3.post1 (cu12torch2.8).
@@ -80,29 +81,42 @@ _GUARD_FLASH_ATTN = (
 
 
 def build_flash_image() -> modal.Image:
-    """The shared flash-attn A100 image: torch -> flash-attn wheel (ABI-matched) -> transformers.
+    """The shared A100 image for the default FlashInfer fast path.
 
     No source compile: flash-attn is a prebuilt wheel installed by URL, with an ABI guard. The
     ``add_local_dir`` + editable install are the cheap tail that relinks when engine source
     changes; the layers above are keyed only on the pinned versions, so they stay a cache hit
     across every harness and across ordinary source edits.
     """
+    return _finish_image(
+        _build_flash_base().pip_install(f"flashinfer-python=={FLASHINFER_VERSION}")
+    )
+
+
+def _build_flash_base(*, cuda_image: str = CUDA_IMAGE) -> modal.Image:
     return (
-        modal.Image.from_registry(CUDA_IMAGE, add_python="3.11")
-        # build-essential: host cc for Triton's runtime launcher builds (torch.compile).
+        modal.Image.from_registry(cuda_image, add_python="3.11")
         .apt_install("git", "build-essential")
-        # torch first — flash-attn's wheel is built against this exact torch + CUDA.
         .pip_install(f"torch=={TORCH_VERSION}", extra_options=f"--index-url {TORCH_CUDA_INDEX}")
-        # flash-attn prebuilt wheel, ABI chosen from the installed torch, then guarded (two RUN
-        # steps — no heredocs, which Modal's Dockerfile parser rejects).
         .run_commands(_INSTALL_FLASH_ATTN, _GUARD_FLASH_ATTN)
-        # Everything that changes more often than torch comes AFTER the flash-attn layer.
-        .pip_install("transformers>=4.51", "numpy>=1.26", "pytest>=8.0")
+        .pip_install(
+            "transformers>=4.51",
+            "numpy>=1.26",
+            "pytest>=8.0",
+            "fastapi>=0.110",
+            "uvicorn>=0.29",
+        )
+    )
+
+
+def _finish_image(image: modal.Image) -> modal.Image:
+    return (
+        image
         .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=IGNORE)
         .workdir(REMOTE_ROOT)
         .run_commands("pip install --no-deps -e .")
     )
 
 
-# A single module-level instance so every harness imports the *same* image object/definition.
+# Module-level baseline instance so every existing harness imports the same image object.
 FLASH_IMAGE = build_flash_image()

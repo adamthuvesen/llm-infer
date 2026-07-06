@@ -9,18 +9,18 @@ bundle oracle. This module then times three systems on one greedy workload:
   baseline (HF's own cached generate, no cross-request batching).
 * ``llm_infer`` — this engine's Esme paged-KV path on the bundle: all requests in one paged cache,
   every running request advanced in one fused batched decode per step. The attention backend is
-  whatever the supplied runtime carries — on GPU the row runs on flash-attn (matching Qwen's row),
-  on CPU it falls back to the bundle's ``torch_naive`` default.
+  whatever the supplied runtime carries — on GPU the default CUDA Esme row uses FlashInfer paged
+  attention, while CPU/fp32 rows fall back to the bundle's ``torch_naive`` reference path.
 * ``vllm`` — vLLM offline generate on the converted checkpoint, prefix caching off. The ceiling.
 
 Agreement uses the **same tie-tolerant rule Qwen's benchmark uses** against the fp32 reference
 (``compare_under_tie_tolerance`` with the audited bf16 tolerance, not a new one): a bf16 system
 whose only divergences from the fp32 oracle are genuine numerical ties counts as agreement and
 reports tok/s; a non-tie divergence reports no tok/s (match before measuring speed). This is why
-the ``llm_infer`` row can run on bf16 flash-attn: bf16 flips like the esme-001 step-22 case (fp32
-gap 0.0119, far under the 0.1 bf16 tolerance) are genuine ties, not bugs — exactly the
-whole-model bf16 rounding seen in the dtype check. The pieces here are pure (no Modal, no vLLM
-import at module scope) so the HF-vs-llm_infer comparison can also run on CPU when the GPU
+the ``llm_infer`` row can run on a bf16 CUDA attention backend: bf16 flips like the esme-001
+step-22 case (fp32 gap 0.0119, far under the 0.1 bf16 tolerance) are genuine ties, not bugs —
+exactly the whole-model bf16 rounding seen in the dtype check. The pieces here are pure (no Modal,
+no vLLM import at module scope) so the HF-vs-llm_infer comparison can also run on CPU when the GPU
 three-way is deferred.
 """
 
@@ -296,10 +296,10 @@ def run_three_way(
     """Time naive HF, llm_infer, and (optionally) vLLM on Esme; gate each on the fp32 oracle.
 
     ``runtime`` is the fp32 Esme bundle runtime — it is always the **reference oracle**. The
-    ``llm_infer`` row runs on ``llm_infer_runtime`` when given (e.g. the bf16 flash-attn runtime,
-    matching how Qwen's row runs), else on ``runtime`` itself. ``hf_checkpoint`` is the converted
-    Qwen3 directory the HF and vLLM legs load. vLLM is skipped when ``include_vllm`` is false
-    (CPU-only / GPU-deferred).
+    ``llm_infer`` row runs on ``llm_infer_runtime`` when given (for example, the bf16 CUDA fast
+    runtime), else on ``runtime`` itself. ``hf_checkpoint`` is the converted Qwen3 directory the
+    HF and vLLM legs load. vLLM is skipped when ``include_vllm`` is false (CPU-only /
+    GPU-deferred).
 
     Agreement is **tie-tolerant** (the Qwen pattern): ``matches_reference`` is true when a system's
     only divergences from the fp32 oracle are genuine numerical ties. Returns one

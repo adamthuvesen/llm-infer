@@ -34,33 +34,15 @@ from scripts.modal_esme_bundle import (
     local_bundle_path,
     stage_bundle,
 )
+from scripts.modal_flash_image import FLASH_IMAGE
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-REMOTE_ROOT = "/root/llm-infer"
-CUDA_IMAGE = "nvidia/cuda:13.0.3-devel-ubuntu22.04"
 
 BLOCK_SIZE = 128
 
 app = modal.App("llm-infer-esme-benchmark")
 
-_IGNORE = [
-    "**/.git",
-    "**/.venv",
-    "**/__pycache__",
-    "**/*.pyc",
-    "**/.pytest_cache",
-    "**/.ruff_cache",
-    "**/.DS_Store",
-    "bench-results/**",
-]
-
-esme_image = (
-    modal.Image.from_registry(CUDA_IMAGE, add_python="3.11")
-    .pip_install("torch>=2.2", "transformers>=4.43", "numpy>=1.26")
-    .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
-    .workdir(REMOTE_ROOT)
-    .run_commands("pip install --no-deps -e .")
-)
+esme_image = FLASH_IMAGE
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
@@ -158,6 +140,7 @@ def _run_comparison(
         },
         "config": {
             "backend": runtime.backend_id,
+            "attention_backend": type(runtime.model.backend).__name__,
             "device": device,
             "served_model": {
                 "name": "Esme-214M-Chat",

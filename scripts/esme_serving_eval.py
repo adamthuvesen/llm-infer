@@ -30,7 +30,7 @@ from llm_infer.benchmarks.report import normalize_at_eos
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.interface import ModelRuntime
-from llm_infer.model.runtime import load_model_runtime
+from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, load_model_runtime
 from llm_infer.serve import BUNDLE_BACKENDS
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
@@ -1245,6 +1245,7 @@ def _load_runtime(args: argparse.Namespace) -> ModelRuntime:
         dtype=args.dtype,
         device=args.device,
         bundle_path=Path(bundle_path) if bundle_path is not None else None,
+        attention_backend_name=args.attention_backend,
     )
 
 
@@ -1345,6 +1346,8 @@ async def _main_async(args: argparse.Namespace) -> int:
             "model_id": runtime.model_id,
             "device": args.device,
             "dtype": str(args.dtype).replace("torch.", ""),
+            "attention_backend": type(runtime.model.backend).__name__,
+            "attention_backend_choice": args.attention_backend,
             "bundle_path": str(runtime.bundle_path) if runtime.bundle_path is not None else None,
             "decode_graphs": {
                 "enabled": capture_s is not None,
@@ -1384,6 +1387,12 @@ def main() -> None:
     parser.add_argument("--bundle", type=Path, help="Esme/Dense export bundle path")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--dtype", type=_dtype, default=torch.float32)
+    parser.add_argument(
+        "--attention-backend",
+        choices=ATTENTION_BACKEND_CHOICES,
+        default="auto",
+        help="Attention backend selector. auto uses FlashInfer for CUDA bf16/fp16 Esme bundles.",
+    )
     parser.add_argument(
         "--workloads",
         help=(

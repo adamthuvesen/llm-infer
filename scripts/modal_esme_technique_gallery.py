@@ -3,7 +3,7 @@
 Runs every experiment in ``llm_infer/benchmarks/esme_gallery.py`` in ONE container, so each
 on/off comparison is same-GPU decision-grade (cross-container A100 variance is ±20% for
 this CPU-bound engine; see docs/benchmark.md). The engine rows run the headline
-configuration — bf16 flash-attn — and every row is gated on the fp32
+configuration — the default bf16 CUDA Esme attention backend — and every row is gated on the fp32
 ``PretrainBundleModel.logits()`` oracle with the audited tie-tolerant rule.
 
 Workloads (chat template except where noted):
@@ -80,7 +80,7 @@ def _long_chat_prompt(tokenizer, *, target_tokens: int, question: str, tag: str)
     timeout=60 * 60,
 )
 def run_gallery(command: str) -> str:
-    """All four technique experiments, back to back on one GPU, bf16 flash engine rows."""
+    """All four technique experiments, back to back on one GPU, bf16 default engine rows."""
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -91,7 +91,6 @@ def run_gallery(command: str) -> str:
         run_speculative_batch1,
     )
     from llm_infer.benchmarks.esme_paged import DEFAULT_PROMPTS, HEADLINE_PROMPTS
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving.speculative import SpeculativeDecodingConfig
 
@@ -100,14 +99,13 @@ def run_gallery(command: str) -> str:
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    flash_runtime = load_model_runtime(
+    engine_runtime = load_model_runtime(
         "esme",
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
-    tokenizer = flash_runtime.tokenizer
+    tokenizer = engine_runtime.tokenizer
 
     def chat_ids(content: str) -> list[int]:
         ids = tokenizer.apply_chat_template(
@@ -127,7 +125,7 @@ def run_gallery(command: str) -> str:
     results.append(
         run_prefix_cache_on_off(
             oracle_runtime,
-            flash_runtime,
+            engine_runtime,
             prompt_ids=shared_prompt,
             num_siblings=4 if smoke else 16,
             max_new_tokens=8 if smoke else 32,
@@ -154,7 +152,7 @@ def run_gallery(command: str) -> str:
     results.append(
         run_chunked_prefill_latency(
             oracle_runtime,
-            flash_runtime,
+            engine_runtime,
             active_prompts=active_prompts,
             active_max_new_tokens=16 if smoke else 128,
             long_prompts=long_prompts,
@@ -180,7 +178,7 @@ def run_gallery(command: str) -> str:
     results.append(
         run_preemption_starved_pool(
             oracle_runtime,
-            flash_runtime,
+            engine_runtime,
             prompts=preempt_prompts,
             max_new_tokens=12 if smoke else 96,
             block_size=8 if smoke else 16,
@@ -196,7 +194,7 @@ def run_gallery(command: str) -> str:
     results.append(
         run_speculative_batch1(
             oracle_runtime,
-            flash_runtime,
+            engine_runtime,
             prompt_ids=spec_prompt,
             max_new_tokens=16 if smoke else 128,
             speculative=SpeculativeDecodingConfig(max_draft_tokens=4, max_ngram_size=4),
@@ -213,7 +211,12 @@ def run_gallery(command: str) -> str:
     )
 
     return json.dumps(
-        {"experiments": results, "gpu": gpu_snapshot(), "versions": library_versions()}
+        {
+            "experiments": results,
+            "attention_backend": type(engine_runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
     )
 
 
@@ -225,12 +228,12 @@ def main(command: str = "gallery", bundle_path: str = "") -> None:
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-gallery")
 
-    print(f"[esme-gallery] {command}: 4 experiments, one A100 container, bf16 flash rows")
+    print(f"[esme-gallery] {command}: 4 experiments, one A100 container, bf16 default rows")
     record = json.loads(run_gallery.remote(command))
     record["config"] = {
         "command": command,
         "model": "Esme-214M-Chat",
-        "backend": "FlashAttnPagedAttention (bf16)",
+        "backend": f"{record.get('attention_backend', 'unknown')} (bf16)",
         "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
         "same_container": True,
         "repro_command": f"modal run scripts/modal_esme_technique_gallery.py --command {command}",
