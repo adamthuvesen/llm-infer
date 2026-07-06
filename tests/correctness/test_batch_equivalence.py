@@ -10,7 +10,7 @@ divergence is a batching/position/block bug, not FP noise. Two claims:
 * batched == serial: each request's tokens in the batch equal the same request run alone.
 
 CPU-runnable (the fixture's fp32 dtype), zero GPU spend — the local complement to the
-GPU throughput benchmark in ``scripts/modal_benchmark.py``.
+GPU reference-gated benchmark harnesses.
 """
 
 from __future__ import annotations

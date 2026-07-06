@@ -17,10 +17,9 @@ The repo implements a from-scratch paged inference engine with a generic model r
 - Replayable KV-cache traces.
 - Esme benchmarks against naive HF through a converted HF checkpoint.
 
-The claim is not production serving, and not competing with mature serving engines. The
-claim is systems evidence:
-serving techniques made legible, speed claims checked against known-good outputs, and measured
-limits named plainly.
+The repo claims systems evidence: serving techniques made legible, speed claims checked
+against known-good outputs, and measured limits named plainly. Production readiness and
+parity with mature serving engines are not project goals.
 
 ## Reference Before Speed
 
@@ -73,10 +72,10 @@ llm_infer/
   scheduler/      # prefill/decode admission, continuous batching
   kernels/        # AttentionBackend protocol + implementations
   serving/        # request queue, sampler, streaming loop, OpenAI server
-  benchmarks/     # Esme baselines plus the Qwen reference harnesses
+  benchmarks/     # Esme benchmark helpers and shared report utilities
 tests/correctness/ # reference and equivalence checks
 docs/             # public docs
-docs/internal/    # archived implementation notes
+docs/internal/    # benchmark evidence and implementation notes
 scripts/          # goldens, benchmarks, loadgen, trace fixtures
 visualizer/       # schema-v3 KV trace replay UI
 ```

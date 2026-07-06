@@ -1,4 +1,4 @@
-"""Turn raw runner outputs into a clear, fully-pinned benchmark record.
+"""Turn raw runner outputs into a clear benchmark record.
 
 Three jobs, all in service of "match before measuring speed":
 
@@ -8,12 +8,11 @@ Three jobs, all in service of "match before measuring speed":
 * :func:`throughput_rows` computes tokens/s the same way for every system: identical total
   output tokens (they decode the same continuation) divided by the median measured
   wall-clock. Median, not best, so one lucky iteration cannot flatter a system.
-* :func:`gpu_snapshot` / :func:`library_versions` capture the environment the plan demands
-  pinned — GPU, clocks, power cap, and every library version — into the result.
+* :func:`gpu_snapshot` / :func:`library_versions` capture the GPU and library versions
+  that make the result reproducible.
 
-Cross-system *equivalence* (does each system decode the same tokens, and is any divergence
-a genuine numerical tie) is adjudicated in ``scripts/modal_benchmark.py`` with the fp32
-reference, reusing the reference check's tie policy; this module only reports it.
+Cross-system agreement is decided by the benchmark harness against the fp32 reference;
+this module only reports those facts and suppresses speed claims for rows that fail.
 """
 
 from __future__ import annotations
@@ -21,10 +20,6 @@ from __future__ import annotations
 import statistics
 import subprocess
 from collections.abc import Iterable
-
-# Modal A100-80GB on-demand rate: $0.000694/s = $2.50/hr (modal.com/pricing, 2026-06-21).
-# Pinned here so $/1k-rollout is a transparent, reproducible derivation of one timed run.
-A100_80GB_USD_PER_HOUR = 2.50
 
 
 def normalize_at_eos(token_ids: Iterable[int], eos_token_ids: frozenset[int]) -> list[int]:
@@ -94,33 +89,6 @@ def throughput_rows(
     return rows
 
 
-def rollout_rows(
-    results: list[dict],
-    eos_token_ids: frozenset[int],
-    num_completions: int,
-    *,
-    usd_per_hour: float = A100_80GB_USD_PER_HOUR,
-    baseline_system: str = "hf_sequential",
-) -> list[dict]:
-    """Rollout table rows: median wall-clock, output tokens, tok/s, and $/1k rollouts.
-
-    Builds on :func:`throughput_rows` (same median wall-clock + tok/s) and adds the rollout
-    economics: ``$/1k rollouts`` = the cost to generate 1000 completions at the pinned A100
-    rate, derived from this batch's wall-clock and its ``num_completions``. Under sampling the
-    systems decode *different* token volumes (different RNG), so tok/s is the apples-to-apples
-    speed number while wall-clock and $/1k reflect each system's own sampled batch.
-    """
-    rows = throughput_rows(results, eos_token_ids, baseline_system=baseline_system)
-    for row in rows:
-        seconds = row["median_seconds"]
-        # ``seconds == seconds`` rejects NaN (the no-timing case) without importing math.
-        valid = num_completions > 0 and seconds == seconds and seconds > 0
-        row["usd_per_1k_rollouts"] = (
-            (seconds / 3600.0) * usd_per_hour / num_completions * 1000.0 if valid else None
-        )
-    return rows
-
-
 def gpu_snapshot() -> dict[str, object]:
     """GPU name, SM/max clocks, power cap, memory — best-effort from nvidia-smi."""
     fields = "name,clocks.sm,clocks.max.sm,power.limit,memory.total"
@@ -154,7 +122,7 @@ def library_versions() -> dict[str, str]:
 
 
 def assemble_markdown(rows: list[dict], config: dict) -> str:
-    """A human-readable three-way table plus the pinned config, for the writeup/PR."""
+    """A human-readable benchmark table plus the pinned config, for the writeup/PR."""
     header = (
         "| system | agrees fp32 reference | median s | output tok | tok/s | speedup vs naive |\n"
         "| --- | --- | --- | --- | --- | --- |"
@@ -178,37 +146,6 @@ def assemble_markdown(rows: list[dict], config: dict) -> str:
         f"{workload.get('max_new_tokens', '?')} new tokens, greedy. "
         f"GPU: {_gpu_label(config.get('gpu', {}))}. "
         f"Source: {workload.get('source', '?')}"
-    )
-    return table + meta
-
-
-def assemble_rollout_markdown(rows: list[dict], config: dict) -> str:
-    """The rollout table (wall-clock · output tok · tok/s · $/1k) plus its pinned config."""
-    header = (
-        "| system | wall-clock s | output tok | tok/s | $/1k rollouts |\n"
-        "| --- | --- | --- | --- | --- |"
-    )
-    lines = [header]
-    for row in rows:
-        tps = row["tokens_per_second"]
-        usd = row.get("usd_per_1k_rollouts")
-        tps_s = f"{tps:.1f}" if tps is not None else "—"
-        usd_s = f"${usd:.2f}" if usd is not None else "—"
-        lines.append(
-            f"| {row['system']} | {row['median_seconds']:.2f} "
-            f"| {row['total_output_tokens']} | {tps_s} | {usd_s} |"
-        )
-    table = "\n".join(lines)
-    workload = config.get("workload", {})
-    meta = (
-        f"\n\n{workload.get('completions', '?')} completions "
-        f"({workload.get('num_prompts', '?')} prompts × G={workload.get('num_generations', '?')}), "
-        f"≤{workload.get('max_completion_length', '?')} tokens, "
-        f"temp={workload.get('temperature', '?')} top_p={workload.get('top_p', '?')} "
-        f"seed={workload.get('seed', '?')}. GPU: {_gpu_label(config.get('gpu', {}))}. "
-        f"$/1k at {config.get('usd_per_hour', A100_80GB_USD_PER_HOUR)}/hr A100-80GB. "
-        f"Under sampling each system decodes its own token volume — tok/s is the speed metric; "
-        f"wall-clock and $/1k include each system's sampled length."
     )
     return table + meta
 

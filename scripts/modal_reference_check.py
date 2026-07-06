@@ -1,8 +1,7 @@
-"""Historical Qwen Modal A100 harness: validate flash-attn against the reference output.
+"""Qwen Modal A100 harness: validate flash-attn against the reference output.
 
-The primary Esme flash gate is ``scripts/modal_esme_flash_reference_check.py``. This
-Qwen harness remains for archived public-baseline reproduction. flash-attn needs a CUDA build,
-which this project's dev Mac does not have, so the
+The primary Esme flash gate is ``scripts/modal_esme_flash_reference_check.py``. Qwen remains
+the independent HuggingFace reference backend. flash-attn needs a CUDA build, so the
 flash backend is exercised on Modal's A100-80GB (the project's target GPU). The
 ``torch_naive`` reference and its exact CPU reference check stay the local check;
 this only runs

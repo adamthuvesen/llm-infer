@@ -1,7 +1,7 @@
-"""The pinned model identity. Do not substitute the base (non-Instruct) variant.
+"""The pinned Qwen reference identity. Do not substitute the base variant.
 
-llm-rlvr runs the **Instruct** model and its chat template; the plain `-3B` model is
-a different network and would invalidate the reference check.
+The Qwen reference uses the **Instruct** model and its chat template; the plain `-3B` model
+is a different network and would invalidate the reference check.
 """
 
 from __future__ import annotations

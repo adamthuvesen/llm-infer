@@ -11,7 +11,7 @@ single-sequence and batched (multiple concurrent sequences) decode.
 The logit values are additionally held close. The cache write is a pure side effect; the only
 non-bit-exact op is the BLAS reduction-order difference between a full-sequence prefill matmul
 and the gathered-history decode matmul (the same class of effect the Qwen prefill docstring and
-``docs/fixture-format.md`` document). On the synthetic bundle this stays at fp32 bit-noise
+``docs/internal/fixture-format.md`` document). On the synthetic bundle this stays at fp32 bit-noise
 (~1e-5); on the real Esme-214M-Chat weights it reaches ~1e-4, still ~24x below the model's
 tightest observed top-2 decision margin (2.6e-3), so it can never flip a greedy argmax — which
 is why the token-id assertion is the gate and the logit tolerance is the documented floor.

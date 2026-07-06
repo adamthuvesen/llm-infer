@@ -7,9 +7,8 @@ output. Position encoding (RoPE) and GQA head expansion happen *before* the back
 is called — keys and values arrive already rotated and already repeated to the query
 head count — so a backend only owns the `softmax(QKᵀ / √d) V` causal core.
 
-Keeping the interface this narrow is the point: a later paged/flash backend is a
-drop-in swap validated against `torch_naive` by the reference check, not a
-rewrite of the model forward.
+Keeping the interface this narrow is the point: each backend is a drop-in swap validated
+against ``torch_naive`` by the reference check, not a rewrite of the model forward.
 """
 
 from __future__ import annotations

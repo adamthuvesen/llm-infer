@@ -61,7 +61,7 @@ app = modal.App("llm-infer-esme-three-way")
 esme_image = FLASH_IMAGE
 
 # vLLM image: vLLM pulls its own torch + CUDA, so it must not share the flash env. Same two env
-# pins as the historical Qwen ceiling run: spawn the engine core, native sampler, no nvcc JIT.
+# pins for the vLLM ceiling run: spawn the engine core, native sampler, no nvcc JIT.
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("vllm")

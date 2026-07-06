@@ -91,8 +91,8 @@ def build_cot_messages(
     """The llm-rlvr ``cot`` chat messages with no few-shot exemplars.
 
     Mirrors ``build_messages(..., style="cot")`` with ``exemplars=()`` — the system
-    instruction followed by the single target user turn. reference check fixtures use the
-    zero-shot path; few-shot exemplars are a later concern.
+    instruction followed by the single target user turn. Reference check fixtures use the
+    zero-shot path.
     """
     return [
         {"role": "system", "content": COT_INSTRUCTION},

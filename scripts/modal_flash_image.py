@@ -1,6 +1,6 @@
 """One shared Modal flash-attn image for every GPU harness.
 
-Both serving tracks need the same GPU image: a CUDA base with torch + flash-attn + transformers.
+The GPU harnesses use the same image: a CUDA base with torch + flash-attn + transformers.
 Defining it once — instead of copy-pasting the recipe into each harness — means there is exactly
 one image definition, baked once and cached, then reused by all of them. Any divergence between
 harnesses (a different torch/transformers pin, a reordered layer) silently invalidates the cache.
@@ -18,7 +18,7 @@ and a guard then imports flash-attn and re-checks torch/ABI agreement — a wron
 loudly instead of producing a silently broken image.
 
 ``transformers>=4.51`` (Qwen3 support, needed by the Esme HF/vLLM checkpoint) sits after the
-flash-attn layer and satisfies the Qwen gates' old ``>=4.43`` too, so one pin serves both tracks.
+flash-attn layer and satisfies the project's ``>=4.43`` lower bound too.
 """
 
 from __future__ import annotations

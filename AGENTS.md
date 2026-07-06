@@ -1,4 +1,4 @@
-# AGENTS.md — llm-infer
+# AGENTS.md: llm-infer
 
 `llm-infer` is a small inference engine focused on building real serving techniques
 and measuring them clearly. `Esme-214M-Chat` is the headline and default documented
@@ -19,13 +19,13 @@ numerical tie and documented.
 ## Backends
 
 - `esme`: Esme export bundles, with `Esme-214M-Chat` as the headline path. Internally these use
-  the `llm_pretrain_dense_v1` DenseBackbone export format. Real paged KV through the same engine
-  prefill/decode + scheduler path — prefix caching, speculative decode, and preemption,
-  all parity-gated. `PretrainBundleModel.logits()` stays the full-recompute reference the
-  paged path is validated against (exact greedy-token parity on the real bundle; cached logits
-  within documented fp32 BLAS reduction-order noise, well below any decision margin). Flash-attn
-  is off by default (the bundle uses the `torch_naive` backend). See `BackendCapabilities` in
-  `llm_infer/model/interface.py`.
+  the `llm_pretrain_dense_v1` DenseBackbone export format. Real paged KV runs through the same
+  engine prefill/decode and scheduler path, with prefix caching, speculative decode, and
+  preemption all checked for parity. `PretrainBundleModel.logits()` stays the full-recompute
+  reference for the paged path: exact greedy-token parity on the real bundle, with cached logits
+  within documented fp32 BLAS reduction-order noise and well below any decision margin. Flash-attn
+  is off by default because the bundle uses the `torch_naive` backend. See `BackendCapabilities`
+  in `llm_infer/model/interface.py`.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs/examples
   use `esme`.
 - `qwen`: independent HF reference backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
@@ -48,9 +48,8 @@ llm_infer/
   benchmarks/        # shared workload + runners (Modal harnesses in scripts/)
 tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
 docs/                # scoping.md, architecture.md, benchmark.md; internal notes in docs/internal/
-scripts/             # generate_goldens, Qwen reference harnesses, Esme Modal harnesses,
-                     # modal_esme_reference_check, modal_esme_benchmark, merge_adapter,
-                     # build_rollout_fixture, loadgen, kv trace fixture
+scripts/             # generate_goldens, Qwen reference check, Esme Modal harnesses,
+                     # serving/loadgen tools, benchmark evidence checks, kv trace fixtures
 visualizer/          # schema-v3 KV trace replay UI
 ```
 
@@ -62,8 +61,8 @@ preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/load
 
 The single-request unit path must produce exact token ids. bf16 greedy can diverge
 from a reference on a genuine tie-break step; that is acceptable **only** when each divergence
-is traced to a numerical tie (logits equal within tolerance) and documented — never
-waved off as "close enough." The reference check runs in **fp32** by default, where ties
+is traced to a numerical tie (logits equal within tolerance) and documented. Do not wave it
+off as "close enough." The reference check runs in **fp32** by default, where ties
 near-vanish. See `docs/internal/fixture-format.md`. A backend that fails the reference check reports no tok/s.
 
 ## Development
@@ -78,18 +77,17 @@ uv run pytest -q                      # full fast suite before merge
 uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU reference check
 ```
 
-The local check is **CPU-runnable by design** — no GPU required, and the slow 3B
-reference checks are opt-in because they load the pinned Qwen model and can take minutes on CPU.
+The local check is **CPU-runnable**: no GPU required. The slow 3B reference checks are opt-in
+because they load the pinned Qwen model and can take minutes on CPU.
 The flash-attn backend is GPU-only; Esme and Qwen reference checks run on the target
 GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
-Esme in `scripts/modal_esme_*` and the Qwen reference in `scripts/modal_benchmark.py` /
-`scripts/modal_rollout.py`.
+Esme in `scripts/modal_esme_*` and the Qwen flash check in `scripts/modal_reference_check.py`.
 
 ## Conventions
 
 - Atomic [conventional commits](https://www.conventionalcommits.org/) (`type(scope): message`),
   one per logical unit.
-- Type hints throughout; no `Any` casts — fix the type.
+- Type hints throughout; no `Any` casts. Fix the type.
 - `pathlib.Path` for filesystem work.
 - Comments explain _why_, not _what_. Names use concrete domain terms.
 - Validate untrusted input loudly; keep `try` bodies small.

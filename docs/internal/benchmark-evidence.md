@@ -101,7 +101,7 @@ about 96 blocks.
 | preemption (recompute) | 7 | 12/12 | 8.77 s | 12/12 exact-or-tie, 0 non-tie |
 | reserve (control) | 0 | 12/12 | 11.49 s | 12/12 exact-or-tie, 0 non-tie |
 
-The point is robustness under pressure: real evictions, recompute resume, exact completions.
+This row proves the pressure path: real evictions, recompute resume, and exact completions.
 
 ### Speculative Decoding
 

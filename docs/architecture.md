@@ -75,7 +75,7 @@ flowchart TB
 | [`tracing.py`](../llm_infer/tracing.py) | schema-versioned engine events for JSONL replay | synthetic visualization state |
 | [`benchmarks/`](../llm_infer/benchmarks/) | Esme and Qwen reference timing wrappers | reference correctness itself |
 
-Dependency direction is intentionally simple:
+Dependency direction stays simple:
 
 ```text
 scripts/tests/server -> serving -> scheduler + model -> kv_cache + kernels
@@ -100,8 +100,8 @@ can prefill across several steps without fully blocking decode work.
 
 For an all-greedy batch with no speculation, preemption, tracing, or prefix sharing, the
 engine runs decode in **deferred windows** (`decode_window_size`, default 8; 1 restores the
-per-step path): up to a window of decode steps runs per scheduler pass with sampled tokens
-kept on device, EOS/stop decided at one host sync per window, and — on bundle backends —
+per-step path). Up to a window of decode steps runs per scheduler pass with sampled tokens
+kept on device, EOS/stop decided at one host sync per window, and, on bundle backends,
 per-step paging bookkeeping replaced by preallocated window buffers
 (`llm_infer/model/decode_plan.py`). Outputs are token-for-token identical to the per-step
 path; tokens become visible in window-sized bursts. Benchmark impact is summarized in
@@ -138,7 +138,7 @@ within the documented tolerance; a non-tie divergence fails the reference gate.
 - `/metrics`
 
 There is no auth layer or database in this repo. The server is a local serving surface for the
-engine, not a production platform.
+engine. Production platform concerns are out of scope.
 
 ## Tracing
 

@@ -1,12 +1,12 @@
 # KV Cache Observatory
 
 Static local visualizer for schema-v3 `InferenceEngine(trace=...)` JSONL traces. It has no
-runtime dependencies and does not fetch network assets — plain HTML, CSS, and ES modules.
+runtime dependencies and fetches no network assets: plain HTML, CSS, and ES modules.
 
 The interface replays a trace frame by frame: a hero player with a scrubber and speed
 control, a live telemetry strip (engine step, occupancy, throughput, generated tokens), a
 per-request decode timeline, the paged KV cache wall, a current-event inspector, and the raw
-event stream. Color encodes engine semantics — blue admit/schedule, teal prefill, amber
+event stream. Color encodes engine semantics: blue admit/schedule, teal prefill, amber
 decode, violet speculative, rose preempt/resume, green finish.
 
 ## Open Locally
@@ -27,8 +27,8 @@ uv run python scripts/generate_kv_trace_fixture.py
 ```
 
 The generator is a standalone synthetic simulation (no engine/model/torch import) that emits the
-same schema-v3 event shapes `InferenceEngine(trace=...)` produces — admission, chunked prefill,
-prefix sharing, batched decode, clear block lifecycle, recompute preemption, and finish — so the
+same schema-v3 event shapes `InferenceEngine(trace=...)` produces: admission, chunked prefill,
+prefix sharing, batched decode, clear block lifecycle, recompute preemption, and finish. The
 viewer ships on its own. The injected clock only makes throughput sample fields stable in git.
 The same viewer equally replays a real `InferenceEngine(trace=..., preemption=True)` trace.
 
@@ -39,10 +39,10 @@ uv run python scripts/generate_esme_kv_trace.py --write
 ```
 
 This drives the **actual** `InferenceEngine` over the tiny `Esme-214M-Chat`-format bundle with
-preemption on and writes `docs/assets/esme_kv_trace_schema_v3.jsonl` — every event is emitted by
+preemption on and writes `docs/assets/esme_kv_trace_schema_v3.jsonl`. Every event is emitted by
 the real engine/scheduler/allocator on the Esme backend, including a forced recompute preemption.
-Load it with `Load JSONL` to watch an Esme run, not a synthetic one. A fixed step
-clock keeps the artifact byte-stable so it can be regression-checked.
+Load it with `Load JSONL` to watch a real Esme run. A fixed step clock keeps the artifact
+byte-stable so it can be regression-checked.
 
 ## What The Viewer Shows
 
@@ -66,6 +66,6 @@ that request lane. The committed fixture is non-speculative.
 
 Preemption is rendered when present: a `request_preempted` puts a slashed "evicted" notch on the
 request's lane (and the KV wall shows its blocks freed at the same moment, via the matching
-`block_freed`), and a later `request_resumed` marks where it re-enters and recomputes its KV —
-its replayed prefill chunks are the recompute. The committed fixture includes one such
+`block_freed`), and a later `request_resumed` marks where it re-enters and recomputes its KV.
+Its replayed prefill chunks are the recompute. The committed fixture includes one such
 preempt + resume cycle (`chat-quick` under a tight pool).

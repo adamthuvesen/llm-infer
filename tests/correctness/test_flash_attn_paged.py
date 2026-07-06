@@ -1,9 +1,9 @@
 """flash-attn correctness: the flash-attn backend reproduces the golden under the tie rule.
 
 The fused flash-attn kernel runs in bf16 with a different fp32 reduction order than the
-``torch_naive`` reference, so a genuine near-tie greedy step can flip — exactly the
-generate()-vs-recompute effect documented for reference check in docs/fixture-format.md. The rule
-here is therefore not bit-exact tokens but **token-for-token vs the golden except at a
+``torch_naive`` reference, so a genuine near-tie greedy step can flip — the same class of
+effect documented in ``docs/internal/fixture-format.md``. The rule here is therefore not
+bit-exact tokens but **token-for-token vs the golden except at a
 genuine numerical tie**, with every accepted divergence traced to a tie by recomputing
 the step with the fp32 reference path (see ``tie_tolerance.py``). A divergence at a
 non-tie step is a FAIL — a real kernel/layout bug.

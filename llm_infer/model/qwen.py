@@ -3,8 +3,7 @@
 The weights are HuggingFace's (loaded at the pinned revision); the forward is ours,
 so the reference check is testing *our* engine — RoPE, GQA expansion, RMSNorm,
 the layer stack, and the decode loop — against HF greedy, not HF against itself. The
-attention core is delegated to the pluggable backend so a later paged/flash kernel
-is a swap validated by the same reference check.
+attention core is delegated to the selected backend, validated by the same reference check.
 
 Two decode paths share one layer stack:
 
@@ -88,9 +87,8 @@ class QwenModel:
         Defaults to the pinned base on fp32 CPU (where greedy tie-breaks near-vanish) and the
         ``torch_naive`` reference backend. Pass ``device="cuda"`` to place the weights on
         the GPU for the flash-attn backend; the CPU default keeps the reference path
-        bit-identical to the checked cached path. ``revision`` is ``None`` for a local
-        ``model_id`` path
-        (the rollout merged grpo-s0 weights), which carries no git revision.
+        bit-identical to the checked cached path. ``revision`` is ``None`` for local
+        ``model_id`` paths, which carry no git revision.
         """
         config = AutoConfig.from_pretrained(model_id, revision=revision)
         hf = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype)
