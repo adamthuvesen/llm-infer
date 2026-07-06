@@ -18,13 +18,11 @@ from llm_infer.benchmarks.report import (
 from llm_infer.benchmarks.workload import (
     BenchRequest,
     Workload,
-    build_workload,
 )
 
 __all__ = [
     "BenchRequest",
     "Workload",
-    "build_workload",
     "normalize_at_eos",
     "total_output_tokens",
     "throughput_rows",
