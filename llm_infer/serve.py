@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 import torch
 
+from llm_infer.kernels.base import PagedDecodeAttentionBackend
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.interface import ModelRuntime
-from llm_infer.model.runtime import available_backends, load_model_runtime
+from llm_infer.model.runtime import (
+    ATTENTION_BACKEND_CHOICES,
+    available_backends,
+    load_model_runtime,
+)
 from llm_infer.serving.engine import InferenceEngine
+from llm_infer.serving.request import Request
 from llm_infer.serving.server import (
     AsyncInferenceEngine,
     ServerMetrics,
@@ -56,6 +63,16 @@ def build_app_from_runtime(
     graphs are captured here, before the engine starts serving, so the capture cost lands
     at startup, never inside a request. On CPU or non-bundle backends this is a no-op.
     """
+    warmup_s = _warm_flashinfer_decode_if_needed(
+        runtime,
+        block_size=block_size,
+        device=device,
+    )
+    if warmup_s is not None:
+        print(f"attention backend: {type(runtime.model.backend).__name__}")
+        print(f"flashinfer warmup: one-token decode in {warmup_s:.1f} s")
+    else:
+        print(f"attention backend: {type(runtime.model.backend).__name__}")
     if decode_graphs:
         capture_s = enable_decode_graphs_if_cuda(runtime.model, decode_graph_buckets)
         if capture_s is not None:
@@ -82,6 +99,47 @@ def build_app_from_runtime(
     )
     register_webui(app)
     return app
+
+
+# The warmup runs one short request (1 prompt token + 1 decode token) purely to trigger
+# FlashInfer's shape-specific JIT before serving; a couple of blocks always cover it, so it
+# never touches the full serving pool.
+_WARMUP_NUM_BLOCKS = 4
+
+
+def _warm_flashinfer_decode_if_needed(
+    runtime: ModelRuntime,
+    *,
+    block_size: int,
+    device: str,
+) -> float | None:
+    if not isinstance(runtime.model.backend, PagedDecodeAttentionBackend):
+        return None
+    if torch.device(device).type != "cuda":
+        return None
+
+    prompt_ids = _warmup_prompt_ids(runtime)
+    engine = InferenceEngine(
+        runtime.model,
+        block_size=block_size,
+        num_blocks=_WARMUP_NUM_BLOCKS,
+        device=device,
+        capabilities=runtime.capabilities,
+        decode_window_size=1,
+    )
+    engine.add_request(Request("_flashinfer_warmup", prompt_ids, 1, frozenset()))
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    engine.run()
+    torch.cuda.synchronize()
+    return time.perf_counter() - start
+
+
+def _warmup_prompt_ids(runtime: ModelRuntime) -> list[int]:
+    token_ids = runtime.tokenizer.encode("warmup")
+    if token_ids:
+        return [int(token_ids[0])]
+    return [0]
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -150,6 +208,12 @@ def main() -> None:
     )
     parser.add_argument("--model", dest="model_id", help="Optional backend-specific model id")
     parser.add_argument("--revision", help="Optional backend-specific model revision")
+    parser.add_argument(
+        "--attention-backend",
+        choices=ATTENTION_BACKEND_CHOICES,
+        default="auto",
+        help="Attention backend selector. auto uses FlashInfer for CUDA bf16/fp16 Esme bundles.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cpu")
@@ -224,6 +288,7 @@ def main() -> None:
         bundle_path=bundle_path,
         model_id=args.model_id,
         revision=args.revision,
+        attention_backend_name=args.attention_backend,
     )
     speculative = (
         SpeculativeDecodingConfig(

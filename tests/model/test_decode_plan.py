@@ -44,15 +44,24 @@ def test_plan_matches_classic_bookkeeping_step_by_step() -> None:
 
     for _ in range(budget):
         expected_writes = [table.physical_slot(table.length) for table in tables]
-        write_slots, read_plan = plan.begin_step()
+        write_slots, read_plan = plan.begin_step(include_pages=True)
         assert write_slots.tolist() == expected_writes
 
         new_lengths = [table.length + 1 for table in tables]
-        reference = cache.plan_read_many(tables, new_lengths)
+        reference = cache.plan_read_many(tables, new_lengths, include_pages=True)
         assert read_plan.idx.tolist() == reference.idx.tolist()
         assert read_plan.cu_seqlens.tolist() == reference.cu_seqlens.tolist()
         assert read_plan.lengths == reference.lengths
         assert read_plan.max_len == reference.max_len
+        assert read_plan.page_plan is not None
+        assert reference.page_plan is not None
+        assert read_plan.page_plan.indptr.tolist() == reference.page_plan.indptr.tolist()
+        assert read_plan.page_plan.indices.tolist() == reference.page_plan.indices.tolist()
+        assert (
+            read_plan.page_plan.last_page_len.tolist()
+            == reference.page_plan.last_page_len.tolist()
+        )
+        assert read_plan.page_plan.page_size == reference.page_plan.page_size
 
         plan.complete_step()
         assert [table.length for table in tables] == new_lengths

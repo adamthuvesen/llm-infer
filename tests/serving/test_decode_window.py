@@ -133,6 +133,36 @@ def test_mixed_sampling_batch_falls_back_to_per_step_path(runtime) -> None:
     assert windowed == per_step
 
 
+def test_prefix_group_reenters_window_after_sibling_releases(runtime) -> None:
+    """A prefix-cached survivor can use the window once its shared sibling is gone."""
+    prompt = [1, 4, 7, 9, 10]
+
+    baseline = _engine(runtime, window=1)
+    baseline.add_request(Request("short", prompt, 2, frozenset(), prefix_group_id="shared"))
+    baseline.add_request(Request("long", prompt, 9, frozenset(), prefix_group_id="shared"))
+    expected = baseline.run()
+
+    engine = _engine(runtime, window=4)
+    engine.add_request(Request("short", prompt, 2, frozenset(), prefix_group_id="shared"))
+    engine.add_request(Request("long", prompt, 9, frozenset(), prefix_group_id="shared"))
+
+    opened_for: list[tuple[str | None, ...]] = []
+    original_open = runtime.model.open_decode_window
+
+    def spy_open_decode_window(cache, tables, budget):
+        opened_for.append(tuple(table.owner for table in tables))
+        return original_open(cache, tables, budget)
+
+    runtime.model.open_decode_window = spy_open_decode_window
+    try:
+        actual = engine.run()
+    finally:
+        runtime.model.open_decode_window = original_open
+
+    assert actual == expected
+    assert ("long",) in opened_for
+
+
 def test_abort_flush_lands_in_next_step_result(runtime) -> None:
     """Aborting mid-window flushes survivors' deferred tokens into the next step result."""
     # num_blocks=4 admits only two of the three 2-block requests, so the waiting queue

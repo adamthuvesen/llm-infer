@@ -173,7 +173,10 @@ class DecodeGraphRunner:
         elif self._active_plan is not plan:
             return None
 
-        write_slots, read_plan = plan.begin_step()
+        write_slots, read_plan = plan.begin_step(
+            include_pages=self.model._uses_paged_decode_backend()
+        )
+        self.model._prepare_paged_decode(read_plan)
         state.tokens[:batch].copy_(token_ids.reshape(-1))
         self._run_segment(state, 0)
         for layer in range(self.model.num_layers):
@@ -205,11 +208,7 @@ class DecodeGraphRunner:
         """
         model = self.model
         cache.write_rows(layer, write_slots, state.k[:batch], state.v[:batch])
-        k_hist, v_hist = cache.read_many_plan(layer, read_plan)
-        k_exp, v_exp = model._expand_kv_token_major(k_hist, v_hist)
-        out = model.backend.forward_decode_batch_packed(
-            state.q[:batch], k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
-        )
+        out = model._decode_attention_from_plan(state.q[:batch], layer, cache, read_plan)
         state.attn[:batch].copy_(out)
 
     def _pre_attention(self, state: _BucketState, layer: int) -> None:

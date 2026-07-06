@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from llm_infer.kernels.base import AttentionBackend
+from llm_infer.kernels.base import AttentionBackend, PagedDecodeAttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
@@ -88,6 +88,12 @@ class PretrainBundleModel:
         self.config = config
         self.tokenizer_path = tokenizer_path
         self.backend = backend
+        # Resolve the native-paged capability once. The Protocol is runtime_checkable, so
+        # ``isinstance`` scans attributes on py3.11 — too costly to repeat per layer per decode
+        # step. The backend never changes after construction, so cache the narrowed reference.
+        self._paged_backend: PagedDecodeAttentionBackend | None = (
+            backend if isinstance(backend, PagedDecodeAttentionBackend) else None
+        )
         self.dtype = dtype
         self.num_layers = config.num_hidden_layers
         self.num_heads = config.num_attention_heads
@@ -300,7 +306,10 @@ class PretrainBundleModel:
         # One RoPE cos/sin row per request, each at the request's own absolute position — from
         # the cached table, already in model dtype, so the per-layer apply_rope cast is a no-op.
         cos, sin = self._rope_rows(positions)
-        read_plan = cache.plan_read_many(tables, new_lengths)
+        read_plan = cache.plan_read_many(
+            tables, new_lengths, include_pages=self._uses_paged_decode_backend()
+        )
+        self._prepare_paged_decode(read_plan)
         for layer in range(self.num_layers):
             hidden = self._apply_decoder_layer(
                 hidden,
@@ -399,7 +408,10 @@ class PretrainBundleModel:
             logits = self.decode_graphs.window_step(cache, plan, token_ids)
             if logits is not None:
                 return logits
-        write_slots, read_plan = plan.begin_step()
+        write_slots, read_plan = plan.begin_step(
+            include_pages=self._uses_paged_decode_backend()
+        )
+        self._prepare_paged_decode(read_plan)
         hidden = self.w["embed_tokens.weight"][token_ids.reshape(-1)].to(self.dtype)
         # max_len - 1 is the largest position this step touches; the table already covers the
         # whole window (open_decode_window grew it), so this is a cheap host-side check.
@@ -462,6 +474,41 @@ class PretrainBundleModel:
     def release_table(self, table: BlockTable) -> None:
         """No-op — real K/V lives in the paged cache, not per-table backend state."""
         del table
+
+    def _uses_paged_decode_backend(self) -> bool:
+        return self._paged_backend is not None
+
+    def _prepare_paged_decode(self, read_plan: KVReadPlan) -> None:
+        backend = self._paged_backend
+        if backend is None or read_plan.page_plan is None:
+            return
+        with self._profile("paged_attention_plan"):
+            backend.plan_decode_batch_paged(
+                read_plan.page_plan,
+                num_qo_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                dtype=self.dtype,
+            )
+
+    def _decode_attention_from_plan(
+        self,
+        queries: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        read_plan: KVReadPlan,
+    ) -> torch.Tensor:
+        backend = self._paged_backend
+        if backend is not None and read_plan.page_plan is not None:
+            with self._profile("paged_attention"):
+                return backend.forward_decode_batch_paged(queries, cache.layer_kv(layer))
+
+        with self._profile("kv_read_gather"):
+            k_hist, v_hist = cache.read_many_plan(layer, read_plan)
+        k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
+        return self.backend.forward_decode_batch_packed(
+            queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
+        )
 
     def _apply_decoder_layer(
         self, hidden: torch.Tensor, layer: int, attention: _AttentionFn
@@ -582,13 +629,7 @@ class PretrainBundleModel:
             )
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
-        with self._profile("kv_read_gather"):
-            k_hist, v_hist = cache.read_many_plan(layer, read_plan)
-        k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
-
-        attn = self.backend.forward_decode_batch_packed(
-            queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
-        )
+        attn = self._decode_attention_from_plan(queries, layer, cache, read_plan)
         return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)  # (B, hidden)
 
     def _decode_attention_planned(
@@ -620,13 +661,7 @@ class PretrainBundleModel:
             )
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
-        with self._profile("kv_read_gather"):
-            k_hist, v_hist = cache.read_many_plan(layer, read_plan)
-        k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
-
-        attn = self.backend.forward_decode_batch_packed(
-            queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
-        )
+        attn = self._decode_attention_from_plan(queries, layer, cache, read_plan)
         return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)  # (B, hidden)
 
     def _qk_norm_rope(
