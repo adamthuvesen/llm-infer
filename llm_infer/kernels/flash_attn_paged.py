@@ -18,7 +18,8 @@ Two layout/dtype facts bridge the protocol to flash-attn:
   in bf16, so queries already arrive bf16 and we run the kernel in bf16. If queries
   arrive fp32 (e.g. the fp32 reference check dtype), we run in bf16 and cast the output back —
   the resulting fp32-reduction-order difference vs ``torch_naive`` is exactly the
-  genuine-tie effect the reference check's tie-tolerance rule accounts for (docs/fixture-format.md).
+  genuine-tie effect the reference check's tie-tolerance rule accounts for
+  (``docs/internal/fixture-format.md``).
 
 Causality matches the protocol contract under ``causal=True``: flash-attn aligns the
 query block to the *bottom-right* of the key block, so query position ``i`` attends to

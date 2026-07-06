@@ -137,7 +137,7 @@ def main() -> None:
         "--backend",
         choices=available_backends(),
         default=DEFAULT_BACKEND,
-        help="Backend to serve (defaults to Esme; use qwen only for historical reproduction)",
+        help="Backend to serve (defaults to Esme; use qwen for the Qwen reference backend)",
     )
     # ESME_BUNDLE_PATH is the name the Esme bundle uses everywhere else (tests, Modal
     # harnesses); LLM_INFER_BUNDLE stays as the generic fallback for any bundle backend.

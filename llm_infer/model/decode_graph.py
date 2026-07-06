@@ -7,8 +7,7 @@ of relaunching them from Python:
 * **Bucketed, padded, captured once.** Graphs are captured for a fixed set of batch-size
   buckets; a real batch is padded up to the nearest bucket and replayed. Static input
   buffers are ``copy_``-ed into, addresses never change, and nothing is ever recaptured per
-  batch composition — per-shape recapture is the measured losing pattern from the archived
-  Qwen-era slice (docs/internal/decode-graph-plan.md).
+  batch composition.
 * **Piecewise, attention eager.** Each decode step replays captured segments for the layer
   math (norms, projections, QK-norm, RoPE, MLP, logits) while the paged-KV write, the
   packed history gather, and the flash-attn varlen call run eagerly between segments. The

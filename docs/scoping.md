@@ -73,10 +73,10 @@ llm_infer/
   scheduler/      # prefill/decode admission, continuous batching
   kernels/        # AttentionBackend protocol + implementations
   serving/        # request queue, sampler, streaming loop, OpenAI server
-  benchmarks/     # Esme baselines plus the Qwen reference harnesses
+  benchmarks/     # Esme benchmark helpers and shared report utilities
 tests/correctness/ # reference and equivalence checks
 docs/             # public docs
-docs/internal/    # archived implementation notes
+docs/internal/    # benchmark evidence and implementation notes
 scripts/          # goldens, benchmarks, loadgen, trace fixtures
 visualizer/       # schema-v3 KV trace replay UI
 ```

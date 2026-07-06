@@ -48,9 +48,8 @@ llm_infer/
   benchmarks/        # shared workload + runners (Modal harnesses in scripts/)
 tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
 docs/                # scoping.md, architecture.md, benchmark.md; internal notes in docs/internal/
-scripts/             # generate_goldens, Qwen reference harnesses, Esme Modal harnesses,
-                     # modal_esme_reference_check, modal_esme_benchmark, merge_adapter,
-                     # build_rollout_fixture, loadgen, kv trace fixture
+scripts/             # generate_goldens, Qwen reference check, Esme Modal harnesses,
+                     # serving/loadgen tools, benchmark evidence checks, kv trace fixtures
 visualizer/          # schema-v3 KV trace replay UI
 ```
 
@@ -82,8 +81,7 @@ The local check is **CPU-runnable by design** — no GPU required, and the slow 
 reference checks are opt-in because they load the pinned Qwen model and can take minutes on CPU.
 The flash-attn backend is GPU-only; Esme and Qwen reference checks run on the target
 GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
-Esme in `scripts/modal_esme_*` and the Qwen reference in `scripts/modal_benchmark.py` /
-`scripts/modal_rollout.py`.
+Esme in `scripts/modal_esme_*` and the Qwen flash check in `scripts/modal_reference_check.py`.
 
 ## Conventions
 

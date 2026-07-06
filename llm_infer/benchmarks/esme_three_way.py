@@ -45,10 +45,9 @@ from llm_infer.validation.tie_tolerance import LogitsOracle
 
 DecodeOnce = Callable[[], dict[str, list[int]]]
 
-# The audited bf16 agreement tolerance, identical to the Qwen benchmark
-# (scripts/modal_benchmark.py): a first divergence whose fp32 top-2 gap is within this is a genuine
-# bf16 tie; beyond it is a real reduction-order divergence. NOT the fp32 1e-3 — bf16 noise at these
-# logit magnitudes is larger. Reused verbatim so the Esme bench applies the same audited rule.
+# The audited bf16 agreement tolerance: a first divergence whose fp32 top-2 gap is within this
+# is a genuine bf16 tie; beyond it is a real reduction-order divergence. NOT the fp32 1e-3 —
+# bf16 noise at these logit magnitudes is larger.
 BF16_AGREEMENT_TOLERANCE = 0.1
 
 
@@ -236,11 +235,10 @@ def tie_tolerant_agreement(
 ) -> EsmeAgreement:
     """Classify a system's tokens vs the fp32 oracle: exact / genuine-tie / non-tie divergence.
 
-    Mirrors the Qwen benchmark's ``comparison_vs_reference`` (scripts/modal_benchmark.py): for each
-    request, exact match counts as exact; otherwise the first divergence is recomputed on the fp32
-    oracle via ``compare_under_tie_tolerance`` — within ``tolerance`` it is a genuine bf16 tie,
-    beyond it a real divergence. ``all_ties_or_exact`` drives ``matches_reference`` (no non-tie
-    divergence ⇒ the system reports tok/s).
+    For each request, exact match counts as exact; otherwise the first divergence is recomputed on
+    the fp32 oracle via ``compare_under_tie_tolerance`` — within ``tolerance`` it is a genuine bf16
+    tie, beyond it a real divergence. ``all_ties_or_exact`` drives ``matches_reference`` (no
+    non-tie divergence ⇒ the system reports tok/s).
     """
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 

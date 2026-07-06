@@ -21,7 +21,7 @@ in tests run it against the in-process ASGI app over ``httpx.ASGITransport``.
 ``--model`` must equal the id the target server actually serves (the server 404s any other
 id). It defaults to ``esme-214m-chat`` for the documented Esme path
 (``python -m llm_infer.serve --backend esme --bundle <path>``); pass
-``Qwen/Qwen2.5-Coder-3B-Instruct`` only when reproducing the historical baseline.
+``Qwen/Qwen2.5-Coder-3B-Instruct`` when targeting a Qwen reference server.
 
 Usage::
 
@@ -30,7 +30,7 @@ Usage::
         --concurrency 16 --num-requests 64 --max-tokens 64 \\
         --model esme-214m-chat --prompt "Write a haiku about caches."
 
-    # Historical public baseline
+    # Qwen reference server
     uv run python scripts/loadgen.py --base-url http://127.0.0.1:8000 \\
         --concurrency 16 --num-requests 64 --max-tokens 64 \\
         --model Qwen/Qwen2.5-Coder-3B-Instruct --prompt "Write a haiku about caches."
@@ -256,7 +256,7 @@ def main() -> None:
         default="esme-214m-chat",
         help=(
             "model id the target server serves; defaults to Esme, use "
-            "'Qwen/Qwen2.5-Coder-3B-Instruct' for historical Qwen reproduction"
+            "'Qwen/Qwen2.5-Coder-3B-Instruct' for a Qwen reference server"
         ),
     )
     parser.add_argument("--prompt", default="Write a short haiku about paged attention.")

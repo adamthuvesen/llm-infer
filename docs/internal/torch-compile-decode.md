@@ -35,9 +35,8 @@ eager planned window per window — correct, just slower. Capture time on this c
 off through `build_app_from_runtime` → async engine → OpenAI endpoint, and the CPU serve
 default stays a no-op.
 
-Public `benchmark.md`/README numbers are untouched per the mission non-goal; the pinned
-full-protocol rerun is its own future slice, and its harnesses now measure the graphs path
-when it comes.
+Public `benchmark.md`/README numbers are the pinned public record; the harnesses measure the
+graphs path when rerun.
 
 ## Part B — the torch.compile runner
 

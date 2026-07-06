@@ -1,8 +1,8 @@
-# Historical Qwen correctness-fixture format
+# Qwen correctness-fixture format
 
-This document describes the historical Qwen golden fixture. Esme uses the direct
-bundle logits/generation contract as its reference. The Qwen reference check
-never re-runs HuggingFace at test time; instead it replays a **committed golden fixture**
+This document describes the Qwen golden fixture. Esme uses the direct bundle
+logits/generation contract as its reference. The Qwen reference check never re-runs
+HuggingFace at test time; instead it replays a **committed golden fixture**
 of HF greedy token ids and asserts the llm-infer engine reproduces them token-for-token.
 Change this format only with a matching change to `scripts/generate_goldens.py` and the
 reference check.
@@ -116,8 +116,8 @@ divergences** — so no bf16-style tie waiver is needed at all in reference chec
 For each committed case, the llm-infer single-request greedy decode through the
 `torch_naive` reference backend produces token ids **identical** to HF full-recompute
 greedy on the pinned Instruct model, under the pinned dtype and decoding config, using
-the exact llm-rlvr `cot` prompt. That is the trusted reference every future backend
-(paged, flash, …) must reproduce.
+the exact llm-rlvr `cot` prompt. That is the trusted reference every Qwen backend must
+reproduce.
 
 ## The flash-attn backend and the tie-tolerance rule (flash-attn)
 
@@ -162,8 +162,7 @@ backend vs the committed fp32 goldens, `max_new_tokens = 40` across all three ca
 full-recompute greedy continuation on every case (`3 passed in 17.83s`). The fused
 fp32-reduction-order difference never flipped an argmax on these cases, so the
 tie-tolerance rule above — recompute the contested step with the `torch_naive` fp32
-reference, accept only if the top-2 logit gap ≤ `1e-3` — was never exercised. It stays
-in place as the principled safety net for any future case where a genuine near-tie does
-flip: such a step would be accepted only on proof it is a numerical tie, and a non-tie
-divergence would still fail the reference check. This mirrors the reference-check rule, where full-recompute fp32
-also matched HF token-for-token with zero divergences and no waiver was needed.
+reference, accept only if the top-2 logit gap ≤ `1e-3` — was never exercised. A genuine
+near-tie would be accepted only on proof it is numerical, and a non-tie divergence would still
+fail the reference check. This mirrors the reference-check rule, where full-recompute fp32 also
+matched HF token-for-token with zero divergences and no waiver was needed.

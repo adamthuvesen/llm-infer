@@ -5,9 +5,7 @@ Local `main`, base `bb793f5`. Follow-up to
 kernel-launch dispatch: ~1,850 tiny kernels per token-step, roughly half CPU dispatch and
 half GPU launch-overhead execution. This slice attacks that wall the way vLLM/SGLang do —
 bucket-padded CUDA graph capture over the planned decode window — after first making the
-decode loop sync-free. The archived per-shape-recapture dead end
-([decode-graph-plan.md](decode-graph-plan.md)) was not retried: buckets are captured once
-and never recaptured per batch composition.
+decode loop sync-free. Buckets are captured once and never recaptured per batch composition.
 
 **Verdict: shipped.** Captured decode beats the eager window like-for-like by +177% /
 +45% / +16% at batch 8 / 64 / 256 — far past the 10% rollback bar — with the fp32
@@ -70,11 +68,9 @@ passes 2-3 include the pipelined consume): **0 warnings per pass, both configs**
   without capture; `tests/model/test_decode_graph.py` pins padded-vs-plain logits parity,
   buffer contents, bucket selection, and the fallbacks on the tiny bundle.
 
-Full-graph capture (flash-attn inside the graph) was NOT attempted: the packed varlen
-layout grows every step, so full capture would need a fixed-max-length padded attention
-path — a different kernel shape than the parity-gated one. Piecewise first, per the plan;
-full capture stays open as a follow-up only if the remaining eager attention slice proves
-to be the next wall.
+Full-graph capture (flash-attn inside the graph) is not part of the current engine: the packed
+varlen layout grows every step, so full capture would need a fixed-max-length padded attention
+path — a different kernel shape than the parity-gated one.
 
 ## Launch counts and GPU time (same container, per 8-step scheduler pass)
 
@@ -119,6 +115,5 @@ plan-upload sync fix) shows the same numbers within noise, so the headline gain 
 graphs; the sync sweep is the enabler (capture is impossible with syncs in the step) plus
 a small boundary-stall saving.
 
-Headline `benchmark.md`/README numbers are untouched: the full pinned three-way protocol
-was not rerun here. Wiring `enable_decode_graphs` into the serving/benchmark entry points
-and re-running the pinned protocol is the natural next slice.
+Headline `benchmark.md`/README numbers are the pinned public record; compare the tables in this
+note only within the same run.

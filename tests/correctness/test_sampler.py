@@ -1,8 +1,8 @@
 """The sampler's benchmark rule: at temperature 0 it equals the proven greedy path, exactly.
 
-The engine samples **per row** under each request's :class:`SamplingParams`. The rollout
-uses temperature/top-p multinomial sampling (TIMING-only — sampled tokens are not asserted
-across engines, since llm-infer and vLLM use different RNG). What *is* asserted here:
+The engine samples **per row** under each request's :class:`SamplingParams`. Sampled tokens
+are not compared across engines because different runtimes use different RNGs. What *is*
+asserted here:
 
 * the fast tensor-level checks — temperature 0 == argmax, top-k / top-p truncate to the
   allowed set, penalties subtract OpenAI-style, a pinned seed is reproducible, bad params are
@@ -138,7 +138,7 @@ def test_seed_is_reproducible() -> None:
 
 
 def test_different_seeds_diverge() -> None:
-    """Different seeds explore differently — the point of sampling during rollouts."""
+    """Different seeds explore different sampled continuations."""
     logits = torch.randn(4096, generator=_gen(2))
     params = SamplingParams(temperature=1.0)
     draws = [int(sample_row(logits, params, generated=[], generator=_gen(s))) for s in range(8)]

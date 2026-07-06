@@ -1,4 +1,4 @@
-"""Generate the historical Qwen golden fixture: HF greedy token ids for text-to-SQL prompts.
+"""Generate the Qwen golden fixture: HF greedy token ids for text-to-SQL prompts.
 
 This is the only step that runs HuggingFace. It records the full pinned environment
 (model revision, transformers/torch versions, dtype, decoding config, prompt-builder
@@ -15,7 +15,7 @@ kernel whose fp32 reduction order differs from token-by-token recompute; on a ge
 near-tie step those two HF paths themselves pick different tokens, so pinning the
 reference check to ``generate`` would test "do you replicate HF's kernel fusion,"
 not "do you
-decode the model correctly." See ``docs/fixture-format.md`` for the full trace of the
+decode the model correctly." See ``docs/internal/fixture-format.md`` for the full trace of the
 one step where this mattered. Both HF paths and the engine load identically; the only
 moving part is the attention reduction order, which the reference check deliberately holds
 fixed by using the same recompute algorithm on both sides.
@@ -46,7 +46,7 @@ from tests.correctness.cases import GOLDEN_CASES  # noqa: E402
 from tests.correctness.prompt import build_cot_messages  # noqa: E402
 
 # Decoding config — pinned into the fixture so the reference check decodes identically.
-DTYPE = "float32"  # fp32: greedy tie-breaks near-vanish (benchmark rule, docs/fixture-format.md)
+DTYPE = "float32"  # fp32: greedy tie-breaks near-vanish (see docs/internal/fixture-format.md)
 MAX_NEW_TOKENS = 40
 DO_SAMPLE = False  # greedy / temperature 0
 

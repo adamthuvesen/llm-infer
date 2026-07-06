@@ -2,7 +2,7 @@
 
 Tracing is opt-in: pass a :class:`TraceRecorder` to ``InferenceEngine(trace=...)``.
 The recorder stores schema-versioned events in emission order and can serialize them as
-JSON Lines for a later visualizer. Block allocation/free events are emitted from the real
+JSON Lines for the static visualizer. Block allocation/free events are emitted from the real
 physical boundary in :class:`~llm_infer.kv_cache.block_allocator.BlockAllocator` — a block is
 ``block_allocated`` only when it leaves the free pool and ``block_freed`` only when it truly
 returns to it (refcount-0), so prefix-shared blocks retained by a sibling are never reported as
@@ -87,7 +87,7 @@ class TraceEvent:
 
 
 class TraceRecorder:
-    """In-memory trace sink for tests, scripts, and future JSONL export."""
+    """In-memory trace sink for tests, scripts, and JSONL export."""
 
     def __init__(self) -> None:
         self._events: list[TraceEvent] = []

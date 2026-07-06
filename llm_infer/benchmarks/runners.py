@@ -1,24 +1,8 @@
-"""The four system runners and the warmup/measurement timing wrapper.
+"""The llm-infer benchmark runner and warmup/measurement timing wrapper.
 
-Each runner decodes the same :class:`~llm_infer.benchmarks.workload.Workload` greedily and
-returns the generated continuation ids plus per-iteration wall-clock. The systems:
-
-* ``hf_sequential`` — **the naive baseline, defined out loud**: HuggingFace
-  ``model.generate()`` called once per request, one at a time. HF's own cached generate
-  (default SDPA attention), but with **no cross-request batching** — the realistic thing a
-  person writes first. Cross-request batching is exactly the systems contribution
-  llm-infer and vLLM add, so this is the clear floor, not a strawman (it is not the slow
-  full-recompute path; it uses HF's optimized generate).
-* ``hf_batched`` — a stronger HF reference: a single left-padded batched
-  ``model.generate()``. Included so "llm-infer beats naive HF" cannot be read as beating a
-  deliberately weak baseline.
-* ``llm_infer`` — this engine on the flash-attn backend (bf16, CUDA), all requests admitted
-  to one paged cache and driven by the continuous-batching loop. Every running request
-  advances in one **fused batched decode** (``decode_many``) per step — one matmul/kernel
-  call over the whole running batch, not one per request — so the throughput win over naive
-  per-request HF generate is the batched forward plus the fused paged kernel.
-* ``vllm`` — vLLM offline ``LLM.generate`` with prefix caching off and flags pinned. The
-  ceiling, never the thing we beat.
+The Esme benchmark builds its HF and vLLM closures in
+``llm_infer.benchmarks.esme_three_way``. This module keeps the shared timing wrapper and
+the in-engine runner used by benchmarks and CPU smoke tests.
 
 Timing: ``warmup`` un-measured iterations (CUDA graphs / allocator / autotune settle),
 then ``iters`` measured iterations with a CUDA sync at each boundary; greedy decoding is
@@ -33,10 +17,10 @@ from dataclasses import dataclass, field
 
 import torch
 
-from llm_infer.benchmarks.workload import SamplingConfig, Workload
+from llm_infer.benchmarks.workload import Workload
 from llm_infer.model.interface import CausalLMBackend
 from llm_infer.profiling import TimingProfiler
-from llm_infer.serving import GREEDY, InferenceEngine, Request, SamplingParams
+from llm_infer.serving import GREEDY, InferenceEngine, Request
 
 BLOCK_SIZE = 128
 
@@ -55,23 +39,6 @@ class RunResult:
 def _sync() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-
-
-def _sampling_config(sampling: SamplingConfig | None) -> dict[str, object]:
-    """Render a system's decoding config for the pinned record (greedy vs sampled)."""
-    if sampling is None:
-        return {"mode": "greedy", "temperature": 0.0}
-    return {
-        "mode": "sampling",
-        "temperature": sampling.temperature,
-        "top_p": sampling.top_p,
-        "seed": sampling.seed,
-    }
-
-
-def _request_seed(sampling: SamplingConfig, request_index: int) -> int:
-    """Per-completion seed: same base run, independent draws across expanded GRPO requests."""
-    return sampling.seed + request_index
 
 
 def time_system(
@@ -114,37 +81,12 @@ def run_llm_infer(
     collect_profile: bool = False,
     enable_prefix_caching: bool = False,
 ) -> RunResult:
-    """This engine, flash backend, all requests in one paged cache under the batching loop.
-
-    Greedy by default; under ``workload.sampling`` each request carries its OWN SamplingParams
-    with a seed derived from the pinned base seed plus the request's index, so the ``G``
-    completions of a prompt are independent draws (a real GRPO group needs diverse rollouts, not
-    ``G`` identical ones), while every iteration still reproduces the same tokens (the same
-    derived seeds) — the median wall-clock measures equal work, not RNG drift. A shared seed
-    would seed every request's generator identically and collapse the group to one completion.
-    """
-    sampling = workload.sampling
+    """This engine, all requests in one paged cache under the batching loop."""
     profiles: list[dict[str, object]] = []
     baseline_prefill_tokens = sum(workload.prompt_lengths)
     shared_prefill_tokens = sum(
         len(prompt) for prompts in _prompt_groups(workload).values() for prompt in prompts
     )
-
-    def request_sampling(index: int) -> SamplingParams:
-        """This request's sampling: greedy when the workload is greedy, else its own seed.
-
-        The seed is ``base_seed + index`` so each request in the expanded ``prompts × G`` list
-        draws independently yet reproducibly. ``request.generator()`` seeds from the request's
-        own params, so the per-request seed (not a shared engine default) is what actually drives
-        each draw — that is the bug this closes.
-        """
-        if sampling is None:
-            return GREEDY
-        return SamplingParams(
-            temperature=sampling.temperature,
-            top_p=sampling.top_p,
-            seed=_request_seed(sampling, index),
-        )
 
     def decode_once(profiler: TimingProfiler | None = None) -> dict[str, list[int]]:
         engine = InferenceEngine(
@@ -154,7 +96,7 @@ def run_llm_infer(
             device=device,
             profiler=profiler,
         )
-        for index, req in enumerate(workload.requests):
+        for req in workload.requests:
             engine.add_request(
                 Request(
                     req.request_id,
@@ -162,7 +104,7 @@ def run_llm_infer(
                     workload.max_new_tokens,
                     workload.eos_token_ids,
                     prefix_group_id=req.case_id if enable_prefix_caching else None,
-                    sampling=request_sampling(index),
+                    sampling=GREEDY,
                 )
             )
         outputs = engine.run()
@@ -189,7 +131,7 @@ def run_llm_infer(
                 "reduction": baseline_prefill_tokens
                 - (shared_prefill_tokens if enable_prefix_caching else baseline_prefill_tokens),
             },
-            "sampling": _sampling_config(sampling),
+            "sampling": {"mode": "greedy", "temperature": 0.0},
             "profile": collect_profile,
         },
     )
@@ -209,200 +151,3 @@ def _prompt_groups(workload: Workload) -> dict[str, set[tuple[int, ...]]]:
     for req in workload.requests:
         groups.setdefault(req.case_id, set()).add(req.prompt_ids)
     return groups
-
-
-def run_hf_sequential(
-    hf_model: object,
-    workload: Workload,
-    *,
-    warmup: int,
-    iters: int,
-    device: str = "cuda",
-) -> RunResult:
-    """Naive baseline (the floor): HF ``generate()`` once per request, sequentially.
-
-    Greedy by default; under ``workload.sampling`` it samples with the pinned temperature/
-    top-p and re-seeds (``set_seed``) with a **per-completion seed** (base_seed + index) before
-    each request, so the G completions of a prompt are independent draws (not G identical copies)
-    yet every iteration reproduces the same tokens. Same per-completion policy as llm_infer/vLLM.
-    """
-    eos = sorted(workload.eos_token_ids)
-    sampling = workload.sampling
-    gen_kwargs: dict[str, object] = {
-        "max_new_tokens": workload.max_new_tokens,
-        "num_beams": 1,
-        "eos_token_id": eos,
-        "pad_token_id": eos[0],
-    }
-    if sampling is None:
-        gen_kwargs["do_sample"] = False
-    else:
-        gen_kwargs.update(do_sample=True, temperature=sampling.temperature, top_p=sampling.top_p)
-
-    def decode_once() -> dict[str, list[int]]:
-        if sampling is not None:
-            from transformers import set_seed
-        outputs: dict[str, list[int]] = {}
-        for index, req in enumerate(workload.requests):
-            if sampling is not None:
-                set_seed(_request_seed(sampling, index))
-            input_ids = torch.tensor([req.prompt_ids], device=device)
-            gen = hf_model.generate(input_ids, **gen_kwargs)
-            outputs[req.request_id] = gen[0, input_ids.shape[1] :].tolist()
-        return outputs
-
-    return time_system(
-        "hf_sequential",
-        decode_once,
-        warmup=warmup,
-        iters=iters,
-        config={
-            "method": "per-request model.generate()",
-            "attn_implementation": getattr(hf_model.config, "_attn_implementation", "unknown"),
-            "dtype": str(next(hf_model.parameters()).dtype),
-            "sampling": _sampling_config(sampling),
-        },
-    )
-
-
-def run_hf_batched(
-    hf_model: object,
-    workload: Workload,
-    *,
-    warmup: int,
-    iters: int,
-    device: str = "cuda",
-) -> RunResult:
-    """Stronger HF reference: one left-padded batched ``generate()`` over all requests."""
-    eos = sorted(workload.eos_token_ids)
-    pad_id = eos[0]
-    max_len = max(workload.prompt_lengths)
-    # Left-pad so every prompt's last real token sits at the same column — generation
-    # continues from there for every row, and an attention mask hides the pad.
-    input_rows, mask_rows = [], []
-    for req in workload.requests:
-        pad = max_len - len(req.prompt_ids)
-        input_rows.append([pad_id] * pad + list(req.prompt_ids))
-        mask_rows.append([0] * pad + [1] * len(req.prompt_ids))
-    input_ids = torch.tensor(input_rows, device=device)
-    attention_mask = torch.tensor(mask_rows, device=device)
-    ids_by_index = [req.request_id for req in workload.requests]
-
-    def decode_once() -> dict[str, list[int]]:
-        gen = hf_model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=workload.max_new_tokens,
-            do_sample=False,
-            num_beams=1,
-            eos_token_id=eos,
-            pad_token_id=pad_id,
-        )
-        continuations = gen[:, input_ids.shape[1] :]
-        return {ids_by_index[i]: continuations[i].tolist() for i in range(len(ids_by_index))}
-
-    return time_system(
-        "hf_batched",
-        decode_once,
-        warmup=warmup,
-        iters=iters,
-        config={
-            "method": "single left-padded batched model.generate()",
-            "attn_implementation": getattr(hf_model.config, "_attn_implementation", "unknown"),
-            "dtype": str(next(hf_model.parameters()).dtype),
-        },
-    )
-
-
-def run_vllm(
-    workload: Workload,
-    *,
-    warmup: int,
-    iters: int,
-    gpu_memory_utilization: float = 0.90,
-    max_num_seqs: int = 256,
-) -> RunResult:
-    """vLLM offline generate, bf16, prefix caching off, flags pinned and recorded.
-
-    Greedy on the base weights for the benchmark benchmark; the rollout passes the merged
-    grpo-s0 path as ``workload.model_id`` plus ``workload.sampling``. Either way vLLM runs
-    bf16 — the model's native dtype. The ``vllm`` import is local so the rest of the benchmark
-    loads on the flash image (which has no vLLM); this runner only runs on the vLLM image.
-    """
-    import vllm
-    from vllm import LLM, SamplingParams
-
-    sampling = workload.sampling
-    max_model_len = max(workload.prompt_lengths) + workload.max_new_tokens
-    llm = LLM(
-        model=workload.model_id,
-        revision=workload.model_revision,
-        dtype="bfloat16",
-        gpu_memory_utilization=gpu_memory_utilization,
-        enable_prefix_caching=False,
-        max_num_seqs=max_num_seqs,
-        max_model_len=max_model_len,
-        tensor_parallel_size=1,
-    )
-    # Greedy (benchmark) → temperature 0, one shared deterministic params. Rollout → the pinned
-    # temperature/top-p with a **per-completion seed** (base_seed + index): a *list* of params,
-    # one per prompt, so the G completions of a prompt are independent draws, not G identical
-    # copies under a single shared seed. n=1 because the G replication is already expanded into
-    # the workload's request list. This matches the llm_infer/HF per-completion seed policy;
-    # tokens still differ across systems (different RNGs) — only WITHIN a system are the G
-    # completions independent and reproducible.
-    if sampling is None:
-        request_params: SamplingParams | list[SamplingParams] = SamplingParams(
-            temperature=0.0,
-            max_tokens=workload.max_new_tokens,
-            n=1,
-            stop_token_ids=sorted(workload.eos_token_ids),
-            ignore_eos=False,
-        )
-    else:
-        request_params = [
-            SamplingParams(
-                temperature=sampling.temperature,
-                top_p=sampling.top_p,
-                seed=_request_seed(sampling, index),
-                max_tokens=workload.max_new_tokens,
-                n=1,
-                stop_token_ids=sorted(workload.eos_token_ids),
-                ignore_eos=False,
-            )
-            for index in range(len(workload.requests))
-        ]
-    prompts = [{"prompt_token_ids": list(req.prompt_ids)} for req in workload.requests]
-    ids_by_index = [req.request_id for req in workload.requests]
-
-    def decode_once() -> dict[str, list[int]]:
-        results = llm.generate(prompts, request_params, use_tqdm=False)
-        # Coerce to plain Python ints: vLLM token_ids can be tensor/array scalars, which pickle
-        # with a torch ref and fail to deserialize in the (torch-less) local `modal run` env.
-        return {
-            ids_by_index[i]: [int(t) for t in results[i].outputs[0].token_ids]
-            for i in range(len(results))
-        }
-
-    result = time_system(
-        "vllm",
-        decode_once,
-        warmup=warmup,
-        iters=iters,
-        config={
-            "version": vllm.__version__,
-            "enable_prefix_caching": False,
-            "gpu_memory_utilization": gpu_memory_utilization,
-            "max_num_seqs": max_num_seqs,
-            "max_model_len": max_model_len,
-            "dtype": "bfloat16",
-            "tensor_parallel_size": 1,
-            # Native sampler (VLLM_USE_FLASHINFER_SAMPLER=0, image env) — flashinfer's sampler
-            # JIT-needs nvcc; under temperature/top-p vLLM samples on this native path.
-            "sampler": "native-torch",
-            "attention_backend": "FLASH_ATTN (vLLM auto-selected, precompiled)",
-            "sampling": _sampling_config(sampling),
-            "model": workload.model_id,
-        },
-    )
-    return result

@@ -5,10 +5,11 @@ fast backend's greedy tokens must match the committed HF full-recompute golden
 token-for-token, EXCEPT at a genuine numerical tie. This module decides, for each
 divergence, whether it is such a tie — and refuses to wave anything else off.
 
-The mechanism mirrors the reference check divergence trace in docs/fixture-format.md. We walk
-the fast backend's greedy tokens against the golden and stop at the **first** step ``t``
-where they differ. Up to ``t`` the two sequences are identical, so the fast backend
-decoded step ``t`` from exactly the golden prefix; we recompute that step's logits with
+The mechanism mirrors the reference check divergence trace in
+``docs/internal/fixture-format.md``. We walk the fast backend's greedy tokens against the
+golden and stop at the **first** step ``t`` where they differ. Up to ``t`` the two sequences
+are identical, so the fast backend decoded step ``t`` from exactly the golden prefix; we
+recompute that step's logits with
 the trusted fp32 full-recompute oracle over ``prompt + golden[:t]``. Two outcomes:
 
 * Both the token the fast kernel chose AND the golden token are within ``tolerance`` of the

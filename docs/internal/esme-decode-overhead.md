@@ -108,8 +108,8 @@ configuration (host CPU not controllable):
 
 * Change 1: below 10% alone (noise-level) but near-zero complexity — kept.
 * Changes 2+4: ~0–3% alone; kept because they are the structural precondition for the
-  planned buffers (a stable batch with no per-token host boundary) and for any future CUDA
-  graph slice, and `decode_window_size=1` preserves the classic path exactly.
+  planned buffers (a stable batch with no per-token host boundary) and for CUDA graph
+  capture, and `decode_window_size=1` preserves the classic path exactly.
 * Change 3: +5–7% same-GPU, and it removes the batch-scaling Python (594k `physical_slot`
   calls/run at batch 128 → gone from the profile) — kept.
 * Change 5: unconditional, bit-identical, removes ~150 launches/step — kept.
@@ -124,12 +124,10 @@ flash varlen call x30. Note the profile harness's `wall_ms_per_step` now counts 
 *passes* (one pass = one whole window since change 4); use `decode_tokens_per_second` for
 comparisons.
 
-**Conclusion for the next slice:** the remaining decode wall is kernel-launch dispatch from
-~1,850 tiny kernels/step, roughly half CPU dispatch and half GPU launch-overhead execution.
-No further paged-KV/bookkeeping cut can move it much. The lever that fits is CUDA graph
-capture (or torch.compile) over the planned window step — explicitly out of scope for this
-slice, and the planned window (stable buffers, no per-step host work, no allocation in the
-read path except `masked_select`) was shaped to be capture-friendly.
+The remaining decode wall after this slice was kernel-launch dispatch from ~1,850 tiny
+kernels/step, roughly half CPU dispatch and half GPU launch-overhead execution. The current
+CUDA graph path that attacks that wall is documented in `decode-graph-capture.md` and
+`torch-compile-decode.md`.
 
 ## Headline (pinned three-way) and variance
 
@@ -147,10 +145,3 @@ Both new runs landed on slower hosts than the 2026-06-30 record (their own HF ba
 5.5x → 6.3–6.4x over naive HF. The equal-dtype flash gate
 (`modal run scripts/modal_esme_flash_reference_check.py --command check`) passed 8/8 exact
 on this branch.
-
-## Pre-existing issue noted, not fixed here
-
-`Request.record()` stores speculative-decode draft tokens as Python ints (CPU tensors)
-while prefill/decode tokens are device tensors; on CUDA, `Request.generated` would stack
-mixed devices and raise. Esme/Qwen speculative decoding is CPU-tested only today. Same
-shape as the bug fixed inside the window flush (which records device-tensor views).

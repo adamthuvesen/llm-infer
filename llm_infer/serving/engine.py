@@ -92,9 +92,7 @@ class InferenceEngine(
         self.preemption = preemption
         self.scheduler = Scheduler(num_blocks, block_size, preemption=preemption)
         # The fallback sampling for a request that carries no params of its own. Defaults to
-        # greedy (temperature 0, token-for-token the checked reference path); the
-        # rollout/benchmark
-        # path passes one seeded temperature/top-p SamplingParams that every request inherits.
+        # greedy (temperature 0, token-for-token the checked reference path).
         self.default_sampling = default_sampling or GREEDY
         self.profiler = profiler
         self.model.profiler = profiler
