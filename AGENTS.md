@@ -23,9 +23,10 @@ numerical tie and documented.
   engine prefill/decode and scheduler path, with prefix caching, speculative decode, and
   preemption all checked for parity. `PretrainBundleModel.logits()` stays the full-recompute
   reference for the paged path: exact greedy-token parity on the real bundle, with cached logits
-  within documented fp32 BLAS reduction-order noise and well below any decision margin. Flash-attn
-  is off by default because the bundle uses the `torch_naive` backend. See `BackendCapabilities`
-  in `llm_infer/model/interface.py`.
+  within documented fp32 BLAS reduction-order noise and well below any decision margin. On CUDA
+  fp16/bf16 bundles `auto` selects `FlashInferPagedAttention` for batched decode (see
+  `_resolve_attention_backend` in `llm_infer/model/runtime.py`); `torch_naive` stays the fp32/CPU
+  reference oracle. See `BackendCapabilities` in `llm_infer/model/interface.py`.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs/examples
   use `esme`.
 - `qwen`: independent HF reference backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision

@@ -5,37 +5,37 @@
       "batch_size": 8,
       "matches_reference": true,
       "agreement": {
-        "exact": 1,
-        "tie": 7,
+        "exact": 5,
+        "tie": 3,
         "nontie": 0,
         "total": 8,
         "ties_sample": [
           {
-            "request": "esme-000",
-            "step": 80,
-            "gap": 0.046276092529296875
+            "request": "esme-004",
+            "step": 54,
+            "gap": 0.012372016906738281
           },
           {
-            "request": "esme-001",
-            "step": 22,
-            "gap": 0.011902451515197754
+            "request": "esme-005",
+            "step": 66,
+            "gap": 0.0015833377838134766
           },
           {
-            "request": "esme-002",
-            "step": 114,
-            "gap": 0.04799365997314453
+            "request": "esme-006",
+            "step": 61,
+            "gap": 0.0003952980041503906
           }
         ],
         "divergences_sample": []
       },
-      "median_seconds": 6.275889532999997,
+      "median_seconds": 1.9177270280000016,
       "per_iter_seconds": [
-        6.270812815999999,
-        6.275889532999997,
-        6.448894694999996
+        1.9180372730000101,
+        1.9162106980000004,
+        1.9177270280000016
       ],
-      "total_output_tokens": 1293,
-      "tokens_per_second": 206.02657092689788,
+      "total_output_tokens": 1263,
+      "tokens_per_second": 658.5921674771322,
       "kv_pool": {
         "block_size": 128,
         "num_blocks": 32,
@@ -49,15 +49,15 @@
       "batch_size": 16,
       "matches_reference": true,
       "agreement": {
-        "exact": 6,
-        "tie": 10,
+        "exact": 4,
+        "tie": 12,
         "nontie": 0,
         "total": 16,
         "ties_sample": [
           {
-            "request": "esme-000",
-            "step": 80,
-            "gap": 0.046276092529296875
+            "request": "esme-001",
+            "step": 14,
+            "gap": 0.01624274253845215
           },
           {
             "request": "esme-002",
@@ -66,20 +66,20 @@
           },
           {
             "request": "esme-004",
-            "step": 54,
-            "gap": 0.012372016906738281
+            "step": 179,
+            "gap": 0.022967100143432617
           }
         ],
         "divergences_sample": []
       },
-      "median_seconds": 6.588933827999995,
+      "median_seconds": 2.2578513460000096,
       "per_iter_seconds": [
-        6.610641435000005,
-        6.502093904999995,
-        6.588933827999995
+        2.2433473899999967,
+        2.2723835809999997,
+        2.2578513460000096
       ],
-      "total_output_tokens": 2558,
-      "tokens_per_second": 388.2266944508768,
+      "total_output_tokens": 2574,
+      "tokens_per_second": 1140.0219082447907,
       "kv_pool": {
         "block_size": 128,
         "num_blocks": 64,
@@ -93,8 +93,8 @@
       "batch_size": 32,
       "matches_reference": true,
       "agreement": {
-        "exact": 16,
-        "tie": 16,
+        "exact": 8,
+        "tie": 24,
         "nontie": 0,
         "total": 32,
         "ties_sample": [
@@ -104,26 +104,26 @@
             "gap": 0.046276092529296875
           },
           {
+            "request": "esme-001",
+            "step": 22,
+            "gap": 0.011902451515197754
+          },
+          {
             "request": "esme-004",
             "step": 54,
             "gap": 0.012372016906738281
-          },
-          {
-            "request": "esme-005",
-            "step": 66,
-            "gap": 0.0015833377838134766
           }
         ],
         "divergences_sample": []
       },
-      "median_seconds": 7.043518448,
+      "median_seconds": 2.7946757299999945,
       "per_iter_seconds": [
-        7.043518448,
-        7.122339863999997,
-        6.821561923999994
+        2.7946757299999945,
+        2.7934772779999975,
+        2.796033523999995
       ],
-      "total_output_tokens": 5072,
-      "tokens_per_second": 720.0946568742486,
+      "total_output_tokens": 5156,
+      "tokens_per_second": 1844.936764810281,
       "kv_pool": {
         "block_size": 128,
         "num_blocks": 128,
@@ -137,8 +137,8 @@
       "batch_size": 64,
       "matches_reference": true,
       "agreement": {
-        "exact": 32,
-        "tie": 32,
+        "exact": 16,
+        "tie": 48,
         "nontie": 0,
         "total": 64,
         "ties_sample": [
@@ -146,6 +146,94 @@
             "request": "esme-000",
             "step": 80,
             "gap": 0.046276092529296875
+          },
+          {
+            "request": "esme-001",
+            "step": 22,
+            "gap": 0.011902451515197754
+          },
+          {
+            "request": "esme-004",
+            "step": 54,
+            "gap": 0.012372016906738281
+          }
+        ],
+        "divergences_sample": []
+      },
+      "median_seconds": 3.9579710689999956,
+      "per_iter_seconds": [
+        3.9579710689999956,
+        3.963553305000005,
+        3.9236242469999922
+      ],
+      "total_output_tokens": 10304,
+      "tokens_per_second": 2603.3540469014506,
+      "kv_pool": {
+        "block_size": 128,
+        "num_blocks": 256,
+        "peak_used_blocks": 96,
+        "peak_kv_bytes": 377487360,
+        "kv_bytes_per_token": 30720
+      }
+    },
+    {
+      "system": "llm_infer",
+      "batch_size": 128,
+      "matches_reference": true,
+      "agreement": {
+        "exact": 64,
+        "tie": 64,
+        "nontie": 0,
+        "total": 128,
+        "ties_sample": [
+          {
+            "request": "esme-001",
+            "step": 22,
+            "gap": 0.011902451515197754
+          },
+          {
+            "request": "esme-002",
+            "step": 113,
+            "gap": 0.03024768829345703
+          },
+          {
+            "request": "esme-004",
+            "step": 54,
+            "gap": 0.012372016906738281
+          }
+        ],
+        "divergences_sample": []
+      },
+      "median_seconds": 6.276980546999994,
+      "per_iter_seconds": [
+        6.257269653999998,
+        6.276980546999994,
+        6.61175000099999
+      ],
+      "total_output_tokens": 20560,
+      "tokens_per_second": 3275.460206711394,
+      "kv_pool": {
+        "block_size": 128,
+        "num_blocks": 512,
+        "peak_used_blocks": 192,
+        "peak_kv_bytes": 754974720,
+        "kv_bytes_per_token": 30720
+      }
+    },
+    {
+      "system": "llm_infer",
+      "batch_size": 256,
+      "matches_reference": true,
+      "agreement": {
+        "exact": 96,
+        "tie": 160,
+        "nontie": 0,
+        "total": 256,
+        "ties_sample": [
+          {
+            "request": "esme-001",
+            "step": 22,
+            "gap": 0.011902451515197754
           },
           {
             "request": "esme-004",
@@ -160,102 +248,14 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 8.798099011999994,
+      "median_seconds": 10.853638474000007,
       "per_iter_seconds": [
-        9.072728117999986,
-        8.798099011999994,
-        8.507221798000018
+        10.88616003300001,
+        10.694431750000007,
+        10.853638474000007
       ],
-      "total_output_tokens": 10144,
-      "tokens_per_second": 1152.9763402485344,
-      "kv_pool": {
-        "block_size": 128,
-        "num_blocks": 256,
-        "peak_used_blocks": 96,
-        "peak_kv_bytes": 377487360,
-        "kv_bytes_per_token": 30720
-      }
-    },
-    {
-      "system": "llm_infer",
-      "batch_size": 128,
-      "matches_reference": true,
-      "agreement": {
-        "exact": 32,
-        "tie": 96,
-        "nontie": 0,
-        "total": 128,
-        "ties_sample": [
-          {
-            "request": "esme-000",
-            "step": 80,
-            "gap": 0.046276092529296875
-          },
-          {
-            "request": "esme-001",
-            "step": 22,
-            "gap": 0.011902451515197754
-          },
-          {
-            "request": "esme-004",
-            "step": 102,
-            "gap": 0.01659226417541504
-          }
-        ],
-        "divergences_sample": []
-      },
-      "median_seconds": 10.879735068999992,
-      "per_iter_seconds": [
-        10.879735068999992,
-        10.64994614599999,
-        11.098162115999997
-      ],
-      "total_output_tokens": 20768,
-      "tokens_per_second": 1908.870010922875,
-      "kv_pool": {
-        "block_size": 128,
-        "num_blocks": 512,
-        "peak_used_blocks": 192,
-        "peak_kv_bytes": 754974720,
-        "kv_bytes_per_token": 30720
-      }
-    },
-    {
-      "system": "llm_infer",
-      "batch_size": 256,
-      "matches_reference": true,
-      "agreement": {
-        "exact": 64,
-        "tie": 192,
-        "nontie": 0,
-        "total": 256,
-        "ties_sample": [
-          {
-            "request": "esme-000",
-            "step": 80,
-            "gap": 0.046276092529296875
-          },
-          {
-            "request": "esme-001",
-            "step": 22,
-            "gap": 0.011902451515197754
-          },
-          {
-            "request": "esme-002",
-            "step": 113,
-            "gap": 0.03024768829345703
-          }
-        ],
-        "divergences_sample": []
-      },
-      "median_seconds": 15.077437104000012,
-      "per_iter_seconds": [
-        15.15161569,
-        15.077437104000012,
-        14.542127499999992
-      ],
-      "total_output_tokens": 41440,
-      "tokens_per_second": 2748.477722981584,
+      "total_output_tokens": 40992,
+      "tokens_per_second": 3776.797992507003,
       "kv_pool": {
         "block_size": 128,
         "num_blocks": 1024,
@@ -292,14 +292,14 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 27.252664578999998,
+      "median_seconds": 33.094661514999984,
       "per_iter_seconds": [
-        27.734768062,
-        27.112415071999976,
-        27.252664578999998
+        33.08213863100002,
+        33.10546953700003,
+        33.094661514999984
       ],
       "total_output_tokens": 1304,
-      "tokens_per_second": 47.84853224975364,
+      "tokens_per_second": 39.402125306795135,
       "flatness_check": false
     },
     {
@@ -330,12 +330,12 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 58.72905222200001,
+      "median_seconds": 65.81927181000003,
       "per_iter_seconds": [
-        58.72905222200001
+        65.81927181000003
       ],
       "total_output_tokens": 2608,
-      "tokens_per_second": 44.40732314462651,
+      "tokens_per_second": 39.623653198845666,
       "flatness_check": true
     },
     {
@@ -366,12 +366,12 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 114.49545522099999,
+      "median_seconds": 131.32759713999997,
       "per_iter_seconds": [
-        114.49545522099999
+        131.32759713999997
       ],
       "total_output_tokens": 5216,
-      "tokens_per_second": 45.55639339510933,
+      "tokens_per_second": 39.717470764652425,
       "flatness_check": true
     },
     {
@@ -402,12 +402,12 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 240.08893689700005,
+      "median_seconds": 265.15477511899996,
       "per_iter_seconds": [
-        240.08893689700005
+        265.15477511899996
       ],
       "total_output_tokens": 10432,
-      "tokens_per_second": 43.45056517316917,
+      "tokens_per_second": 39.3430591446757,
       "flatness_check": true
     },
     {
@@ -438,12 +438,12 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 464.4947989210001,
+      "median_seconds": 528.273116161,
       "per_iter_seconds": [
-        464.4947989210001
+        528.273116161
       ],
       "total_output_tokens": 20864,
-      "tokens_per_second": 44.91761812719132,
+      "tokens_per_second": 39.49472225961495,
       "flatness_check": true
     },
     {
@@ -474,12 +474,12 @@
         ],
         "divergences_sample": []
       },
-      "median_seconds": 919.0930608619999,
+      "median_seconds": 1057.4932033189998,
       "per_iter_seconds": [
-        919.0930608619999
+        1057.4932033189998
       ],
       "total_output_tokens": 41728,
-      "tokens_per_second": 45.40127847430825,
+      "tokens_per_second": 39.459355264917455,
       "flatness_check": true
     }
   ],
@@ -527,12 +527,26 @@
       "kv_bytes_per_token": 30720
     }
   },
+  "decode_graphs": {
+    "capture_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128,
+      256
+    ],
+    "capture_s": 37.7336282
+  },
   "gpu": {
     "sweep_container": {
-      "name": "NVIDIA A100-SXM4-80GB",
+      "name": "NVIDIA A100 80GB PCIe",
       "clocks_sm": "1410 MHz",
       "clocks_max_sm": "1410 MHz",
-      "power_limit": "500.00 W",
+      "power_limit": "300.00 W",
       "memory_total": "81920 MiB"
     },
     "vllm_container": null
@@ -540,7 +554,7 @@
   "versions": {
     "torch": "2.8.0+cu128",
     "cuda": "12.8",
-    "transformers": "5.12.1",
+    "transformers": "5.13.0",
     "flash_attn": "2.8.3.post1",
     "vllm": "absent",
     "numpy": "2.4.6"
@@ -553,6 +567,7 @@
     "warmup": 1,
     "iters": 3,
     "block_size": 128,
+    "attention_backend": "FlashInferPagedAttention",
     "vllm": {
       "skipped": true
     },
