@@ -101,8 +101,8 @@ Per-request HTTP controls:
 
 ## What the harness demonstrates
 
-Local CPU runs of the full workload set (last verified `2026-06-30`, before the decode
-window became the engine default — absolute latencies from that run are not current) show
+Local CPU runs of the full workload set (last checked `2026-06-30`, before the decode
+window became the engine default, so absolute latencies from that run are not current) show
 the public serving path can force and count real preemptions, preserve reference
 agreement, expose prefix caching, distinguish reference-gated rows from sampled rows, and
 report queue time, stream token counts, and KV utilization. The published per-technique

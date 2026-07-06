@@ -1,18 +1,18 @@
 # llm-infer
 
-`llm-infer` is a small Python inference engine for learning, research, and measurement. The
-goal is to make real serving techniques easy to inspect, to check outputs before making speed
-claims, and to state the limits. This is not a production server or an attempt to match mature inference
-engines.
+`llm-infer` is a small Python inference engine for learning, research, and measurement.
+It makes real serving techniques easy to inspect, checks outputs before making speed
+claims, and names the limits. Production serving and parity with mature inference
+engines are not project goals.
 
 It owns the runtime path: model forward pass, paged KV cache, scheduler, sampler, serving
 loop, benchmark harness, and trace output. It consumes export bundles from
 [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain) and
 [`esme-posttrain`](https://github.com/adamthuvesen/esme-posttrain).
 
-`Esme-214M-Chat` is the default model throughout the docs. Naive HuggingFace generation is
-the external baseline speed is measured against; Qwen2.5-Coder is the independent HuggingFace
-reference for catching correctness regressions.
+`Esme-214M-Chat` is the default model throughout the docs. Speed is measured against
+naive HuggingFace generation. Qwen2.5-Coder is the independent HuggingFace reference
+for catching correctness regressions.
 
 The core rule: every speed claim must first match a known-good reference output on
 the same prompt and model. Experimental paths stay labeled experimental until they pass that
@@ -113,7 +113,7 @@ EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
 A system reports tok/s only after its tokens match the fp32 `PretrainBundleModel.logits()`
 reference, with traced numerical ties the only allowed difference.
 
-Headline — `2026-07-02`, A100-80GB, **64 concurrent chat requests x up to 256 new
+Headline: `2026-07-02`, A100-80GB, **64 concurrent chat requests x up to 256 new
 tokens** (a realistic small-service load, within Esme's 1024-token context), greedy,
 median of 3 iterations:
 

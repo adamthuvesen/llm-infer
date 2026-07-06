@@ -17,10 +17,9 @@ The repo implements a from-scratch paged inference engine with a generic model r
 - Replayable KV-cache traces.
 - Esme benchmarks against naive HF through a converted HF checkpoint.
 
-The claim is not production serving, and not competing with mature serving engines. The
-claim is systems evidence:
-serving techniques made legible, speed claims checked against known-good outputs, and measured
-limits named plainly.
+The repo claims systems evidence: serving techniques made legible, speed claims checked
+against known-good outputs, and measured limits named plainly. Production readiness and
+parity with mature serving engines are not project goals.
 
 ## Reference Before Speed
 
