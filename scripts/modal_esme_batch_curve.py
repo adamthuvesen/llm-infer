@@ -37,7 +37,12 @@ from scripts.modal_esme_bundle import (
     local_bundle_path,
     stage_bundle,
 )
-from scripts.modal_flash_image import FLASH_IMAGE, IGNORE, REMOTE_ROOT, REPO_ROOT
+from scripts.modal_flash_image import (
+    FLASH_IMAGE,
+    IGNORE,
+    REMOTE_ROOT,
+    REPO_ROOT,
+)
 
 ESME_HF_DIR = "esme-214m-chat-hf"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
@@ -165,7 +170,6 @@ def sweep(
         tie_tolerant_agreement,
     )
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
-    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
@@ -176,18 +180,20 @@ def sweep(
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    flash_runtime = load_model_runtime(
+    engine_runtime = load_model_runtime(
         "esme",
         bundle_path=Path(REMOTE_BUNDLE_PATH),
         dtype=torch.bfloat16,
         device="cuda",
-        attention_backend=FlashAttnPagedAttention(),
     )
     eos = oracle_runtime.eos_token_ids
     # The llm_infer rows run what serving runs: decode-window CUDA graphs, captured once up
     # front so no capture cost lands inside a timed iteration. The oracle stays eager fp32.
-    capture_s = enable_decode_graphs_if_cuda(flash_runtime.model, CAPTURE_SIZES)
-    print(f"[curve] decode graphs: captured {CAPTURE_SIZES} in {capture_s:.1f} s")
+    capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
+    print(
+        f"[curve] {type(engine_runtime.model.backend).__name__}: "
+        f"captured {CAPTURE_SIZES} in {capture_s:.1f} s"
+    )
 
     # fp32 oracle greedy decode once per unique prompt, shared by every row in this record.
     reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
@@ -235,7 +241,7 @@ def sweep(
     # captured buckets).
     kv_evidence: dict[str, object] = {}
     for size in llm_infer_batches:
-        requests = build_requests(flash_runtime.tokenizer, size, HEADLINE_PROMPTS)
+        requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         needed = sum(
             math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
         )
@@ -246,11 +252,11 @@ def sweep(
             requests=requests, num_blocks=num_blocks, peak=peak
         ) -> dict[str, list[int]]:
             engine = InferenceEngine(
-                flash_runtime.model,
+                engine_runtime.model,
                 block_size=BLOCK_SIZE,
                 num_blocks=num_blocks,
                 device="cuda",
-                capabilities=flash_runtime.capabilities,
+                capabilities=engine_runtime.capabilities,
             )
             engine.cache.allocator.observer = peak
             for req in requests:
@@ -272,7 +278,7 @@ def sweep(
             per_iter.append(time.perf_counter() - start)
 
         row = gated_row("llm_infer", size, requests, outputs, per_iter)
-        model = flash_runtime.model
+        model = engine_runtime.model
         kv_bytes_per_token = (
             model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
         )
@@ -295,7 +301,7 @@ def sweep(
     # HF floor rows, same container: full protocol at the first size, flatness checks after.
     for spec in hf_specs:
         size, hf_iters = spec
-        requests = build_requests(flash_runtime.tokenizer, size, HEADLINE_PROMPTS)
+        requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         decode_once = run_hf_sequential_esme(
             Path(REMOTE_HF_PATH),
             requests,
@@ -328,7 +334,7 @@ def sweep(
     # same oracle so a diverging ceiling row reports no tok/s either.
     for vllm_row in vllm_rows:
         size = vllm_row["batch_size"]
-        requests = build_requests(flash_runtime.tokenizer, size, HEADLINE_PROMPTS)
+        requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         outputs = {k: normalize_at_eos(v, eos) for k, v in vllm_row["outputs"].items()}
         row = gated_row("vllm", size, requests, outputs, [float(vllm_row["median_seconds"])])
         row["separate_container"] = True
@@ -344,6 +350,188 @@ def sweep(
             "rows": rows,
             "kv_evidence": kv_evidence,
             "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
+            "attention_backend": type(engine_runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=2 * 60 * 60,
+)
+def sweep_flashinfer_compare(
+    batch_sizes: list[int],
+    max_new_tokens: int,
+    warmup: int,
+    iters: int,
+) -> str:
+    """Headline workload A/B: current llm_infer graph path vs FlashInfer paged decode."""
+    import math
+    import statistics
+
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.report import total_output_tokens
+    from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+    from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    runtimes = [
+        (
+            "llm_infer",
+            load_model_runtime(
+                "esme",
+                bundle_path=Path(REMOTE_BUNDLE_PATH),
+                dtype=torch.bfloat16,
+                device="cuda",
+                attention_backend=FlashAttnPagedAttention(),
+            ),
+        ),
+        (
+            "llm_infer_flashinfer_paged",
+            load_model_runtime(
+                "esme",
+                bundle_path=Path(REMOTE_BUNDLE_PATH),
+                dtype=torch.bfloat16,
+                device="cuda",
+                attention_backend=FlashInferPagedAttention(),
+            ),
+        ),
+    ]
+    graph_captures: dict[str, float | None] = {}
+    for system, runtime in runtimes:
+        capture_s = enable_decode_graphs_if_cuda(runtime.model, CAPTURE_SIZES)
+        graph_captures[system] = capture_s
+        print(f"[flashinfer-curve] {system}: captured {CAPTURE_SIZES} in {capture_s:.1f} s")
+
+    eos = oracle_runtime.eos_token_ids
+    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
+
+    def reference_for(requests) -> dict[str, list[int]]:
+        for req in requests:
+            if req.prompt_ids not in reference_by_prompt:
+                reference_by_prompt[req.prompt_ids] = greedy_decode(
+                    oracle_runtime.model,
+                    list(req.prompt_ids),
+                    max_new_tokens=max_new_tokens,
+                    eos_token_ids=set(eos),
+                )
+        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+
+    def gated_row(
+        system: str, size: int, runtime, requests, outputs, per_iter: list[float]
+    ) -> dict:
+        reference = reference_for(requests)
+        agreement = tie_tolerant_agreement(
+            oracle_runtime.model, requests, outputs, reference, eos
+        )
+        tokens = total_output_tokens(outputs, eos)
+        median_s = statistics.median(per_iter)
+        model = runtime.model
+        kv_bytes_per_token = (
+            model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
+        )
+        return {
+            "system": system,
+            "batch_size": size,
+            "matches_reference": agreement.all_ties_or_exact,
+            "agreement": {
+                "exact": agreement.exact,
+                "tie": agreement.tie,
+                "nontie": agreement.nontie,
+                "total": agreement.total,
+                "ties_sample": agreement.ties_sample,
+                "divergences_sample": agreement.divergences_sample,
+            },
+            "median_seconds": median_s,
+            "per_iter_seconds": per_iter,
+            "total_output_tokens": tokens,
+            "tokens_per_second": (
+                tokens / median_s if agreement.all_ties_or_exact and median_s > 0 else None
+            ),
+            "kv_bytes_per_token": kv_bytes_per_token,
+        }
+
+    rows: list[dict] = []
+    for size in batch_sizes:
+        for system, runtime in runtimes:
+            requests = build_requests(runtime.tokenizer, size, HEADLINE_PROMPTS)
+            needed = sum(
+                math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE)
+                for req in requests
+            )
+            num_blocks = needed + max(4, len(requests))
+            peak = _PeakBlocks()
+
+            def decode_once(
+                runtime=runtime,
+                requests=requests,
+                num_blocks=num_blocks,
+                peak=peak,
+            ) -> dict[str, list[int]]:
+                engine = InferenceEngine(
+                    runtime.model,
+                    block_size=BLOCK_SIZE,
+                    num_blocks=num_blocks,
+                    device="cuda",
+                    capabilities=runtime.capabilities,
+                )
+                engine.cache.allocator.observer = peak
+                for req in requests:
+                    engine.add_request(
+                        Request(req.request_id, list(req.prompt_ids), max_new_tokens, eos)
+                    )
+                return engine.run()
+
+            for _ in range(warmup):
+                decode_once()
+                torch.cuda.synchronize()
+            per_iter: list[float] = []
+            outputs: dict[str, list[int]] = {}
+            for _ in range(iters):
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                outputs = decode_once()
+                torch.cuda.synchronize()
+                per_iter.append(time.perf_counter() - start)
+
+            row = gated_row(system, size, runtime, requests, outputs, per_iter)
+            row["kv_pool"] = {
+                "block_size": BLOCK_SIZE,
+                "num_blocks": num_blocks,
+                "peak_used_blocks": peak.peak,
+                "peak_kv_bytes": peak.peak * BLOCK_SIZE * row["kv_bytes_per_token"],
+            }
+            rows.append(row)
+            tps = row["tokens_per_second"]
+            print(
+                f"[flashinfer-curve] batch={size} | {system}: "
+                f"median {row['median_seconds']:.3f} s, "
+                f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}, "
+                f"agreement exact/tie/nontie "
+                f"{row['agreement']['exact']}/{row['agreement']['tie']}/"
+                f"{row['agreement']['nontie']}"
+            )
+
+    return json.dumps(
+        {
+            "rows": rows,
+            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": graph_captures},
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
         }
@@ -363,11 +551,63 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         hf_specs = [[8, 3], [16, 1], [32, 1], [64, 1], [128, 1], [256, 1]]
         vllm_batches = [8, 64, 256]
         max_new_tokens, warmup, iters = 256, 1, 3
+    elif command == "flashinfer-smoke":
+        llm_infer_batches = [8]
+        hf_specs = []
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 16, 1, 1
+    elif command == "flashinfer-curve":
+        llm_infer_batches = [8, 16, 32, 64, 128, 256]
+        hf_specs = []
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 256, 1, 3
     else:
-        raise ValueError(f"command must be 'smoke' or 'curve', got {command!r}")
+        raise ValueError(
+            "command must be 'smoke', 'curve', 'flashinfer-smoke', "
+            f"or 'flashinfer-curve', got {command!r}"
+        )
 
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-curve")
+    if command.startswith("flashinfer-"):
+        print(f"[esme-curve] flashinfer compare: llm_infer {llm_infer_batches}")
+        sweep_res = json.loads(
+            sweep_flashinfer_compare.remote(
+                llm_infer_batches, max_new_tokens, warmup, iters
+            )
+        )
+        record = {
+            "rows": sweep_res["rows"],
+            "decode_graphs": sweep_res["decode_graphs"],
+            "gpu": {"sweep_container": sweep_res["gpu"], "vllm_container": None},
+            "versions": sweep_res["versions"],
+            "config": {
+                "command": command,
+                "model": "Esme-214M-Chat",
+                "prompt_pool": "headline",
+                "max_new_tokens": max_new_tokens,
+                "warmup": warmup,
+                "iters": iters,
+                "block_size": BLOCK_SIZE,
+                "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
+                "same_container": {
+                    "llm_infer_and_flashinfer": True,
+                    "hf": False,
+                    "vllm": False,
+                },
+                "repro_command": (
+                    f"modal run scripts/modal_esme_batch_curve.py --command {command}"
+                ),
+            },
+        }
+        out_dir = REPO_ROOT / "bench-results"
+        out_dir.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        out_path = out_dir / f"esme-batch-curve-{command}-{stamp}.json"
+        out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        print(f"[esme-curve] wrote {out_path}")
+        return
+
     print("[esme-curve] converting bundle -> HF Qwen3 checkpoint (remote) ...")
     print(f"[esme-curve] {convert_bundle_to_hf.remote()}")
 
@@ -398,6 +638,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
             "warmup": warmup,
             "iters": iters,
             "block_size": BLOCK_SIZE,
+            "attention_backend": sweep_res.get("attention_backend"),
             "vllm": vllm_res["config"],
             "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
             "same_container": {
