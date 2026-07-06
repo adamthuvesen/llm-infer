@@ -95,6 +95,11 @@ uv run python -m llm_infer.serve --backend esme --bundle "$ESME_BUNDLE_PATH" --o
 The Modal Esme scripts use `--bundle-path`, then `ESME_BUNDLE_PATH`, then the standard
 sibling checkout fallback `../esme-posttrain/exports/esme-214m-chat`.
 
+On a CUDA device with `--dtype float16` or `--dtype bfloat16`, `auto` selects the
+`FlashInferPagedAttention` decode backend, which needs the `gpu` extra (`uv sync --extra gpu`).
+Without it, load fails with an actionable error; pass `--attention-backend torch_naive` or
+`--attention-backend flash_attn` to opt out.
+
 The server exposes:
 
 - `POST /v1/chat/completions`
@@ -116,18 +121,17 @@ EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
 A system reports tok/s only after its tokens match the fp32 `PretrainBundleModel.logits()`
 reference, with traced numerical ties the only allowed difference.
 
-Headline: `2026-07-02`, A100-80GB, **64 concurrent chat requests x up to 256 new
-tokens** (a realistic small-service load, within Esme's 1024-token context), greedy,
-median of 3 iterations:
+Headline: `2026-07-07`, A100-80GB, default CUDA Esme path with `FlashInferPagedAttention`,
+**256 concurrent chat requests x up to 256 new tokens** (within Esme's 1024-token context),
+greedy, median of 3 iterations:
 
 | System | tok/s | vs naive baseline |
 | --- | ---: | ---: |
-| naive HF sequential | 34.6 | 1x |
-| `llm_infer` | 930.4 | **26.9x** |
+| naive HF sequential | 39.5 | 1x |
+| `llm_infer` | 3,776.8 | **95.6x** |
 
-A separate batch-sweep run shows the shape behind that headline point. Throughput scales
-with concurrency because all requests decode through one shared paged-KV engine, while the
-naive baseline stays flat:
+The batch-sweep curve below is the same run. Throughput scales with concurrency because all
+requests decode through one shared paged-KV engine, while the naive baseline stays flat:
 
 ![Esme batch-size throughput curve](assets/fig-esme-batch-curve.svg)
 

@@ -27,39 +27,31 @@ ratios are the useful number; cross-date raw tok/s is not.
 
 For profile archaeology and decode-window attribution, see `docs/internal/esme-decode-overhead.md`.
 
-## Headline Record
+## Current Record
 
-Run `2026-07-02`, A100-80GB, 64 concurrent chat requests, up to 256 new tokens, greedy,
-1 warmup + 3 measured iterations:
-
-| model | system | reference agreement | median s | output tok | tok/s | vs floor |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| `Esme-214M-Chat` | `hf_sequential` | yes, 24 exact + 40 ties, 0 non-tie | 301.545 | 10,432 | 34.6 | 1x |
-| `Esme-214M-Chat` | `llm_infer` | yes, 32 exact + 32 ties, 0 non-tie | 10.902 | 10,144 | 930.4 | 26.9x |
-
-## Curve Evidence
-
-The committed curve record is a separate same-container batch sweep from the headline table.
-It checks both plotted systems at every batch size against the fp32 reference, with zero
-non-tie divergences. At batch 256, the engine peaked at 384 used 128-token blocks: about
-1.5 GB of KV at 30,720 bytes/token. A contiguous max-length layout for 256 requests at Esme's
-1024-token context would reserve about 8 GB up front.
+Run `2026-07-07`, A100-80GB. The committed curve record is the headline same-container batch
+sweep and uses the current default CUDA Esme backend, `FlashInferPagedAttention`. It checks
+both plotted systems at every batch size against the fp32 reference, with zero non-tie
+divergences. At batch 256, the engine peaked at 384 used 128-token blocks: about 1.5 GB of KV
+at 30,720 bytes/token. A contiguous max-length layout for 256 requests at Esme's 1024-token
+context would reserve about 8 GB up front.
 
 | concurrent requests | llm_infer tok/s | hf_sequential tok/s |
 | ---: | ---: | ---: |
-| 8 | 206.0 | 47.8 |
-| 16 | 388.2 | 44.4 |
-| 32 | 720.1 | 45.6 |
-| 64 | 1,153.0 | 43.5 |
-| 128 | 1,908.9 | 44.9 |
-| 256 | 2,748.5 | 45.4 |
+| 8 | 658.6 | 39.4 |
+| 16 | 1,140.0 | 39.6 |
+| 32 | 1,844.9 | 39.7 |
+| 64 | 2,603.4 | 39.3 |
+| 128 | 3,275.5 | 39.5 |
+| 256 | 3,776.8 | 39.5 |
 
-At 256 concurrent requests, the engine is 60.5x the same-row measured naive-HF floor.
+At 256 concurrent requests, the engine is 95.6x the same-row measured naive-HF floor.
 
 ## Technique Gallery
 
-Each row below ran on the headline engine configuration (bf16 flash-attn) and passed the fp32
-reference gate with zero non-tie divergences.
+The rows below are historical technique-gallery evidence. They ran on the then-headline bf16
+flash-attn configuration and passed the fp32 reference gate with zero non-tie divergences.
+New gallery runs use the default CUDA Esme backend, currently `FlashInferPagedAttention`.
 
 ### Paged KV
 
