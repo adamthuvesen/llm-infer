@@ -13,9 +13,12 @@ against ``torch_naive`` by the reference check, not a rewrite of the model forwa
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import torch
+
+if TYPE_CHECKING:
+    from llm_infer.kv_cache.paged_kv_cache import KVPagePlan
 
 
 @runtime_checkable
@@ -64,4 +67,27 @@ class AttentionBackend(Protocol):
         Returns ``(B, num_heads, head_dim)`` — row ``i`` is request ``i``'s output, identical
         to attending ``queries[i]`` over its own history alone.
         """
+        ...
+
+
+@runtime_checkable
+class PagedDecodeAttentionBackend(AttentionBackend, Protocol):
+    """Optional decode backend that consumes the cache's page table directly."""
+
+    def plan_decode_batch_paged(
+        self,
+        page_plan: KVPagePlan,
+        *,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+    ) -> None:
+        """Prepare layer-reusable metadata for one batched decode step."""
+        ...
+
+    def forward_decode_batch_paged(
+        self, queries: torch.Tensor, paged_kv_cache: torch.Tensor
+    ) -> torch.Tensor:
+        """Batched single-token decode over a layer's native paged KV cache."""
         ...

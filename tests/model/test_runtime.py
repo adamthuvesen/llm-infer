@@ -18,8 +18,15 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
+from llm_infer.kernels.torch_naive import TorchNaiveAttention
+from llm_infer.model import runtime as runtime_module
 from llm_infer.model.decode import greedy_decode
-from llm_infer.model.runtime import ModelRegistryError, available_backends, load_model_runtime
+from llm_infer.model.runtime import (
+    ATTENTION_BACKEND_CHOICES,
+    ModelRegistryError,
+    available_backends,
+    load_model_runtime,
+)
 from llm_infer.serve import DEFAULT_BACKEND, _bundle_path_for_backend, build_app_from_runtime
 
 
@@ -39,6 +46,105 @@ def test_registry_lists_qwen_esme_and_dense_alias() -> None:
 def test_unknown_backend_fails_loudly() -> None:
     with pytest.raises(ModelRegistryError, match="unknown model backend"):
         load_model_runtime("not-a-backend")
+
+
+def test_attention_backend_choices_are_stable() -> None:
+    assert ATTENTION_BACKEND_CHOICES == ("auto", "torch_naive", "flash_attn", "flashinfer")
+
+
+def test_auto_bundle_cpu_stays_on_reference_attention(tmp_path: Path) -> None:
+    runtime = load_model_runtime(
+        "esme",
+        bundle_path=_write_tiny_bundle(tmp_path),
+        dtype=torch.bfloat16,
+        device="cpu",
+    )
+
+    assert type(runtime.model.backend).__name__ == "TorchNaiveAttention"
+    assert runtime.metadata["attention_backend"] == "TorchNaiveAttention"
+    assert runtime.metadata["attention_backend_choice"] == "auto"
+
+
+def test_auto_bundle_fp32_cuda_stays_on_reference_attention() -> None:
+    resolved = runtime_module._resolve_attention_backend(
+        "esme",
+        dtype=torch.float32,
+        device="cuda",
+        attention_backend=None,
+        attention_backend_name="auto",
+    )
+
+    assert resolved is None
+
+
+def test_auto_bundle_cuda_low_precision_selects_flashinfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeFlashInfer:
+        pass
+
+    monkeypatch.setattr(runtime_module, "FlashInferPagedAttention", FakeFlashInfer)
+
+    resolved = runtime_module._resolve_attention_backend(
+        "esme",
+        dtype=torch.bfloat16,
+        device="cuda",
+        attention_backend=None,
+        attention_backend_name="auto",
+    )
+
+    assert isinstance(resolved, FakeFlashInfer)
+
+
+def test_explicit_torch_naive_backend_loads_bundle(tmp_path: Path) -> None:
+    runtime = load_model_runtime(
+        "esme",
+        bundle_path=_write_tiny_bundle(tmp_path),
+        attention_backend_name="torch_naive",
+    )
+
+    assert type(runtime.model.backend).__name__ == "TorchNaiveAttention"
+    assert runtime.metadata["attention_backend_choice"] == "torch_naive"
+
+
+def test_named_backend_conflicts_with_direct_backend() -> None:
+    with pytest.raises(
+        ModelRegistryError,
+        match="either attention_backend or attention_backend_name",
+    ):
+        load_model_runtime(
+            "esme",
+            attention_backend=TorchNaiveAttention(),
+            attention_backend_name="torch_naive",
+        )
+
+
+def test_flash_attn_rejects_cpu_and_fp32() -> None:
+    with pytest.raises(ModelRegistryError, match="requires a CUDA device"):
+        runtime_module._resolve_attention_backend(
+            "esme",
+            dtype=torch.bfloat16,
+            device="cpu",
+            attention_backend=None,
+            attention_backend_name="flash_attn",
+        )
+    with pytest.raises(ModelRegistryError, match="requires float16 or bfloat16"):
+        runtime_module._resolve_attention_backend(
+            "esme",
+            dtype=torch.float32,
+            device="cuda",
+            attention_backend=None,
+            attention_backend_name="flash_attn",
+        )
+
+
+def test_flashinfer_rejects_qwen() -> None:
+    with pytest.raises(ModelRegistryError, match="only supported for bundles"):
+        runtime_module._resolve_attention_backend(
+            "qwen",
+            dtype=torch.bfloat16,
+            device="cuda",
+            attention_backend=None,
+            attention_backend_name="flashinfer",
+        )
 
 
 def test_serve_defaults_to_esme_backend() -> None:

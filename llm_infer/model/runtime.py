@@ -11,6 +11,8 @@ import torch
 
 from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
+from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
@@ -23,6 +25,14 @@ from llm_infer.model.qwen import QwenModel
 
 RuntimeLoader = Callable[..., ModelRuntime]
 BundleBackendId = Literal["dense", "esme"]
+BUNDLE_BACKENDS = frozenset({"dense", "esme"})
+AttentionBackendChoice = Literal["auto", "torch_naive", "flash_attn", "flashinfer"]
+ATTENTION_BACKEND_CHOICES: tuple[AttentionBackendChoice, ...] = (
+    "auto",
+    "torch_naive",
+    "flash_attn",
+    "flashinfer",
+)
 
 
 class ModelRegistryError(ValueError):
@@ -98,8 +108,13 @@ def load_model_runtime(
     model_id: str | None = None,
     revision: str | None = None,
     attention_backend: AttentionBackend | None = None,
+    attention_backend_name: AttentionBackendChoice = "auto",
 ) -> ModelRuntime:
     """Load one registered model backend with its tokenizer and serving metadata."""
+    if attention_backend is not None and attention_backend_name != "auto":
+        raise ModelRegistryError(
+            "pass either attention_backend or attention_backend_name, not both"
+        )
     try:
         loader = _LOADERS[backend]
     except KeyError as exc:
@@ -114,6 +129,7 @@ def load_model_runtime(
         model_id=model_id,
         revision=revision,
         attention_backend=attention_backend,
+        attention_backend_name=attention_backend_name,
     )
 
 
@@ -125,6 +141,7 @@ def _load_qwen_runtime(
     model_id: str | None,
     revision: str | None,
     attention_backend: AttentionBackend | None,
+    attention_backend_name: AttentionBackendChoice,
 ) -> ModelRuntime:
     if bundle_path is not None:
         raise ModelRegistryError("backend 'qwen' does not accept --bundle")
@@ -133,20 +150,28 @@ def _load_qwen_runtime(
 
     from transformers import AutoTokenizer, GenerationConfig
 
+    resolved_attention = _resolve_attention_backend(
+        "qwen",
+        dtype=dtype,
+        device=device,
+        attention_backend=attention_backend,
+        attention_backend_name=attention_backend_name,
+    )
     tokenizer = AutoTokenizer.from_pretrained(resolved_model_id, revision=resolved_revision)
     model = QwenModel.load(
         dtype=dtype,
-        backend=attention_backend,
+        backend=resolved_attention,
         device=device,
         model_id=resolved_model_id,
         revision=resolved_revision,
     )
-    resolved_backend = attention_backend or model.backend
     capabilities = BackendCapabilities(
         paged_kv=True,
         prefix_caching=True,
         speculative=True,
-        flash_attention=isinstance(resolved_backend, FlashAttnPagedAttention),
+        flash_attention=isinstance(
+            model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
+        ),
     )
     eos_token_ids = _generation_eos_ids(
         model_id=resolved_model_id,
@@ -165,6 +190,8 @@ def _load_qwen_runtime(
             "revision": resolved_revision,
             "source": "huggingface",
             "architecture": "qwen2",
+            "attention_backend": type(model.backend).__name__,
+            "attention_backend_choice": attention_backend_name,
         },
     )
 
@@ -177,6 +204,7 @@ def _load_esme_runtime(
     model_id: str | None,
     revision: str | None,
     attention_backend: AttentionBackend | None,
+    attention_backend_name: AttentionBackendChoice,
 ) -> ModelRuntime:
     return _load_bundle_runtime(
         "esme",
@@ -186,6 +214,7 @@ def _load_esme_runtime(
         model_id=model_id,
         revision=revision,
         attention_backend=attention_backend,
+        attention_backend_name=attention_backend_name,
     )
 
 
@@ -197,6 +226,7 @@ def _load_dense_runtime(
     model_id: str | None,
     revision: str | None,
     attention_backend: AttentionBackend | None,
+    attention_backend_name: AttentionBackendChoice,
 ) -> ModelRuntime:
     return _load_bundle_runtime(
         "dense",
@@ -206,6 +236,7 @@ def _load_dense_runtime(
         model_id=model_id,
         revision=revision,
         attention_backend=attention_backend,
+        attention_backend_name=attention_backend_name,
     )
 
 
@@ -218,6 +249,7 @@ def _load_bundle_runtime(
     model_id: str | None,
     revision: str | None,
     attention_backend: AttentionBackend | None,
+    attention_backend_name: AttentionBackendChoice,
 ) -> ModelRuntime:
     if model_id is not None:
         raise ModelRegistryError(
@@ -233,10 +265,17 @@ def _load_bundle_runtime(
         )
 
     root = Path(bundle_path)
+    resolved_attention = _resolve_attention_backend(
+        backend_id,
+        dtype=dtype,
+        device=device,
+        attention_backend=attention_backend,
+        attention_backend_name=attention_backend_name,
+    )
     model = PretrainBundleModel.load(
         root,
         dtype=dtype,
-        backend=attention_backend,
+        backend=resolved_attention,
         device=device,
     )
     manifest = read_json_object(root / "manifest.json")
@@ -248,12 +287,13 @@ def _load_bundle_runtime(
     )
     # Bundle backends expose the full shared-engine capability set; flash_attention reflects
     # the actual backend (torch_naive unless a flash backend is passed in).
-    resolved_backend = attention_backend or model.backend
     capabilities = BackendCapabilities(
         paged_kv=DENSE_CAPABILITIES.paged_kv,
         prefix_caching=DENSE_CAPABILITIES.prefix_caching,
         speculative=DENSE_CAPABILITIES.speculative,
-        flash_attention=isinstance(resolved_backend, FlashAttnPagedAttention),
+        flash_attention=isinstance(
+            model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
+        ),
         planned_decode=DENSE_CAPABILITIES.planned_decode,
     )
     return ModelRuntime(
@@ -268,9 +308,77 @@ def _load_bundle_runtime(
             "format": "llm_pretrain_dense_v1",
             "manifest": manifest,
             "chat_template": tokenizer_metadata.chat_template,
+            "attention_backend": type(model.backend).__name__,
+            "attention_backend_choice": attention_backend_name,
         },
         bundle_path=root,
     )
+
+
+def _resolve_attention_backend(
+    backend_id: str,
+    *,
+    dtype: torch.dtype,
+    device: torch.device | str,
+    attention_backend: AttentionBackend | None,
+    attention_backend_name: AttentionBackendChoice,
+) -> AttentionBackend | None:
+    """Resolve the named attention backend or return an injected/default backend."""
+    if attention_backend is not None:
+        return attention_backend
+    if attention_backend_name not in ATTENTION_BACKEND_CHOICES:
+        choices = ", ".join(ATTENTION_BACKEND_CHOICES)
+        raise ModelRegistryError(
+            f"unknown attention backend {attention_backend_name!r}; choices: {choices}"
+        )
+    device_type = torch.device(device).type
+    is_cuda = device_type == "cuda"
+    is_low_precision = dtype in (torch.float16, torch.bfloat16)
+
+    if attention_backend_name == "auto":
+        if backend_id in BUNDLE_BACKENDS and is_cuda and is_low_precision:
+            return _construct_attention_backend("flashinfer")
+        return None
+
+    if attention_backend_name == "torch_naive":
+        return TorchNaiveAttention()
+    if attention_backend_name == "flash_attn":
+        _require_cuda_low_precision(attention_backend_name, dtype=dtype, device=device)
+        return _construct_attention_backend("flash_attn")
+    if attention_backend_name == "flashinfer":
+        if backend_id not in BUNDLE_BACKENDS:
+            raise ModelRegistryError("attention backend 'flashinfer' is only supported for bundles")
+        _require_cuda_low_precision(attention_backend_name, dtype=dtype, device=device)
+        return _construct_attention_backend("flashinfer")
+    raise AssertionError(f"unhandled attention backend {attention_backend_name!r}")
+
+
+def _require_cuda_low_precision(
+    attention_backend_name: AttentionBackendChoice,
+    *,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> None:
+    device_type = torch.device(device).type
+    if device_type != "cuda":
+        raise ModelRegistryError(
+            f"attention backend {attention_backend_name!r} requires a CUDA device; "
+            f"got {device!r}"
+        )
+    if dtype not in (torch.float16, torch.bfloat16):
+        raise ModelRegistryError(
+            f"attention backend {attention_backend_name!r} requires float16 or bfloat16; "
+            f"got {dtype}"
+        )
+
+
+def _construct_attention_backend(name: Literal["flash_attn", "flashinfer"]) -> AttentionBackend:
+    try:
+        if name == "flash_attn":
+            return FlashAttnPagedAttention()
+        return FlashInferPagedAttention()
+    except RuntimeError as exc:
+        raise ModelRegistryError(f"failed to initialize attention backend {name!r}: {exc}") from exc
 
 
 def _generation_eos_ids(

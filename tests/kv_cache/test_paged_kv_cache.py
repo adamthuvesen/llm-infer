@@ -331,10 +331,18 @@ def test_read_many_plan_reuses_indices_across_layers() -> None:
     assert torch.equal(plan.cu_seqlens.cpu(), torch.tensor([0, 3, 8], dtype=torch.int32))
     assert plan.lengths == [3, 5]
     assert plan.max_len == 5
+    assert plan.page_plan is None
     assert torch.equal(key0, torch.cat([layer0_a, layer0_b], dim=0))
     assert torch.equal(value0, torch.cat([layer0_av, layer0_bv], dim=0))
     assert torch.equal(key1, torch.cat([layer1_a, layer1_b], dim=0))
     assert torch.equal(value1, torch.cat([layer1_av, layer1_bv], dim=0))
+
+    paged = cache.plan_read_many([a, b], lengths=[3, 5], include_pages=True)
+    assert paged.page_plan is not None
+    assert paged.page_plan.indptr.cpu().tolist() == [0, 1, 3]
+    assert paged.page_plan.indices.cpu().tolist() == [a.blocks[0], b.blocks[0], b.blocks[1]]
+    assert paged.page_plan.last_page_len.cpu().tolist() == [3, 1]
+    assert paged.page_plan.page_size == 4
 
 
 def test_write_many_stores_one_decode_row_per_request() -> None:

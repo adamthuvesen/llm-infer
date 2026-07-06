@@ -125,17 +125,30 @@ class EngineDecodeMixin(EngineMixinHost):
         The window trades per-step host syncs for one sync per ``budget`` steps, which is only
         safe when nothing per step needs host data: every row greedy (no RNG, no penalty
         history), no speculation (drafts read generated ids), no preemption (victim selection
-        inspects live state), no tracing (events are per-token), and no prefix sharing (a
-        finisher's blocks must not stay referenced past its recorded EOS by a sibling fork).
+        inspects live state), and no tracing (events are per-token). Prefix-group rows may
+        re-enter once their block table is private, so a finisher cannot leave shared blocks
+        referenced past its recorded EOS.
         """
         return (
             self.decode_window_size > 1
             and self.speculative is None
             and not self.preemption
             and self.trace is None
-            and all(request.prefix_group_id is None for request in requests)
+            and self._window_blocks_are_private(requests)
             and all(self._params_for(request).is_greedy for request in requests)
         )
+
+    def _window_blocks_are_private(self, requests: list[Request]) -> bool:
+        """The planned window can skip copy-on-write only when every live block is private."""
+        for request in requests:
+            table = request.block_table
+            if table is None:
+                return False
+            if request.prefix_group_id is None:
+                continue
+            if any(self.cache.allocator.refcount(block) > 1 for block in table.blocks):
+                return False
+        return True
 
     def _decode_window_step(self, requests: list[Request], result: StepResult) -> None:
         """One deferred decode step: batched forward + on-device argmax, no host sync.

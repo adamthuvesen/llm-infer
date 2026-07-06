@@ -1,13 +1,12 @@
 """The paged KV-cache store: the K/V tensors plus scatter/gather over block tables.
 
-Layout is one contiguous tensor per side, shaped
-``(num_layers, num_blocks, block_size, num_kv_heads, head_dim)``. K/V are stored
+Layout is one unified page tensor shaped
+``(num_layers, num_blocks, 2, block_size, num_kv_heads, head_dim)``. K/V are stored
 *after* RoPE but *before* GQA expansion (one row per KV head, not per query head) —
 each token's rotation is fixed by its absolute position, so it is computed once at
-write time and never re-rotated, and the cheaper KV-head layout is expanded to query
-heads on read by the model. Reads/writes go through a request's :class:`BlockTable`,
-which translates logical positions to physical slots, so two requests sharing the
-pool never collide.
+write time and never re-rotated. The K and V views keep the old API, while the unified
+layout lets native paged-attention kernels read ``(page, k_or_v, offset, head, dim)``
+directly.
 """
 
 from __future__ import annotations
@@ -21,6 +20,16 @@ from llm_infer.kv_cache.block_table import BlockTable
 
 
 @dataclass(frozen=True)
+class KVPagePlan:
+    """Page-table metadata for a batched decode step."""
+
+    indptr: torch.Tensor
+    indices: torch.Tensor
+    last_page_len: torch.Tensor
+    page_size: int
+
+
+@dataclass(frozen=True)
 class KVReadPlan:
     """Layer-independent packed-read metadata for one batched decode step."""
 
@@ -28,6 +37,7 @@ class KVReadPlan:
     cu_seqlens: torch.Tensor
     lengths: list[int]
     max_len: int
+    page_plan: KVPagePlan | None = None
 
 
 class PagedKVCache:
@@ -51,9 +61,10 @@ class PagedKVCache:
         self.head_dim = head_dim
         self.dtype = dtype
         self.allocator = BlockAllocator(num_blocks)
-        shape = (num_layers, num_blocks, block_size, num_kv_heads, head_dim)
-        self.key = torch.zeros(shape, dtype=dtype, device=device)
-        self.value = torch.zeros(shape, dtype=dtype, device=device)
+        shape = (num_layers, num_blocks, 2, block_size, num_kv_heads, head_dim)
+        self.kv = torch.zeros(shape, dtype=dtype, device=device)
+        self.key = self.kv[:, :, 0]
+        self.value = self.kv[:, :, 1]
 
     def new_request(self) -> BlockTable:
         """A fresh, empty block table bound to this cache's allocator and block size."""
@@ -143,9 +154,7 @@ class PagedKVCache:
         idx = torch.as_tensor(
             table.physical_slots(start_pos, n), dtype=torch.long, device=key.device
         )
-        key_rows, value_rows = self._layer_rows(layer)
-        key_rows[idx] = key
-        value_rows[idx] = value
+        self._write_slots(layer, idx, key, value)
 
     def write_many(
         self,
@@ -169,9 +178,7 @@ class PagedKVCache:
             self.prepare_write(table, pos, 1)
         slots = [table.physical_slot(pos) for table, pos in zip(tables, positions, strict=True)]
         idx = torch.as_tensor(slots, dtype=torch.long, device=key.device)
-        key_rows, value_rows = self._layer_rows(layer)
-        key_rows[idx] = key
-        value_rows[idx] = value
+        self._write_slots(layer, idx, key, value)
 
     def write_rows(
         self,
@@ -186,19 +193,18 @@ class PagedKVCache:
         this is just two indexed stores. The caller owns copy-on-write safety: slots must come
         from unshared tables (``build_decode_window_plan`` refuses shared blocks up front).
         """
-        key_rows, value_rows = self._layer_rows(layer)
-        key_rows[slots] = key
-        value_rows[slots] = value
+        self._write_slots(layer, slots, key, value)
 
     def read(self, table: BlockTable, layer: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather K/V for positions ``0 .. length-1`` as ``(length, num_kv_heads, head_dim)``."""
         idx = torch.as_tensor(
             table.physical_slots(0, length), dtype=torch.long, device=self.key.device
         )
-        key_rows, value_rows = self._layer_rows(layer)
-        return key_rows[idx], value_rows[idx]
+        return self._read_slots(layer, idx)
 
-    def plan_read_many(self, tables: list[BlockTable], lengths: list[int]) -> KVReadPlan:
+    def plan_read_many(
+        self, tables: list[BlockTable], lengths: list[int], *, include_pages: bool = False
+    ) -> KVReadPlan:
         """Build reusable packed-read indices for a batched decode step."""
         if len(tables) != len(lengths):
             raise ValueError(f"tables/lengths mismatch: {len(tables)} vs {len(lengths)}")
@@ -221,17 +227,65 @@ class PagedKVCache:
             cu_seqlens=cu_seqlens,
             lengths=list(lengths),
             max_len=max(lengths),
+            page_plan=self.plan_pages(tables, lengths) if include_pages else None,
+        )
+
+    def plan_pages(self, tables: list[BlockTable], lengths: list[int]) -> KVPagePlan:
+        """Build page-table metadata for direct paged-attention backends."""
+        if len(tables) != len(lengths):
+            raise ValueError(f"tables/lengths mismatch: {len(tables)} vs {len(lengths)}")
+        if not tables:
+            raise ValueError("a paged read needs at least one table")
+        if any(length < 1 for length in lengths):
+            raise ValueError(f"lengths must be positive; got {lengths}")
+
+        page_counts = [-(-length // self.block_size) for length in lengths]
+        indptr_host = [0]
+        indices_host: list[int] = []
+        last_page_len_host: list[int] = []
+        for table, length, page_count in zip(tables, lengths, page_counts, strict=True):
+            if page_count > len(table.blocks):
+                raise ValueError(
+                    f"table has {len(table.blocks)} blocks but length {length} needs "
+                    f"{page_count}"
+                )
+            indices_host.extend(table.blocks[:page_count])
+            indptr_host.append(indptr_host[-1] + page_count)
+            last_page_len_host.append(((length - 1) % self.block_size) + 1)
+
+        device = self.key.device
+        return KVPagePlan(
+            indptr=torch.tensor(indptr_host, dtype=torch.int32, device=device),
+            indices=torch.tensor(indices_host, dtype=torch.int32, device=device),
+            last_page_len=torch.tensor(last_page_len_host, dtype=torch.int32, device=device),
+            page_size=self.block_size,
         )
 
     def read_many_plan(self, layer: int, plan: KVReadPlan) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather packed K/V for ``layer`` using a prebuilt :class:`KVReadPlan`."""
-        key_rows, value_rows = self._layer_rows(layer)
-        return key_rows[plan.idx], value_rows[plan.idx]
+        return self._read_slots(layer, plan.idx)
+
+    def layer_kv(self, layer: int) -> torch.Tensor:
+        """Return one layer's unified K/V page tensor for direct paged kernels."""
+        return self.kv[layer]
 
     def _copy_block(self, source: int, target: int) -> None:
-        self.key[:, target].copy_(self.key[:, source])
-        self.value[:, target].copy_(self.value[:, source])
+        self.kv[:, target].copy_(self.kv[:, source])
 
-    def _layer_rows(self, layer: int) -> tuple[torch.Tensor, torch.Tensor]:
-        shape = (-1, self.num_kv_heads, self.head_dim)
-        return self.key[layer].view(shape), self.value[layer].view(shape)
+    def _slot_parts(self, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.div(slots, self.block_size, rounding_mode="floor"), slots % self.block_size
+
+    def _read_slots(self, layer: int, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        blocks, offsets = self._slot_parts(slots)
+        return self.key[layer, blocks, offsets], self.value[layer, blocks, offsets]
+
+    def _write_slots(
+        self,
+        layer: int,
+        slots: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        blocks, offsets = self._slot_parts(slots)
+        self.key[layer, blocks, offsets] = key
+        self.value[layer, blocks, offsets] = value
