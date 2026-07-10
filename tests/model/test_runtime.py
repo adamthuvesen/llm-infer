@@ -63,6 +63,28 @@ def test_auto_bundle_cpu_stays_on_reference_attention(tmp_path: Path) -> None:
     assert type(runtime.model.backend).__name__ == "TorchNaiveAttention"
     assert runtime.metadata["attention_backend"] == "TorchNaiveAttention"
     assert runtime.metadata["attention_backend_choice"] == "auto"
+    assert runtime.capabilities.batched_prefill is True
+
+
+def test_bundle_runtime_disables_batched_prefill_for_narrow_attention_backend(
+    tmp_path: Path,
+) -> None:
+    class NarrowAttention:
+        def forward(
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+        ) -> torch.Tensor:
+            return TorchNaiveAttention().forward(query, key, value)
+
+    runtime = load_model_runtime(
+        "esme",
+        bundle_path=_write_tiny_bundle(tmp_path),
+        attention_backend=NarrowAttention(),
+    )
+
+    assert runtime.capabilities.batched_prefill is False
 
 
 def test_auto_bundle_fp32_cuda_stays_on_reference_attention() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -28,6 +28,7 @@ class BackendCapabilities:
     speculative: bool
     flash_attention: bool
     planned_decode: bool = False
+    batched_prefill: bool = False
 
 
 QWEN_CAPABILITIES = BackendCapabilities(
@@ -47,6 +48,8 @@ DENSE_CAPABILITIES = BackendCapabilities(
     speculative=True,
     flash_attention=False,
     planned_decode=True,
+    # Resolved at runtime because this depends on the selected attention backend.
+    batched_prefill=False,
 )
 
 
@@ -103,6 +106,19 @@ class CausalLMBackend(Protocol):
 
     def release_table(self, table: BlockTable) -> None:
         """Release backend-specific per-table state when a block table is freed."""
+
+
+@runtime_checkable
+class BatchedPrefillBackend(Protocol):
+    """Optional model surface for one ragged prefill forward over several requests."""
+
+    def prefill_many(
+        self,
+        prompt_ids: list[list[int]],
+        cache: PagedKVCache,
+        tables: list[BlockTable],
+    ) -> torch.Tensor:
+        """Cache every prompt and return one final-token logits row per request."""
 
 
 class TokenizerLike(Protocol):

@@ -24,12 +24,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
+from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 
-from llm_infer.kernels.base import AttentionBackend, PagedDecodeAttentionBackend
+from llm_infer.kernels.base import (
+    AttentionBackend,
+    PackedPrefillAttentionBackend,
+    PagedDecodeAttentionBackend,
+)
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
@@ -208,6 +213,95 @@ class PretrainBundleModel:
         with self._profile("logits"):
             last = rms_norm(hidden[-1:], self._norm_weight("norm.weight"), self.rms_eps)
             return self._apply_logit_soft_cap((last @ self._lm_head().T)[-1])
+
+    @torch.no_grad()
+    def prefill_many(
+        self,
+        prompts: list[list[int]],
+        cache: PagedKVCache,
+        tables: list[BlockTable],
+    ) -> torch.Tensor:
+        """Prefill ragged full prompts in one packed layer stack.
+
+        Prompt rows are concatenated without padding. Packed causal attention keeps each
+        request isolated while the projections, norms, MLPs, and output head run over all
+        prompt tokens together. Returns one next-token logit row per request, ``(B, vocab)``.
+        """
+        if not prompts:
+            raise ValueError("prefill_many needs at least one prompt")
+        if len(prompts) != len(tables):
+            raise ValueError(f"prompts/tables length mismatch: {len(prompts)} vs {len(tables)}")
+        for prompt in prompts:
+            self._validate_token_ids(prompt)
+        nonempty_lengths = [table.length for table in tables if table.length != 0]
+        if nonempty_lengths:
+            raise PretrainBundleError(
+                f"prefill_many expected empty tables; got lengths {nonempty_lengths}"
+            )
+        backend = self.backend
+        if not isinstance(backend, PackedPrefillAttentionBackend):
+            raise PretrainBundleError("attention backend does not support packed prefill")
+
+        lengths = [len(prompt) for prompt in prompts]
+        for table, length in zip(tables, lengths, strict=True):
+            table.reserve(length)
+
+        packed_ids = torch.tensor(
+            [token for prompt in prompts for token in prompt],
+            dtype=torch.long,
+            device=self.device,
+        )
+        offsets = [0, *accumulate(lengths)]
+        total_tokens = offsets[-1]
+        cu_seqlens = torch.tensor(offsets, dtype=torch.int32, device=self.device)
+        request_starts = torch.repeat_interleave(
+            cu_seqlens[:-1],
+            torch.tensor(lengths, dtype=torch.long, device=self.device),
+        )
+        positions = torch.arange(
+            total_tokens, dtype=torch.float32, device=self.device
+        ) - request_starts
+        write_slots = torch.as_tensor(
+            [
+                slot
+                for table, length in zip(tables, lengths, strict=True)
+                for slot in table.physical_slots(0, length)
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        hidden = self.w["embed_tokens.weight"][packed_ids].to(self.dtype)
+        cos, sin = self._rope_for_positions(positions)
+        max_len = max(lengths)
+        for layer in range(self.num_layers):
+            hidden = self._apply_decoder_layer(
+                hidden,
+                layer,
+                lambda x, p, lyr: self._prefill_attention_packed(
+                    x,
+                    p,
+                    cos,
+                    sin,
+                    lyr,
+                    cache,
+                    write_slots,
+                    cu_seqlens,
+                    max_len,
+                    backend,
+                ),
+            )
+
+        final_positions = torch.tensor(
+            [offset - 1 for offset in offsets[1:]], dtype=torch.long, device=self.device
+        )
+        with self._profile("logits"):
+            last = hidden.index_select(0, final_positions)
+            last = rms_norm(last, self._norm_weight("norm.weight"), self.rms_eps)
+            logits = self._apply_logit_soft_cap(last @ self._lm_head().T)
+        for table, length in zip(tables, lengths, strict=True):
+            table.length = length
+        return logits
 
     @torch.no_grad()
     def prefill_chunk(
@@ -566,6 +660,36 @@ class PretrainBundleModel:
         k, v = self._expand_kv(k, v)
         attn = self.backend.forward(q, k, v)
         return self._output_proj(attn, prefix)
+
+    def _prefill_attention_packed(
+        self,
+        x: torch.Tensor,
+        prefix: str,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer: int,
+        cache: PagedKVCache,
+        write_slots: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_len: int,
+        backend: PackedPrefillAttentionBackend,
+    ) -> torch.Tensor:
+        """Packed full-prompt attention with native-GQA cache writes."""
+        q, k, v = self._project_heads(x, prefix)
+        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        k_rows = k.transpose(0, 1).contiguous()
+        v_rows = v.transpose(0, 1).contiguous()
+        with self._profile("kv_write"):
+            cache.write_rows(layer, write_slots, k_rows, v_rows)
+
+        attn = backend.forward_prefill_batch_packed(
+            q.transpose(0, 1).contiguous(),
+            k_rows,
+            v_rows,
+            cu_seqlens,
+            max_len,
+        )
+        return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)
 
     def _prefill_chunk_attention(
         self,

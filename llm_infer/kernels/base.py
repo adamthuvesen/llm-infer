@@ -3,9 +3,9 @@
 A backend computes scaled dot-product attention for one request: given the query
 rows for the current step (prefill: all prompt positions; decode: the single new
 position) and the full key/value history for that request, it returns the attention
-output. Position encoding (RoPE) and GQA head expansion happen *before* the backend
-is called — keys and values arrive already rotated and already repeated to the query
-head count — so a backend only owns the `softmax(QKᵀ / √d) V` causal core.
+output. Position encoding (RoPE) and GQA head expansion happen *before* the narrow
+single-request backend is called. The optional packed-prefill interface keeps K/V at
+their native GQA head count so fused kernels do not materialize repeated heads.
 
 Keeping the interface this narrow is the point: each backend is a drop-in swap validated
 against ``torch_naive`` by the reference check, not a rewrite of the model forward.
@@ -71,6 +71,30 @@ class AttentionBackend(Protocol):
 
 
 @runtime_checkable
+class PackedPrefillAttentionBackend(AttentionBackend, Protocol):
+    """Optional causal attention over a packed batch of complete prompts.
+
+    All tensors are token-major. ``query`` is
+    ``(total_tokens, num_qo_heads, head_dim)`` while ``key`` and ``value`` are
+    ``(total_tokens, num_kv_heads, head_dim)``. Native GQA is allowed when
+    ``num_qo_heads`` is a multiple of ``num_kv_heads``. ``cu_seqlens`` indexes the
+    same request boundaries for Q, K, and V, so no request may attend across a
+    boundary.
+
+    Returns ``(total_tokens, num_qo_heads, head_dim)`` in the query's dtype.
+    """
+
+    def forward_prefill_batch_packed(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor: ...
+
+
+@runtime_checkable
 class PagedDecodeAttentionBackend(AttentionBackend, Protocol):
     """Optional decode backend that consumes the cache's page table directly."""
 
@@ -91,3 +115,91 @@ class PagedDecodeAttentionBackend(AttentionBackend, Protocol):
     ) -> torch.Tensor:
         """Batched single-token decode over a layer's native paged KV cache."""
         ...
+
+
+def validate_packed_prefill_inputs(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    max_seqlen: int,
+) -> None:
+    """Check packed-prefill tensor structure without reading device-side offsets."""
+    if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
+        raise ValueError(
+            "packed prefill query/key/value must all be rank 3; "
+            f"got {query.ndim}, {key.ndim}, {value.ndim}"
+        )
+    if key.shape != value.shape:
+        raise ValueError(
+            f"packed prefill key/value shapes must match; got {tuple(key.shape)} and "
+            f"{tuple(value.shape)}"
+        )
+    if query.shape[0] != key.shape[0]:
+        raise ValueError(
+            "packed prefill query/key/value token counts must match; "
+            f"got query {query.shape[0]}, key/value {key.shape[0]}"
+        )
+    if query.shape[2] != key.shape[2]:
+        raise ValueError(
+            "packed prefill query/key/value head dimensions must match; "
+            f"got query {query.shape[2]}, key/value {key.shape[2]}"
+        )
+    num_qo_heads = query.shape[1]
+    num_kv_heads = key.shape[1]
+    if num_qo_heads == 0 or num_kv_heads == 0 or num_qo_heads % num_kv_heads != 0:
+        raise ValueError(
+            "packed prefill query head count must be divisible by the KV head count; "
+            f"got query {num_qo_heads}, KV {num_kv_heads}"
+        )
+    if query.device != key.device or query.device != value.device:
+        raise ValueError(
+            "packed prefill query/key/value must be on the same device; "
+            f"got {query.device}, {key.device}, {value.device}"
+        )
+    if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
+        raise ValueError(
+            "packed prefill cu_seqlens must be rank 1 with at least two offsets; "
+            f"got shape {tuple(cu_seqlens.shape)}"
+        )
+    if cu_seqlens.dtype != torch.int32:
+        raise ValueError(
+            f"packed prefill cu_seqlens must have dtype int32; got {cu_seqlens.dtype}"
+        )
+    if cu_seqlens.device != query.device:
+        raise ValueError(
+            "packed prefill cu_seqlens must be on the same device as query/key/value; "
+            f"got {cu_seqlens.device} and {query.device}"
+        )
+    if max_seqlen <= 0:
+        raise ValueError(f"packed prefill max_seqlen must be positive; got {max_seqlen}")
+
+
+def packed_prefill_lengths(
+    cu_seqlens: torch.Tensor,
+    *,
+    total_tokens: int,
+    max_seqlen: int,
+) -> list[int]:
+    """Read and check packed request boundaries, returning their sequence lengths."""
+    offsets = cu_seqlens.tolist()
+    if offsets[0] != 0:
+        raise ValueError(f"packed prefill first offset must be 0; got {offsets[0]}")
+    if offsets[-1] != total_tokens:
+        raise ValueError(
+            "packed prefill final offset must equal the token count; "
+            f"got {offsets[-1]} and {total_tokens}"
+        )
+    lengths = [end - start for start, end in zip(offsets, offsets[1:], strict=False)]
+    if any(length <= 0 for length in lengths):
+        raise ValueError(
+            "packed prefill sequence lengths must be positive and offsets strictly increasing; "
+            f"got {lengths}"
+        )
+    actual_max = max(lengths)
+    if max_seqlen != actual_max:
+        raise ValueError(
+            f"packed prefill max_seqlen must equal the longest sequence ({actual_max}); "
+            f"got {max_seqlen}"
+        )
+    return lengths

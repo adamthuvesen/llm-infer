@@ -65,6 +65,18 @@ class FlashInferPagedAttention:
             queries, key, value, cu_seqlens_k, max_seqlen_k
         )
 
+    def forward_prefill_batch_packed(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        return self._packed.forward_prefill_batch_packed(
+            query, key, value, cu_seqlens, max_seqlen
+        )
+
     def plan_decode_batch_paged(
         self,
         page_plan: KVPagePlan,
