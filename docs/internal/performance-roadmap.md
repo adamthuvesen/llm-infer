@@ -1,20 +1,23 @@
 # Performance Roadmap
 
-The next performance work should target fixed overhead: FlashInfer page planning, repeated
-small prefills, CUDA graph boundaries, and serving work around the model. Esme-214M is small
-enough that kernel launches, metadata preparation, and Python can cost as much as useful GPU
-work.
+The next performance work should batch the engine's repeated per-request prefills. Current A100
+measurements attribute 24% of profiled wall at batch 8 and roughly 67–85% at batches 64–256 to
+serial prefill. Page planning is duplicated work, but its measured share is only about 2–3% of
+decode time. Esme-214M is still small enough that kernel launches, metadata preparation, and
+Python can cost as much as useful GPU work, especially at batch 1.
 
-Work through the phases in order. Each phase starts with a reference-checked baseline and ends
-with a same-container A/B. A path that fails the reference check reports no tok/s.
+Use the measured priority order below; phase numbers preserve the original plan. Each phase
+starts with a reference-checked baseline and ends with a same-container A/B. A path that fails
+the reference check reports no tok/s.
 
 ## Priorities
 
 | Phase | Work | Main result | Status |
 | ---: | --- | --- | --- |
-| 0 | Fix the measurement baseline | Batch-1, phase, serving, and mature-engine evidence | Next |
-| 1 | Remove direct-page planning overhead | Less metadata work on every decode token | Pending |
-| 2 | Batch prefill | Better TTFT and prompt throughput under burst admission | Pending |
+| 0 | Fix the measurement baseline | Batch-1, phase, serving, and mature-engine evidence | Complete; blockers found |
+| Gate | Fix batch-dependent correctness | Restore greedy long-context and sampled batch parity | Next |
+| 2 | Batch prefill | Better TTFT and prompt throughput under burst admission | After gate |
+| 1 | Remove direct-page planning overhead | Less metadata work on every decode token | Deprioritized |
 | 3 | Reduce CUDA graph boundaries | Lower batch-1 and low-batch decode latency | Pending |
 | 4 | Fuse measured hot operations | Fewer kernels and larger GEMMs | Pending |
 | 5 | Optimize sampled and HTTP serving | Keep engine speed through the public API | Pending |
@@ -65,15 +68,17 @@ Recent performance work has already removed several sources of overhead:
 - Piecewise CUDA graphs for the dense layer work.
 - Direct FlashInfer access to paged KV.
 
-The older eager path launched about 2,100 kernels per token. Planned buffers added 5-7%, then
+The older eager path launched about 2,100 kernels per generated-token step across the batch.
+Planned buffers added 5-7%, then
 manual CUDA graphs improved like-for-like throughput by 177%, 45%, and 16% at batch 8, 64,
 and 256. See [esme-decode-overhead.md](esme-decode-overhead.md) and
 [decode-graph-capture.md](decode-graph-capture.md).
 
-The latest uncommitted FlashInfer profile records about 1,207 ordinary launches and 217 graph
+The 2026-07-07 FlashInfer profile records about 1,207 ordinary launches and 217 graph
 launches per eight-token scheduler pass at batch 8. That is about 151 ordinary launches and 27
-graph launches per token. The counts stay nearly flat through batch 64, which points to fixed
-overhead at low and medium batch sizes. Phase 0 turns this raw run into durable evidence.
+graph launches per generated-token step across the batch. The counts stay nearly flat through
+batch 64, which points to fixed overhead at low and medium batch sizes. Phase 0 turns this raw run
+into durable evidence.
 
 ## Phase 0: Build the Measurement Baseline
 
@@ -85,20 +90,20 @@ and KV-pool construction.
 
 ### Work
 
-- [ ] Commit a curated summary of the latest FlashInfer launch and timing profile under
+- [x] Add a curated summary of the latest FlashInfer launch and timing profile under
   `docs/internal/`.
-- [ ] Add batch 1 to the GPU benchmark and decode-profile harnesses.
-- [ ] Split persistent-engine steady state from engine construction and KV-pool zeroing.
-- [ ] Add phase timing for prefill, decode, page planning, attention, sampling, and window
+- [x] Add batch 1 to the GPU benchmark and decode-profile harnesses.
+- [x] Split persistent-engine steady state from engine construction and KV-pool zeroing.
+- [x] Add phase timing for prefill, decode, page planning, attention, sampling, and window
   flushing.
-- [ ] Add prompt-length and context-length sweeps at 32, 256, and 768 cached tokens.
-- [ ] Add persistent-server workloads for greedy and sampled requests. Report TTFT, p50/p95
+- [x] Add prompt-length and context-length sweeps at 32, 256, and 768 cached tokens.
+- [x] Add persistent-server workloads for greedy and sampled requests. Report TTFT, p50/p95
   ITL, request latency, queue time, and output tok/s.
-- [ ] Run current vLLM against the converted Esme checkpoint in a separate process on the same
+- [x] Run current vLLM against the converted Esme checkpoint in a separate process on the same
   reserved GPU host. Apply the same fp32 reference check.
-- [ ] Correct the public HF repetition wording: only batch 8 has three HF measurements; batches
+- [x] Correct the public HF repetition wording: only batch 8 has three HF measurements; batches
   16-256 have one.
-- [ ] Document the Esme bf16 tolerance of 0.1, why it differs from the generic 1e-3 fixture
+- [x] Document the Esme bf16 tolerance of 0.1, why it differs from the generic 1e-3 fixture
   tolerance, and how many unique prompts exercise it.
 
 ### Measurement matrix
@@ -118,7 +123,24 @@ and KV-pool construction.
   evidence of duplicate work.
 - The public benchmark method matches the committed JSON.
 
+### Result
+
+Phase 0 selects ragged batched prefill as the first performance experiment. Serial prefill clearly
+clears the 20% decision bar at batches 64 and 256; page planning does not. Before performance work
+starts, fix or explain both confirmed correctness failures:
+
+1. Greedy batch 8 at context 768 has one non-tie divergence, although batches 1, 64, and 256 pass
+   at the same context length.
+2. Seeded sampled serving matches its single-request reference at batch 1 but fails the gate at
+   batches 8, 64, and 256.
+
+See [phase-0-baseline.md](phase-0-baseline.md) for the measurements and timing caveats.
+
 ## Phase 1: Remove Native-Page Planning Overhead
+
+**Priority after Phase 2.** Phase 0 measured page planning at about 2–3% of nested decode time.
+Keep this phase because the packed-index work is demonstrably duplicated and stable metadata may
+unlock wider graph capture, not because current timing predicts a large direct win.
 
 ### Hypothesis
 
@@ -173,6 +195,9 @@ metadata copy counts.
 
 ## Phase 2: Add Ragged Batched Prefill
 
+**First performance phase after the correctness gate.** Phase 0 measured serial prefill above the
+20% selection bar from batch 8 upward.
+
 ### Hypothesis
 
 New requests are prefilled one at a time. Each short prompt walks the full layer stack, so burst
@@ -225,7 +250,8 @@ Relevant code:
 
 ### Hypothesis
 
-The current runner replays 31 graph segments per token and enters eager Python for every layer's
+The current runner replays 31 graph segments per generated-token step across the batch and enters
+eager Python for every layer's
 KV write and FlashInfer attention call. `cudaGraphLaunch` remains the top current host event.
 Stable page metadata from Phase 1 may allow a full decode graph or larger captured regions.
 
@@ -250,7 +276,8 @@ Stable page metadata from Phase 1 may allow a full decode graph or larger captur
 
 ### Done when
 
-- Graph launches fall materially below the current roughly 27 per token.
+- Graph launches fall materially below the current roughly 27 per generated-token step across
+  the batch.
 - Batch 1 or 8 improves by at least 10%.
 - Batch 64 and 256 regress by no more than 3%.
 - Capture time and graph memory are bounded and reported.
