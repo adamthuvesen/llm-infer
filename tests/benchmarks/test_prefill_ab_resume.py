@@ -7,6 +7,8 @@ import json
 import pytest
 
 from scripts.modal_esme_prefill_ab import (
+    MIXED_LOAD_KEY_FIELDS,
+    PREFILL_AB_KEY_FIELDS,
     assemble_final_record,
     completed_row_keys,
     key_tuple,
@@ -44,7 +46,7 @@ def _log(events: list[dict[str, object]]) -> str:
 
 def test_row_key_and_tuple_agree_including_ragged_none() -> None:
     row = _row_event(8, "ragged", None, 64)
-    key = row_key(row)
+    key = row_key(row, PREFILL_AB_KEY_FIELDS)
 
     assert key == {
         "batch_size": 8,
@@ -52,7 +54,7 @@ def test_row_key_and_tuple_agree_including_ragged_none() -> None:
         "context_length": None,
         "max_new_tokens": 64,
     }
-    assert key_tuple(key) == (8, "ragged", None, 64)
+    assert key_tuple(key, PREFILL_AB_KEY_FIELDS) == (8, "ragged", None, 64)
 
 
 def test_completed_row_keys_ignores_meta_and_preserves_order() -> None:
@@ -62,10 +64,21 @@ def test_completed_row_keys_ignores_meta_and_preserves_order() -> None:
         _row_event(8, "ragged", None, 64),
     ]
 
-    assert completed_row_keys(events) == [
+    assert completed_row_keys(events, PREFILL_AB_KEY_FIELDS) == [
         {"batch_size": 1, "shape": "uniform", "context_length": 16, "max_new_tokens": 1},
         {"batch_size": 8, "shape": "ragged", "context_length": None, "max_new_tokens": 64},
     ]
+
+
+def test_row_key_honors_a_different_command_key_field_set() -> None:
+    # The mixed-load command keys resume on (burst_size, burst_shape), not the prefill fields.
+    row = {"kind": "row", "burst_size": 64, "burst_shape": "uniform", "burst_context": 512}
+
+    key = row_key(row, MIXED_LOAD_KEY_FIELDS)
+
+    assert key == {"burst_size": 64, "burst_shape": "uniform"}
+    assert key_tuple(key, MIXED_LOAD_KEY_FIELDS) == (64, "uniform")
+    assert completed_row_keys([row], MIXED_LOAD_KEY_FIELDS) == [key]
 
 
 def test_parse_event_lines_skips_blank_lines() -> None:
