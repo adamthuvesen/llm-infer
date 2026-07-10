@@ -87,11 +87,20 @@ def build_app_from_runtime(
         if capture_s is not None:
             print(f"decode graphs: captured buckets {decode_graph_buckets} in {capture_s:.1f} s")
     if grouped_decode_graphs is None:
+        # Auto-enable only where grouped steps can actually run: capture needs a CUDA
+        # bundle model on a native paged backend, and dispatch happens only inside
+        # deferred decode windows — which per-step windows, preemption, and speculative
+        # decoding all disable (see ``_window_eligible`` in serving/engine_decode.py).
+        # Anything else would pay capture time and memory for a permanently-zero hit
+        # counter. Explicit ``True`` still forces it for tests and debugging.
         grouped_decode_graphs = (
             decode_graphs
             and torch.device(device).type == "cuda"
             and runtime.capabilities.planned_decode
             and isinstance(runtime.model.backend, PagedDecodeAttentionBackend)
+            and decode_window_size > 1
+            and preemption_policy == "off"
+            and prompt_lookup_speculative is None
         )
     grouped_start = time.perf_counter()
     engine = InferenceEngine(
@@ -109,9 +118,8 @@ def build_app_from_runtime(
     )
     if grouped_decode_graphs and torch.device(device).type == "cuda":
         grouped_s = time.perf_counter() - grouped_start
-        print(
-            f"grouped decode graphs: captured buckets {decode_graph_buckets} in {grouped_s:.1f} s"
-        )
+        captured = tuple(sorted(engine.grouped_decode_runners))
+        print(f"grouped decode graphs: captured buckets {captured} in {grouped_s:.1f} s")
     metrics = ServerMetrics()
     async_engine = AsyncInferenceEngine(engine, metrics=metrics)
     app = create_app(
