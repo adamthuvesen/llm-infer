@@ -524,13 +524,32 @@ size after the first finisher and the rest of the run falls back to the piecewis
 exact-batch grouped coverage is structurally ~a quarter of decode steps on this workload, and
 capturing the drain ladder (N, N−1, …) is priced out by per-bucket capture cost.
 
-**Decision: grouped dispatch stays opt-in; the serving default does not flip.** At chat-scale
-batches the default would buy 0.5–2% whole-run for tens of seconds of startup capture and an
-extra dispatch layer — far under the ≥10%-per-complexity rule. The opt-in is the documented
-configuration for fixed-shape, high-batch throughput work (batch 256: +6.3% whole-run, +22%
-fixed-length decode), where the batch actually holds its captured size. The mixed-load stall
-harness is unaffected by construction: it pins `decode_window_size=1` and grouped dispatch only
-runs inside decode windows.
+The same-container serving A/B
+(`bench-results/esme-serving-grouped-ab-20260710T175637.json`, localhost Uvicorn HTTP,
+128 new tokens, 5 measured runs, exact-batch grouped bucket per workload) measured the serving
+path itself — where uniform admission keeps the batch at its captured size:
+
+| Workload | Baseline tok/s | Grouped tok/s | Change | TTFT p50 | ITL p95 |
+| --- | ---: | ---: | ---: | --- | --- |
+| greedy b1 | 143.1 | 168.9 | +18.0% | 50.4 → 46.3 ms | 52.0 → 43.5 ms |
+| greedy b8 | 704.4 | 754.7 | +7.1% | 177 → 169 ms | 78.0 → 72.7 ms |
+| greedy b64 | 1,838 | 1,960 | +6.6% | 750 → 426 ms | 231 → 218 ms |
+
+Every greedy row is reference-checked (`ref=pass`) in both arms; the sampled b8/b64 rows show
+the pre-existing batched-sampling reference failure in both arms identically (present in the
+2026-07-09 baselines; grouped never runs on sampled batches).
+
+**Decision: the serving default flips; the raw engine default stays explicit.**
+`build_app_from_runtime` now enables grouped decode graphs automatically on a CUDA bundle model
+with a native paged backend (escape hatch `--no-grouped-decode-graphs`); single-request greedy
+chat — the batch that can never drain — clears the 10% bar at +18%, and uniform batches gain
+6–7%. The cost is ~7–10 s startup capture per bucket over the default set.
+`InferenceEngine(grouped_decode_graphs=...)` keeps its `False` default so
+fresh-engine-per-iteration benchmark protocols can never pay capture inside a timed region, and
+the published engine-level batch curve (measured on that protocol, ragged EOS) is unchanged —
+its grouped counterpart showed only 0.5–2% at chat batches because coverage decays as the batch
+drains. The mixed-load stall harness is unaffected by construction: it pins
+`decode_window_size=1` and grouped dispatch only runs inside decode windows.
 
 ### Correctness checks
 
@@ -554,9 +573,10 @@ The experiment answers whether short attention-inclusive graph groups help this 
 four-layer candidate clears both measurement bars: graph launches fall from 31 to 27 per
 generated token, batch 1 improves by more than 10%, and batches 64 and 256 improve rather than
 regress. The serving lifecycle checks passed and the serving question is closed (see the
-serving integration result above): grouped dispatch ships as a tested opt-in for fixed-shape
-high-batch work, and the serving default keeps the piecewise runner because whole-run gains at
-chat-scale batches under real EOS termination are 0.5–2%.
+serving integration result above): the HTTP server enables grouped dispatch by default on CUDA
+bundle models (+18% single-request greedy, +7% batch-8), while the raw engine keeps it explicit
+so fresh-engine benchmark protocols never pay capture inside timing — there the ragged-EOS
+whole-run gain is only 0.5–2% at chat batches.
 
 ## Phase 4: Fuse Measured Hot Operations
 
