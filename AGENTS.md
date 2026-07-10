@@ -6,15 +6,16 @@ model. Qwen2.5-Coder is kept as the independent HuggingFace reference for
 correctness regression. Full scope and what the repo proves live in
 [`docs/scoping.md`](docs/scoping.md). Read it before proposing work.
 
-## Core rule: match the reference before measuring speed
+## Core rule: check the reference before publishing speed
 
-For any speed claim, the engine first has to match a known-good reference output on
-the same prompt and model. For Esme bundles, the reference is the source bundle
+Raw benchmark timing is always kept. A public headline speed claim first has to qualify against a
+known-good reference output on the same prompt and model. For Esme bundles, the reference is the source bundle
 logits/generation contract. The Qwen reference uses the pinned HuggingFace
 full-recompute greedy output. Experimental paths are allowed, but they must be
-labeled as experimental until they pass those checks. There is no "correct-ish":
-exact token ids on the single-request unit path, or a divergence traced to a
-numerical tie and documented.
+labeled as experimental until they pass those checks. The single-request unit path still requires
+exact token ids. For Esme A/B experiments, keep fp32 reference status separate from direct
+candidate/baseline parity: exact direct parity can support a relative result even when both paths
+share a numerical review.
 
 ## Backends
 
@@ -60,11 +61,13 @@ preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/load
 
 ## Benchmark rules
 
-The single-request unit path must produce exact token ids. bf16 greedy can diverge
-from a reference on a genuine tie-break step; that is acceptable **only** when each divergence
-is traced to a numerical tie (logits equal within tolerance) and documented. Do not wave it
-off as "close enough." The reference check runs in **fp32** by default, where ties
-near-vanish. See `docs/internal/fixture-format.md`. A backend that fails the reference check reports no tok/s.
+The single-request unit path must produce exact token ids. Esme policy-v2 statuses are `exact`,
+`accepted_numerical`, `review_required`, and `failed`; direct parity also allows `not_applicable`.
+The 0.1-logit bf16 boundary is automatic acceptance, not a measured error distribution. Larger
+numerical differences need a durable review. Missing/extra output and confirmed bugs fail. Keep raw
+timing in all measured rows, gate public tok/s with `headline_eligible`, and do not turn historical
+benchmark migration into a reason to rerun otherwise settled experiments. See
+`docs/internal/reference-policy-retro-audit.md`.
 
 ## Development
 

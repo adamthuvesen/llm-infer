@@ -17,6 +17,12 @@ uv run scripts/plot_benchmark_curve.py
 Each harness writes raw JSON to `bench-results/` (gitignored). The curated public curve record
 is committed at `assets/esme-batch-curve.json`.
 
+Current harnesses use reference policy v2: measured rows keep raw timing/tok/s, while
+`headline_eligible` controls public reporting. Direct candidate/baseline parity is separate from
+fp32 reference status, so a shared numerical review does not hide a valid relative A/B result.
+Historical evidence and rerun decisions are cataloged in
+[`reference-policy-retro-audit.md`](reference-policy-retro-audit.md).
+
 ## Same-Run Rule
 
 The Esme decode loop is host-CPU-bound at 214M, and A100 containers vary in GPU SKU, SM clock,
