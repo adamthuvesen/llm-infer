@@ -13,10 +13,8 @@ bundle oracle. This module then times three systems on one greedy workload:
   attention, while CPU/fp32 rows fall back to the bundle's ``torch_naive`` reference path.
 * ``vllm`` — vLLM offline generate on the converted checkpoint, prefix caching off. The ceiling.
 
-Agreement uses the **same tie-tolerant rule Qwen's benchmark uses** against the fp32 reference
-(``compare_under_tie_tolerance`` with the audited bf16 tolerance, not a new one): a bf16 system
-whose only divergences from the fp32 oracle are genuine numerical ties counts as agreement and
-reports tok/s; a non-tie divergence reports no tok/s (match before measuring speed). This is why
+Agreement uses policy v2 against the fp32 reference. Raw timing is retained, while public tok/s
+requires an exact or accepted numerical status. This is why
 the ``llm_infer`` row can run on a bf16 CUDA attention backend: bf16 flips like the esme-001
 step-22 case (fp32 gap 0.0119, far under the 0.1 bf16 tolerance) are genuine ties, not bugs —
 exactly the whole-model bf16 rounding seen in the dtype check. The pieces here are pure (no Modal,
@@ -27,7 +25,7 @@ three-way is deferred.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -45,9 +43,8 @@ from llm_infer.validation.tie_tolerance import LogitsOracle
 
 DecodeOnce = Callable[[], dict[str, list[int]]]
 
-# The audited bf16 agreement tolerance: a first divergence whose fp32 top-2 gap is within this
-# is a genuine bf16 tie; beyond it is a real reduction-order divergence. NOT the fp32 1e-3 —
-# bf16 noise at these logit magnitudes is larger.
+# The audited bf16 automatic-acceptance boundary. Larger numerical differences require review;
+# they are not automatically classified as implementation bugs. This is not the fp32 1e-3 rule.
 BF16_AGREEMENT_TOLERANCE = 0.1
 
 
@@ -218,6 +215,9 @@ class EsmeAgreement:
     total: int
     ties_sample: list[dict[str, object]]
     divergences_sample: list[dict[str, object]]
+    review_required: int = 0
+    failed: int = 0
+    numerical_evidence: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def all_ties_or_exact(self) -> bool:
@@ -234,25 +234,25 @@ def tie_tolerant_agreement(
     *,
     tolerance: float = BF16_AGREEMENT_TOLERANCE,
 ) -> EsmeAgreement:
-    """Classify a system's tokens vs the fp32 oracle: exact / genuine-tie / non-tie divergence.
+    """Classify a system's tokens vs the fp32 oracle for policy-v2 review.
 
     For each request, exact match counts as exact; otherwise the first divergence is recomputed on
-    the fp32 oracle via ``compare_under_tie_tolerance`` — within ``tolerance`` it is a genuine bf16
-    tie, beyond it a real divergence. ``all_ties_or_exact`` drives ``matches_reference`` (no
-    non-tie divergence ⇒ the system reports tok/s).
+    the fp32 oracle via ``compare_under_tie_tolerance``. Within ``tolerance`` it is automatically
+    accepted numerical behavior; beyond it needs review unless the mismatch is structural.
     """
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     prompts_by_id = {req.request_id: list(req.prompt_ids) for req in requests}
     exact = 0
     ties: list[dict[str, object]] = []
-    divergences: list[dict[str, object]] = []
+    reviews: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
     missing = sorted(set(reference) - set(outputs))
     extra = sorted(set(outputs) - set(reference))
     if missing:
-        divergences.append({"request": missing[0], "detail": f"missing outputs for {missing[:3]}"})
+        failures.append({"request": missing[0], "detail": f"missing outputs for {missing[:3]}"})
     if extra:
-        divergences.append({"request": extra[0], "detail": f"unexpected outputs for {extra[:3]}"})
+        failures.append({"request": extra[0], "detail": f"unexpected outputs for {extra[:3]}"})
     for request_id in reference:
         if request_id not in outputs:
             continue
@@ -267,9 +267,45 @@ def tie_tolerant_agreement(
         )
         if result.ok and result.divergence is not None:
             d = result.divergence
-            ties.append({"request": request_id, "step": d.step, "gap": d.reference_gap})
+            ties.append(
+                {
+                    "request": request_id,
+                    "step": d.step,
+                    "fast_token": d.fast_token,
+                    "golden_token": d.golden_token,
+                    "fp32_margin": abs(d.fast_logit - d.golden_logit),
+                    "reference_gap": d.reference_gap,
+                    "fast_logit": d.fast_logit,
+                    "golden_logit": d.golden_logit,
+                }
+            )
         elif not result.ok:
-            divergences.append({"request": request_id, "detail": result.failure})
+            numerical = compare_under_tie_tolerance(
+                oracle_model,
+                prompts_by_id[request_id],
+                fast,
+                gold,
+                tolerance=float("inf"),
+            )
+            if numerical.divergence is None:
+                failures.append({"request": request_id, "detail": result.failure})
+                continue
+            d = numerical.divergence
+            reviews.append(
+                {
+                    "request": request_id,
+                    "step": d.step,
+                    "fast_token": d.fast_token,
+                    "golden_token": d.golden_token,
+                    "fp32_margin": abs(d.fast_logit - d.golden_logit),
+                    "reference_gap": d.reference_gap,
+                    "fast_logit": d.fast_logit,
+                    "golden_logit": d.golden_logit,
+                    "automatic_boundary": tolerance,
+                    "detail": result.failure,
+                }
+            )
+    divergences = [*reviews, *failures]
     return EsmeAgreement(
         exact=exact,
         tie=len(ties),
@@ -277,6 +313,9 @@ def tie_tolerant_agreement(
         total=len(reference),
         ties_sample=ties[:3],
         divergences_sample=divergences[:3],
+        review_required=len(reviews),
+        failed=len(failures),
+        numerical_evidence=[*ties, *reviews],
     )
 
 
