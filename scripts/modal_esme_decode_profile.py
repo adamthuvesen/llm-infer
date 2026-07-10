@@ -1332,6 +1332,314 @@ def grouped_layer_ab(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=3 * 60 * 60,
+)
+def bucket_policy_report(probe_batches: list[int]) -> str:
+    """The grouped bucket-policy record: off-bucket A/B, capture budget, workspace sharing.
+
+    Three questions, one container:
+
+    1. **Exact-size vs padded grouped buckets.** For each off-bucket batch N, A/B today's
+       real fallback (piecewise, padded up to the next bucket) against an exact-N grouped
+       runner — the ceiling any padded-grouped design could reach. A small gap means
+       exact-size-only wins on simplicity; a large gap prices the pad-row scratch design.
+    2. **Capture budget.** Per-bucket capture seconds and owned memory for the full
+       power-of-two ladder, so the serving default set is chosen against a startup budget.
+    3. **Workspace sharing.** Build the ladder twice (per-runner vs one shared 128 MiB
+       FlashInfer workspace) and gate a mixed-bucket decode on the shared engine against
+       the fp32 oracle — deciding ~200 MiB versus ~1.1 GiB for an 8-bucket set.
+    """
+    import statistics
+
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        build_requests,
+        requests_at_context_length,
+    )
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import (
+        build_system_evidence_record,
+        normalized_outputs_match,
+    )
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    context_length = 256
+    max_new_tokens = 128
+    warmup_pairs = 2
+    measured_pairs = 6
+    piecewise_buckets = (16, 32, 64, 128, 256)
+    ladder = (1, 2, 4, 8, 16, 32, 64, 128)
+    eos = frozenset()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
+
+    def reference_for(requests) -> dict[str, list[int]]:
+        for request in requests:
+            if request.prompt_ids not in reference_by_prompt:
+                reference_by_prompt[request.prompt_ids] = greedy_decode(
+                    oracle_runtime.model,
+                    list(request.prompt_ids),
+                    max_new_tokens=max_new_tokens,
+                    eos_token_ids=set(eos),
+                )
+        return {
+            request.request_id: list(reference_by_prompt[request.prompt_ids])
+            for request in requests
+        }
+
+    def build_engine(runtime, requests, batch_size: int, **grouped_kwargs) -> InferenceEngine:
+        needed = sum(
+            math.ceil((len(request.prompt_ids) + max_new_tokens) / 64) for request in requests
+        )
+        return InferenceEngine(
+            runtime.model,
+            block_size=64,
+            num_blocks=needed + max(8, batch_size),
+            device="cuda",
+            capabilities=runtime.capabilities,
+            **grouped_kwargs,
+        )
+
+    def decode_once(engine, requests) -> tuple[float, int, dict[str, list[int]]]:
+        """Add every request, absorb the first (prefill) step, then time the decode drain."""
+        for request in requests:
+            engine.add_request(
+                Request(request.request_id, list(request.prompt_ids), max_new_tokens, eos)
+            )
+        outputs = {request.request_id: [] for request in requests}
+        first = engine.step()
+        for request_id, tokens in first.tokens.items():
+            outputs[request_id].extend(int(token) for token in tokens)
+        torch.cuda.synchronize()
+        decode_tokens = 0
+        start = time.perf_counter()
+        while engine.scheduler.has_work():
+            result = engine.step()
+            for request_id, tokens in result.tokens.items():
+                values = [int(token) for token in tokens]
+                outputs[request_id].extend(values)
+                decode_tokens += len(values)
+        torch.cuda.synchronize()
+        return time.perf_counter() - start, decode_tokens, outputs
+
+    rows: list[dict[str, object]] = []
+    for batch_size in probe_batches:
+        labels = ("piecewise_padded", "grouped_exact")
+        runtimes = {
+            label: load_model_runtime(
+                "esme",
+                bundle_path=Path(REMOTE_BUNDLE_PATH),
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            for label in labels
+        }
+        requests_by_label = {
+            label: requests_at_context_length(
+                build_requests(runtime.tokenizer, batch_size, HEADLINE_PROMPTS),
+                context_length,
+            )
+            for label, runtime in runtimes.items()
+        }
+        # Both systems keep the identical piecewise fallback; the candidate adds one
+        # exact-batch grouped runner on top, which is exactly the serving dispatch chain.
+        for label in labels:
+            runtimes[label].model.enable_decode_graphs(capture_sizes=piecewise_buckets)
+        engines = {
+            "piecewise_padded": build_engine(
+                runtimes["piecewise_padded"],
+                requests_by_label["piecewise_padded"],
+                batch_size,
+            ),
+            "grouped_exact": build_engine(
+                runtimes["grouped_exact"],
+                requests_by_label["grouped_exact"],
+                batch_size,
+                grouped_decode_graphs=True,
+                grouped_capture_sizes=(batch_size,),
+            ),
+        }
+        timings = {label: [] for label in labels}
+        token_counts = {label: [] for label in labels}
+        last_outputs: dict[str, dict[str, list[int]]] = {}
+        for pair in range(warmup_pairs + measured_pairs):
+            order = labels if pair % 2 == 0 else tuple(reversed(labels))
+            for label in order:
+                elapsed, tokens, outputs = decode_once(engines[label], requests_by_label[label])
+                if pair >= warmup_pairs:
+                    timings[label].append(elapsed)
+                    token_counts[label].append(tokens)
+                    last_outputs[label] = outputs
+
+        grouped_runner = engines["grouped_exact"].grouped_decode_runners[batch_size]
+        if grouped_runner.steps_handled == 0:
+            raise RuntimeError(f"grouped runner never fired at exact batch {batch_size}")
+        reference = reference_for(requests_by_label["piecewise_padded"])
+        batch_rows: list[dict[str, object]] = []
+        for label in labels:
+            agreement = tie_tolerant_agreement(
+                oracle_runtime.model,
+                requests_by_label[label],
+                last_outputs[label],
+                reference,
+                eos,
+            )
+            median_s = statistics.median(timings[label])
+            tokens = token_counts[label][-1]
+            row = {
+                "batch_size": batch_size,
+                "context_length": context_length,
+                "runner": label,
+                "padded_bucket": (
+                    next((b for b in piecewise_buckets if b >= batch_size), None)
+                    if label == "piecewise_padded"
+                    else batch_size
+                ),
+                "agreement": dataclasses.asdict(agreement),
+                "decode_median_seconds": median_s,
+                "decode_per_iter_seconds": timings[label],
+                "total_decode_tokens": tokens,
+                **build_system_evidence_record(
+                    agreement=agreement,
+                    median_seconds=median_s,
+                    total_tokens=tokens,
+                ),
+            }
+            if label == "grouped_exact":
+                row["capture"] = {
+                    "seconds": grouped_runner.total_capture_seconds,
+                    "group_seconds": grouped_runner.capture_seconds,
+                    "group_owned_memory_bytes": grouped_runner.owned_group_memory_bytes,
+                    "steps_handled": grouped_runner.steps_handled,
+                }
+            batch_rows.append(row)
+            rows.append(row)
+
+        baseline_row, candidate_row = batch_rows
+        parity_exact = normalized_outputs_match(
+            last_outputs["piecewise_padded"], last_outputs["grouped_exact"], eos
+        )
+        relative_claim_eligible = (
+            parity_exact
+            and token_counts["piecewise_padded"][-1] == token_counts["grouped_exact"][-1]
+        )
+        raw_ratio = candidate_row["decode_median_seconds"] / baseline_row["decode_median_seconds"]
+        rows.append(
+            {
+                "policy_version": 2,
+                "batch_size": batch_size,
+                "runner": "grouped_exact_vs_piecewise_padded",
+                "parity_status": "exact" if parity_exact else "review_required",
+                "relative_claim_eligible": relative_claim_eligible,
+                "raw_decode_median_ratio": raw_ratio,
+                "decode_median_ratio": raw_ratio if relative_claim_eligible else None,
+            }
+        )
+        print(
+            f"[bucket-policy] batch={batch_size}: grouped/piecewise wall ratio "
+            f"{raw_ratio:.3f} (parity {'exact' if parity_exact else 'REVIEW'})"
+        )
+        del engines, runtimes
+        torch.cuda.empty_cache()
+
+    # Workspace sharing: capture the ladder twice, then gate a mixed-bucket decode on the
+    # shared engine so wrapper interleaving across runners is exercised, not assumed.
+    sharing: dict[str, object] = {"ladder": list(ladder)}
+    sharing_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    sharing_runtime.model.enable_decode_graphs(capture_sizes=piecewise_buckets)
+    ladder_requests = requests_at_context_length(
+        build_requests(sharing_runtime.tokenizer, max(ladder), HEADLINE_PROMPTS),
+        context_length,
+    )
+    for shared in (False, True):
+        torch.cuda.synchronize()
+        allocated_before = torch.cuda.memory_allocated()
+        start = time.perf_counter()
+        engine = build_engine(
+            sharing_runtime,
+            ladder_requests,
+            max(ladder),
+            grouped_decode_graphs=True,
+            grouped_capture_sizes=ladder,
+            grouped_shared_workspace=shared,
+        )
+        torch.cuda.synchronize()
+        capture_s = time.perf_counter() - start
+        capture_bytes = torch.cuda.memory_allocated() - allocated_before
+        key = "shared_workspace" if shared else "per_runner_workspace"
+        sharing[key] = {
+            "total_capture_seconds": capture_s,
+            "total_allocator_delta_bytes": capture_bytes,
+            "per_bucket": {
+                str(size): {
+                    "capture_seconds": runner.total_capture_seconds,
+                    "group_owned_memory_bytes": runner.owned_group_memory_bytes,
+                }
+                for size, runner in engine.grouped_decode_runners.items()
+            },
+        }
+        if shared:
+            # Mixed-bucket parity: run the full ladder batch, then a smaller one, through
+            # the same shared-workspace engine and require exact fp32 reference agreement.
+            parity: dict[str, object] = {}
+            for size in (max(ladder), 8):
+                requests = ladder_requests[:size]
+                _, _, outputs = decode_once(engine, requests)
+                agreement = tie_tolerant_agreement(
+                    oracle_runtime.model,
+                    requests,
+                    outputs,
+                    reference_for(requests),
+                    eos,
+                )
+                runner = engine.grouped_decode_runners[size]
+                parity[str(size)] = {
+                    "agreement": dataclasses.asdict(agreement),
+                    "steps_handled": runner.steps_handled,
+                }
+                if runner.steps_handled == 0:
+                    raise RuntimeError(f"shared-workspace runner never fired at batch {size}")
+            sharing[key]["mixed_bucket_parity"] = parity
+        del engine
+        torch.cuda.empty_cache()
+
+    return json.dumps(
+        {
+            "probe": "grouped-bucket-policy",
+            "policy_version": 2,
+            "measurement_status": "measured",
+            "rows": rows,
+            "workspace_sharing": sharing,
+            "experiment": {
+                "probe_batches": probe_batches,
+                "piecewise_buckets": list(piecewise_buckets),
+                "context_length": context_length,
+                "max_new_tokens": max_new_tokens,
+                "warmup_pairs": warmup_pairs,
+                "measured_pairs": measured_pairs,
+                "grouped_layer_count": 4,
+            },
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
 def serve_smoke() -> str:
@@ -1518,11 +1826,12 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "two-layer-group-ab",
         "four-layer-group-ab",
         "four-layer-parity",
+        "bucket-policy",
     ):
         raise ValueError(
             "command must be 'profile', 'bench', 'ablate', 'capture', 'sync', "
             "'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
-            "'four-layer-group-ab', or 'four-layer-parity', "
+            "'four-layer-group-ab', 'four-layer-parity', or 'bucket-policy', "
             f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
@@ -1542,6 +1851,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     elif command == "four-layer-parity":
         print("[esme-decode] cache-owned four-layer graph: batch-8 correctness only")
         record = json.loads(grouped_layer_ab.remote(4, True))
+    elif command == "bucket-policy":
+        print(f"[esme-decode] grouped bucket-policy record: off-bucket batches {sizes}")
+        record = json.loads(bucket_policy_report.remote(sizes))
     elif command == "profile":
         print(
             f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, greedy, "
@@ -1572,7 +1884,8 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             None
             if command == "flashinfer-graph-probe"
             else 128
-            if command in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity")
+            if command
+            in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity", "bucket-policy")
             else MAX_NEW_TOKENS
         ),
         "warmup": (
@@ -1581,7 +1894,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else 0
             if command == "four-layer-parity"
             else 2
-            if command in ("two-layer-group-ab", "four-layer-group-ab")
+            if command in ("two-layer-group-ab", "four-layer-group-ab", "bucket-policy")
             else WARMUP_ITERS
         ),
         "iters": (
@@ -1589,6 +1902,8 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             if command in ("flashinfer-graph-probe", "four-layer-parity")
             else 10
             if command in ("two-layer-group-ab", "four-layer-group-ab")
+            else 6
+            if command == "bucket-policy"
             else MEASURED_ITERS
         ),
         "backend": (
