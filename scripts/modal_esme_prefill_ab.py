@@ -839,20 +839,23 @@ def diagnose_prefill_divergence(
     }
 
 
-def _run_prefill_divergence(bundle_path: str) -> None:
-    """Rerun the batch-8 ragged 64-token cell with extra recording; write the divergence JSON.
+def _run_prefill_divergence(bundle_path: str, context_length: int) -> None:
+    """Rerun one batch-8 64-token cell with extra recording; write the divergence JSON.
 
+    ``context_length`` 0 selects the ragged cell; a positive value selects that uniform cell.
     Single cheap cell, so no rows-log / resume machinery: it writes one timestamped file whose
     name cannot collide with the A/B rows log.
     """
+    if context_length < 0:
+        raise ValueError(f"context-length must be 0 (ragged) or positive; got {context_length}")
     out_dir = REPO_ROOT / "bench-results"
     out_dir.mkdir(exist_ok=True)
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-prefill-divergence")
     record = diagnose_prefill_divergence.remote(
         batch_size=8,
-        shape="ragged",
-        context_length=None,
+        shape="ragged" if context_length == 0 else "uniform",
+        context_length=None if context_length == 0 else context_length,
         max_new_tokens=64,
         repeats=5,
     )
@@ -863,11 +866,18 @@ def _run_prefill_divergence(bundle_path: str) -> None:
 
 
 @app.local_entrypoint()
-def main(command: str = "prefill-ab", bundle_path: str = "", resume: bool = False) -> None:
+def main(
+    command: str = "prefill-ab",
+    bundle_path: str = "",
+    resume: bool = False,
+    context_length: int = 0,
+) -> None:
     """Stage Esme, stream the A/B protocol to a rows log, and write the combined JSON record."""
     if command == "prefill-divergence":
-        _run_prefill_divergence(bundle_path)
+        _run_prefill_divergence(bundle_path, context_length)
         return
+    if context_length != 0:
+        raise ValueError("--context-length only applies to --command prefill-divergence")
     if command == "prefill-smoke":
         batch_sizes = [8]
         uniform_lengths: list[int] = []
