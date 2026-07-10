@@ -151,6 +151,22 @@ def test_stale_cache_runner_is_never_consulted_after_rebuild(runtime) -> None:
     assert _grouped_steps(engine) == 0
 
 
+def test_oversized_bucket_is_skipped_not_fatal(runtime) -> None:
+    """A bucket the pool cannot hold a capture window for is dropped; the rest capture.
+
+    With ``num_blocks=64`` and ``block_size=4``, one capture window needs 2 blocks per
+    request, so bucket 40 (80 blocks) exceeds the pool while bucket 3 fits. Startup must
+    not raise, the oversized bucket must be absent, and the surviving bucket must serve.
+    """
+    runtime.model.decode_graphs = None
+    plain = _run(_build_engine(runtime))
+
+    engine = _build_engine(runtime, grouped_sizes=(3, 40))
+    assert sorted(engine.grouped_decode_runners) == [3]
+    assert _run(engine) == plain
+    assert engine.grouped_decode_runners[3].steps_handled > 0
+
+
 def test_grouped_dispatch_requires_planned_decode(runtime) -> None:
     without_planned = replace(runtime.capabilities, planned_decode=False)
     with pytest.raises(ValueError, match="grouped_decode_graphs requires"):

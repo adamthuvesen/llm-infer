@@ -295,10 +295,18 @@ def build_engine_grouped_runners(
     serving region. Capture warmup writes into those blocks, but every later user of a
     reused block overwrites its slots during prefill before reading them. On CPU the
     runners run the same tranche ordering eagerly — the parity-test hook.
+
+    Buckets larger than the cache can hold a window for are skipped, not fatal: the
+    returned dict's keys are the sizes that actually captured.
     """
     sizes = tuple(sorted(set(capture_sizes)))
     if not sizes or sizes[0] < 1:
         raise ValueError(f"capture_sizes must be positive; got {capture_sizes!r}")
+    # A bucket whose capture window the pool cannot hold is unreachable at runtime too —
+    # a real batch of that size could never reserve a decode window from the same pool —
+    # so skip it instead of failing engine construction on a small cache.
+    blocks_per_table = -(-_CAPTURE_PLAN_BUDGET // cache.block_size)
+    sizes = tuple(size for size in sizes if size * blocks_per_table <= cache.allocator.num_free)
     mode = "graph" if model.device.type == "cuda" else "eager"
     workspace: torch.Tensor | None = None
     if shared_workspace and mode == "graph":
