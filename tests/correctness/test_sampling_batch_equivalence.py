@@ -1,17 +1,16 @@
-"""Benchmark rules for per-request sampling: a request's draw is independent of its batch.
+"""Per-request sampling checks for RNG isolation and stable-logit equivalence.
 
-This is the load-bearing correctness property of per-request sampling. Each request samples
-from its OWN seeded generator against its OWN generated history, so the token it draws at a
-given decode step depends only on its seed and its own steps — never on which other requests
-share the fused decode batch. The consequence, asserted here:
+Each request samples from its own seeded generator against its own generated history. These tests
+check that batchmates do not consume another request's RNG state. The tiny fp32 model also has
+stable serial and batched logits, so it supports a stronger exact-token check:
 
-* **batched == serial under sampling** — a ``temperature > 0`` request with a fixed seed
+* **batched == serial when logits are stable**: a ``temperature > 0`` request with a fixed seed
   produces the identical token sequence whether it runs alone or batched with other,
   differently-configured requests (a mix of seeds, temperatures, and greedy rows);
 * greedy rows in the same batch stay token-for-token the proven greedy path;
 * seed reproducibility and seed divergence hold end-to-end through the engine.
 
-Run on the tiny random-weight Qwen (37-token vocab) on CPU — real logits with genuine
+Run on the tiny random-weight Qwen (37-token vocab) on CPU. It has real logits with genuine
 entropy, so sampling actually exercises the RNG, but no 3B load and no GPU.
 """
 
@@ -35,8 +34,8 @@ def _run_alone(prompt: list[int], sampling: SamplingParams) -> list[int]:
     return engine.run()["solo"]
 
 
-def test_sampled_request_batched_equals_serial() -> None:
-    """A seeded sampled request decodes identically alone or batched with other requests.
+def test_sampled_request_batched_equals_serial_when_logits_are_stable() -> None:
+    """A seeded request matches alone and batched when the model logits match.
 
     The batch deliberately mixes a high-temperature request, a different-seed request, a
     top-k/penalty request, and a greedy request — none of which may perturb the target's draw.

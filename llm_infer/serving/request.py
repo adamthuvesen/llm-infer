@@ -6,11 +6,10 @@ semantics mirror the reference check ``greedy_decode`` exactly (EOS token includ
 ``max_new_tokens``) so the cached/paged path reproduces the full-recompute reference
 token-for-token.
 
-The request also owns its sampling RNG: a single :class:`torch.Generator` seeded once with
-``sampling.seed`` and reused across the request's own decode steps via :meth:`generator`. A
-request's draw therefore depends only on its seed and its own decode history — never on which
-other requests share the batch — which is what makes a sampled request reproduce its tokens
-identically run alone or batched (batched == serial under sampling).
+The request also owns its sampling random-number-generator (RNG): a single
+:class:`torch.Generator` seeded once with ``sampling.seed`` and reused across its decode steps via
+:meth:`generator`. Batchmates cannot consume this request's draws. Exact sampled tokens may still
+change across batch shapes when bf16 model kernels produce slightly different logits.
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ class Request:
         """This request's seeded RNG, created once on first sample on the logits' device.
 
         Seeded with ``sampling.seed`` and never re-seeded, so successive draws form one stream
-        keyed only to this request's seed and its own decode steps. The device is fixed for an
+        keyed to this request's seed and draw count. The device is fixed for an
         engine instance; a later device change is a real bug (CPU/CUDA mix) and raises rather
         than silently re-seeding mid-generation.
         """

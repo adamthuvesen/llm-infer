@@ -1,12 +1,9 @@
 """Per-request token selection from next-token logits: greedy and seeded sampling.
 
-Sampling is **per request**, not per batch. Each request carries its own
-:class:`SamplingParams` (temperature, top-p, top-k, penalties, seed) and draws from its
-own seeded :class:`torch.Generator`, so a request's token at a given decode step depends
-only on its own params, its own generated history, and its own seed — never on which other
-requests happen to share the decode batch. That independence is the load-bearing
-property: a sampled request produces the **identical** sequence run alone or batched
-with others (proved by the batched==serial-under-sampling test).
+Each request owns a seeded :class:`torch.Generator`, so batchmates cannot consume its random
+draws. Exact tokens can still change with the decode batch shape because bf16 model kernels can
+produce slightly different logits. Given the same logits and history, the draw depends only on
+the request's :class:`SamplingParams` and generator state.
 
 ``temperature == 0`` is a hard special case that returns the argmax — token-for-token
 the path already checked against the cached greedy reference — so a greedy request
