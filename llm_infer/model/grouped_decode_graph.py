@@ -286,7 +286,7 @@ def build_engine_grouped_runners(
     *,
     grouped_layers: int,
     max_position: int = 8192,
-    shared_workspace: bool = False,
+    shared_workspace: bool = True,
 ) -> dict[int, EngineOwnedGroupedDecodeGraphRunner]:
     """Capture one grouped runner per exact batch size against ``cache``, at construction.
 
@@ -303,7 +303,10 @@ def build_engine_grouped_runners(
     workspace: torch.Tensor | None = None
     if shared_workspace and mode == "graph":
         # One 128 MiB FlashInfer workspace backs every bucket's wrapper instead of one
-        # each — safe because window steps never interleave across runners.
+        # each — safe because window steps never interleave across runners, and each step
+        # re-plans its wrapper before running. The A100 bucket-policy record verified the
+        # shared ladder reproduces the dedicated-workspace agreement profile exactly while
+        # saving ~1 GiB on an 8-bucket set.
         workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=model.device)
     runners: dict[int, EngineOwnedGroupedDecodeGraphRunner] = {}
     for size in sizes:
