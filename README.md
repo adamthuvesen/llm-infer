@@ -124,14 +124,14 @@ EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
 A system reports tok/s only after its tokens match the fp32 `PretrainBundleModel.logits()`
 reference, with traced numerical ties the only allowed difference.
 
-Headline: `2026-07-07`, A100-80GB, default CUDA Esme path with `FlashInferPagedAttention`,
+Headline: `2026-07-10`, A100-80GB, default CUDA Esme path with `FlashInferPagedAttention`,
 **256 concurrent chat requests x up to 256 new tokens** (within Esme's 1024-token context),
 greedy, median of 3 iterations:
 
 | System | tok/s | vs naive baseline |
 | --- | ---: | ---: |
-| naive HF sequential | 39.5 | 1x |
-| `llm_infer` | 3,776.8 | **95.6x** |
+| naive HF sequential | 22.1 | 1x |
+| `llm_infer` | 13,490.5 | **610.8x** |
 
 The batch-sweep curve below is the same run. Throughput scales with concurrency because all
 requests decode through one shared paged-KV engine, while the naive baseline stays flat:
