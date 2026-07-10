@@ -111,8 +111,7 @@ def _build_flash_base(*, cuda_image: str = CUDA_IMAGE) -> modal.Image:
 
 def _finish_image(image: modal.Image) -> modal.Image:
     return (
-        image
-        .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=IGNORE)
+        image.add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=IGNORE)
         .workdir(REMOTE_ROOT)
         .run_commands("pip install --no-deps -e .")
     )

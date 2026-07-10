@@ -150,9 +150,7 @@ class _FixedOracle:
     ("margin", "expected"),
     [(0.05, "accepted_numerical"), (0.2, "review_required")],
 )
-def test_esme_classifier_uses_point_one_as_automatic_boundary(
-    margin: float, expected: str
-) -> None:
+def test_esme_classifier_uses_point_one_as_automatic_boundary(margin: float, expected: str) -> None:
     agreement = tie_tolerant_agreement(
         _FixedOracle([1.0, 1.0 - margin]),
         [EsmeBenchRequest("r0", "prompt", (3,))],

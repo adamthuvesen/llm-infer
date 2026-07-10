@@ -39,9 +39,7 @@ def test_plan_matches_classic_bookkeeping_step_by_step() -> None:
     # Ragged lengths across block boundaries: 3 (partial), 5 (crosses), 9 (multi-block).
     tables = [_prefilled_table(cache, length) for length in (3, 5, 9)]
     budget = 6
-    plan = build_decode_window_plan(
-        cache, tables, budget, include_pages=True, include_packed=True
-    )
+    plan = build_decode_window_plan(cache, tables, budget, include_pages=True, include_packed=True)
     assert plan is not None
 
     for _ in range(budget):
@@ -62,8 +60,7 @@ def test_plan_matches_classic_bookkeeping_step_by_step() -> None:
         assert read_plan.page_plan.indptr.tolist() == reference.page_plan.indptr.tolist()
         assert read_plan.page_plan.indices.tolist() == reference.page_plan.indices.tolist()
         assert (
-            read_plan.page_plan.last_page_len.tolist()
-            == reference.page_plan.last_page_len.tolist()
+            read_plan.page_plan.last_page_len.tolist() == reference.page_plan.last_page_len.tolist()
         )
         assert read_plan.page_plan.page_size == reference.page_plan.page_size
 

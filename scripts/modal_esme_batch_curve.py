@@ -262,9 +262,7 @@ def sweep_baseline(
             torch.cuda.synchronize()
             engine_kv_startup_s = time.perf_counter() - startup_start
 
-            def persistent_once(
-                requests=requests, engine=engine
-            ) -> dict[str, list[int]]:
+            def persistent_once(requests=requests, engine=engine) -> dict[str, list[int]]:
                 for request in requests:
                     engine.add_request(
                         Request(
@@ -332,11 +330,7 @@ def sweep_baseline(
 
             model = engine_runtime.model
             kv_bytes_per_token = (
-                model.num_layers
-                * 2
-                * model.num_kv_heads
-                * model.head_dim
-                * model.dtype.itemsize
+                model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
             )
             row = {
                 "system": "llm_infer_persistent",
@@ -714,9 +708,7 @@ def sweep_flashinfer_compare(
         system: str, size: int, runtime, requests, outputs, per_iter: list[float]
     ) -> dict:
         reference = reference_for(requests)
-        agreement = tie_tolerant_agreement(
-            oracle_runtime.model, requests, outputs, reference, eos
-        )
+        agreement = tie_tolerant_agreement(oracle_runtime.model, requests, outputs, reference, eos)
         tokens = total_output_tokens(outputs, eos)
         median_s = statistics.median(per_iter)
         model = runtime.model
@@ -741,8 +733,7 @@ def sweep_flashinfer_compare(
         for system, runtime in runtimes:
             requests = build_requests(runtime.tokenizer, size, HEADLINE_PROMPTS)
             needed = sum(
-                math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE)
-                for req in requests
+                math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
             )
             num_blocks = needed + max(4, len(requests))
             peak = _PeakBlocks()
@@ -858,9 +849,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
     if command.startswith("flashinfer-"):
         print(f"[esme-curve] flashinfer compare: llm_infer {llm_infer_batches}")
         sweep_res = json.loads(
-            sweep_flashinfer_compare.remote(
-                llm_infer_batches, max_new_tokens, warmup, iters
-            )
+            sweep_flashinfer_compare.remote(llm_infer_batches, max_new_tokens, warmup, iters)
         )
         record = {
             "rows": sweep_res["rows"],
@@ -896,8 +885,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
 
     if command in ("baseline", "baseline-smoke"):
         print(
-            f"[baseline] llm_infer matrix: batches {llm_infer_batches}, "
-            f"contexts {context_lengths}"
+            f"[baseline] llm_infer matrix: batches {llm_infer_batches}, contexts {context_lengths}"
         )
         sweep_res = json.loads(
             sweep_baseline.remote(

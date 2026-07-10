@@ -48,9 +48,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         if grouped_layers not in (2, 4):
             raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
         if model.num_layers < grouped_layers:
-            raise ValueError(
-                f"grouped probe needs {grouped_layers} layers; got {model.num_layers}"
-            )
+            raise ValueError(f"grouped probe needs {grouped_layers} layers; got {model.num_layers}")
         if mode == "graph" and capture_plan is None:
             raise ValueError("graph mode needs a prefilled capture plan")
         if mode == "graph" and model.num_layers == grouped_layers:
@@ -70,9 +68,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._state = self.piecewise._buckets[batch_size]
         self._active_plan: DecodeWindowPlan | None = None
         self._cache_kv_pointer = cache.kv.data_ptr()
-        self._static_write_slots = torch.zeros(
-            batch_size, dtype=torch.long, device=model.device
-        )
+        self._static_write_slots = torch.zeros(batch_size, dtype=torch.long, device=model.device)
         self._group_graph: torch.cuda.CUDAGraph | None = None
         self._graph_wrapper = None
         self._graph_shape: FlashInferProbeShape | None = None
@@ -181,28 +177,18 @@ class EngineOwnedGroupedDecodeGraphRunner:
         backend = self.model._paged_backend
         if backend is None:
             raise ValueError("graph mode needs a native paged attention backend")
-        write_slots, read_plan = capture_plan.begin_step(
-            include_pages=True, include_packed=False
-        )
+        write_slots, read_plan = capture_plan.begin_step(include_pages=True, include_packed=False)
         if read_plan.page_plan is None:
             raise RuntimeError("capture plan did not produce native page metadata")
         self._static_write_slots.copy_(write_slots)
         self._state.positions.copy_(capture_plan.positions)
         fixed_metadata = FlashInferPageMetadata(
-            indptr=torch.empty(
-                self.batch_size + 1, dtype=torch.int32, device=self.model.device
-            ),
-            indices=torch.empty(
-                self.cache.num_blocks, dtype=torch.int32, device=self.model.device
-            ),
-            last_page_len=torch.empty(
-                self.batch_size, dtype=torch.int32, device=self.model.device
-            ),
+            indptr=torch.empty(self.batch_size + 1, dtype=torch.int32, device=self.model.device),
+            indices=torch.empty(self.cache.num_blocks, dtype=torch.int32, device=self.model.device),
+            last_page_len=torch.empty(self.batch_size, dtype=torch.int32, device=self.model.device),
         )
         # FlashInfer requires a zeroed workspace before the wrapper's first use.
-        workspace = torch.zeros(
-            128 * 1024 * 1024, dtype=torch.uint8, device=self.model.device
-        )
+        workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=self.model.device)
         wrapper_class = backend._decode_wrapper_class(backend._flashinfer)
         self._graph_wrapper = build_graph_wrapper(wrapper_class, workspace, fixed_metadata)
         self._graph_workspace = workspace
@@ -247,11 +233,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         # its own slot before attending to it, so no captured value reaches generation.
 
     def _plan_group_wrapper(self, read_plan: KVReadPlan) -> None:
-        if (
-            self._graph_wrapper is None
-            or self._graph_shape is None
-            or read_plan.page_plan is None
-        ):
+        if self._graph_wrapper is None or self._graph_shape is None or read_plan.page_plan is None:
             raise RuntimeError("grouped graph wrapper cannot plan this read metadata")
         plan_wrapper(
             self._graph_wrapper,

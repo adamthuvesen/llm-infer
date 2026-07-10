@@ -34,9 +34,7 @@ class AsyncEngineRequestObserver(Protocol):
 
     def admitted(self, request_id: str, admitted_s: float) -> None: ...
 
-    def finished(
-        self, request_id: str, token_ids: list[int], finished_s: float
-    ) -> None: ...
+    def finished(self, request_id: str, token_ids: list[int], finished_s: float) -> None: ...
 
 
 @dataclass
@@ -210,9 +208,7 @@ class AsyncInferenceEngine:
                 if item.finish_reason is not None:
                     finished_s = time.perf_counter()
                     if self._metrics is not None:
-                        self._metrics.request_latency_seconds.observe(
-                            finished_s - submitted_s
-                        )
+                        self._metrics.request_latency_seconds.observe(finished_s - submitted_s)
                         self._metrics.requests_completed_total.inc(finish_reason=item.finish_reason)
                     return
         finally:

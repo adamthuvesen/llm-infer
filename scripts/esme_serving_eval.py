@@ -232,9 +232,7 @@ class StreamOutputObserver:
         if record is not None:
             record.admitted_s = admitted_s
 
-    def finished(
-        self, request_id: str, token_ids: list[int], finished_s: float
-    ) -> None:
+    def finished(self, request_id: str, token_ids: list[int], finished_s: float) -> None:
         record = self._records.get(request_id)
         if record is not None:
             record.token_ids = list(token_ids)
@@ -761,9 +759,7 @@ async def run_network_http_workload(
     _synchronize_device(device)
     engine_build_s = time.perf_counter() - engine_build_started_s
     metrics = ServerMetrics()
-    async_engine = AsyncInferenceEngine(
-        engine, metrics=metrics, request_observer=observer
-    )
+    async_engine = AsyncInferenceEngine(engine, metrics=metrics, request_observer=observer)
     app = create_app(
         async_engine=async_engine,
         tokenizer=runtime.tokenizer,
@@ -817,9 +813,7 @@ async def run_network_http_workload(
 
             warmup_started_s = time.perf_counter()
             for _ in range(warmup_runs):
-                warmup_results = await asyncio.gather(
-                    *(one(spec) for spec in workload.requests)
-                )
+                warmup_results = await asyncio.gather(*(one(spec) for spec in workload.requests))
                 failures = [result.error for result in warmup_results if result.status == "error"]
                 if failures:
                     raise RuntimeError(f"serving warmup failed: {failures[0]}")
@@ -831,9 +825,7 @@ async def run_network_http_workload(
             for _ in range(measured_runs):
                 _synchronize_device(device)
                 wall_start = time.perf_counter()
-                run_results = await asyncio.gather(
-                    *(one(spec) for spec in workload.requests)
-                )
+                run_results = await asyncio.gather(*(one(spec) for spec in workload.requests))
                 _synchronize_device(device)
                 wall_s += time.perf_counter() - wall_start
                 client_results.extend(run_results)
@@ -1233,15 +1225,9 @@ def _external_workload_result(
             "itl_p50_s": _percentile(client_summary["itl_values"], 50),
             "itl_p95_s": _percentile(client_summary["itl_values"], 95),
             "per_token_latency_p50_s": _percentile(client_summary["itl_values"], 50),
-            "per_token_latency_p99_s": _percentile(
-                client_summary["itl_values"], 99
-            ),
-            "queue_time_p50_s": engine_metrics.get(
-                "public_queue_time_p50_bucket_upper_s"
-            ),
-            "queue_time_p95_s": engine_metrics.get(
-                "public_queue_time_p95_bucket_upper_s"
-            ),
+            "per_token_latency_p99_s": _percentile(client_summary["itl_values"], 99),
+            "queue_time_p50_s": engine_metrics.get("public_queue_time_p50_bucket_upper_s"),
+            "queue_time_p95_s": engine_metrics.get("public_queue_time_p95_bucket_upper_s"),
             "queue_time_p99_s": None,
             **engine_metrics,
         },

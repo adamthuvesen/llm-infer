@@ -112,9 +112,7 @@ def test_network_streaming_workload_uses_uvicorn_and_keeps_reference_gate(
     workload, _ = phase0_http_workloads(1, max_new_tokens=4, block_size=8, num_blocks=16)
 
     result = asyncio.run(
-        run_network_http_workload(
-            runtime, workload, device="cpu", warmup_runs=1, measured_runs=3
-        )
+        run_network_http_workload(runtime, workload, device="cpu", warmup_runs=1, measured_runs=3)
     )
 
     assert result["surface"] == "network-http"

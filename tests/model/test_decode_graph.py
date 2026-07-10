@@ -172,9 +172,7 @@ def test_grouped_runner_foreign_cache_falls_back_without_advancing(runtime) -> N
         model, bound_cache, batch_size=1, grouped_layers=2, mode="eager"
     )
 
-    assert runner.window_step(
-        foreign_cache, plan, torch.argmax(logits).reshape(1)
-    ) is None
+    assert runner.window_step(foreign_cache, plan, torch.argmax(logits).reshape(1)) is None
     assert plan.steps_used == 0
 
 

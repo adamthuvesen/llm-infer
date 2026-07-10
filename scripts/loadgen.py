@@ -289,9 +289,7 @@ def summarize(
         "server_itl_p95_bucket_upper_s": _histogram_delta_quantile(
             before, after, "llm_infer_itl_seconds", 95
         ),
-        "per_request_per_s_mean": (
-            statistics.fmean(per_req_rates) if per_req_rates else None
-        ),
+        "per_request_per_s_mean": (statistics.fmean(per_req_rates) if per_req_rates else None),
     }
 
 

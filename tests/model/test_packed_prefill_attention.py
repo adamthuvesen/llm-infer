@@ -22,9 +22,7 @@ def test_torch_naive_packed_prefill_matches_isolated_gqa_sequences() -> None:
     backend = TorchNaiveAttention()
     query, key, value, cu_seqlens = _packed_inputs()
 
-    actual = backend.forward_prefill_batch_packed(
-        query, key, value, cu_seqlens, max_seqlen=3
-    )
+    actual = backend.forward_prefill_batch_packed(query, key, value, cu_seqlens, max_seqlen=3)
 
     expected_sequences = []
     for start, end in ((0, 2), (2, 5)):
@@ -44,9 +42,7 @@ def test_torch_naive_packed_prefill_matches_isolated_gqa_sequences() -> None:
 def test_torch_naive_packed_prefill_does_not_leak_between_sequences() -> None:
     backend = TorchNaiveAttention()
     query, key, value, cu_seqlens = _packed_inputs()
-    baseline = backend.forward_prefill_batch_packed(
-        query, key, value, cu_seqlens, max_seqlen=3
-    )
+    baseline = backend.forward_prefill_batch_packed(query, key, value, cu_seqlens, max_seqlen=3)
 
     changed_key = key.clone()
     changed_value = value.clone()
@@ -125,9 +121,7 @@ def test_flash_attention_packed_prefill_uses_one_native_gqa_varlen_call(
     backend = flash_attn_paged.FlashAttnPagedAttention()
     query, key, value, cu_seqlens = _packed_inputs()
 
-    actual = backend.forward_prefill_batch_packed(
-        query, key, value, cu_seqlens, max_seqlen=3
-    )
+    actual = backend.forward_prefill_batch_packed(query, key, value, cu_seqlens, max_seqlen=3)
 
     assert actual.shape == query.shape
     assert actual.dtype == query.dtype

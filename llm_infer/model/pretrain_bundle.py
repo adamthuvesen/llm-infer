@@ -262,9 +262,9 @@ class PretrainBundleModel:
             cu_seqlens[:-1],
             torch.tensor(lengths, dtype=torch.long, device=self.device),
         )
-        positions = torch.arange(
-            total_tokens, dtype=torch.float32, device=self.device
-        ) - request_starts
+        positions = (
+            torch.arange(total_tokens, dtype=torch.float32, device=self.device) - request_starts
+        )
         write_slots = torch.as_tensor(
             [
                 slot
@@ -436,9 +436,7 @@ class PretrainBundleModel:
         :meth:`decode_window_step` never allocates or syncs for positions.
         """
         uses_native_pages = self._uses_paged_decode_backend()
-        runner_needs_packed = bool(
-            getattr(self.decode_graphs, "requires_packed_read_plan", False)
-        )
+        runner_needs_packed = bool(getattr(self.decode_graphs, "requires_packed_read_plan", False))
         plan = build_decode_window_plan(
             cache,
             tables,

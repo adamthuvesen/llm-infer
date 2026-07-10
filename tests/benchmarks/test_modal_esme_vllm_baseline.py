@@ -32,9 +32,7 @@ def test_full_matrix_builds_exact_context_lengths_and_batches() -> None:
 
     assert len(workloads) == 12
     assert {(row["batch_size"], row["context_tokens"]) for row in workloads} == {
-        (batch, context)
-        for batch in (1, 8, 64, 256)
-        for context in (32, 256, 768)
+        (batch, context) for batch in (1, 8, 64, 256) for context in (32, 256, 768)
     }
     for workload in workloads:
         assert len(workload["requests"]) == workload["batch_size"]
@@ -42,9 +40,10 @@ def test_full_matrix_builds_exact_context_lengths_and_batches() -> None:
             len(request["prompt_ids"]) == workload["context_tokens"]
             for request in workload["requests"]
         )
-        assert len({request["request_id"] for request in workload["requests"]}) == workload[
-            "batch_size"
-        ]
+        assert (
+            len({request["request_id"] for request in workload["requests"]})
+            == workload["batch_size"]
+        )
 
 
 def test_full_command_pins_phase_zero_protocol() -> None:
@@ -93,9 +92,7 @@ def test_worker_command_launches_this_script_in_a_fresh_python_process(tmp_path:
         str(tmp_path / "output.json"),
     ]
 
-    oracle_command = worker_command(
-        "oracle", tmp_path / "input.json", tmp_path / "output.json"
-    )
+    oracle_command = worker_command("oracle", tmp_path / "input.json", tmp_path / "output.json")
     assert oracle_command[0] == sys.executable
 
 

@@ -72,9 +72,7 @@ def test_single_request_coverage_includes_every_prompt_at_every_context() -> Non
             assert add_generation_prompt and tokenize
             return [len(messages[0]["content"]), 7]
 
-    coverage = single_request_prompt_coverage(
-        Tokenizer(), (32, 768), ("one", "two", "three")
-    )
+    coverage = single_request_prompt_coverage(Tokenizer(), (32, 768), ("one", "two", "three"))
 
     assert len(coverage) == 6
     assert {(context, request.request_id) for context, request in coverage} == {

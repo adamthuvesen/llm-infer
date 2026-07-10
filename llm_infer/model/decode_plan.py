@@ -145,9 +145,7 @@ class DecodeWindowPlan:
         step = self.steps_used
         total_pages = self.page_totals[step]
         self.page_indptr.copy_(self.page_indptr_matrix[step])
-        self.native_page_indices[:total_pages].copy_(
-            self.page_indices_matrix[step, :total_pages]
-        )
+        self.native_page_indices[:total_pages].copy_(self.page_indices_matrix[step, :total_pages])
         self.page_last_page_len.copy_(self.page_last_page_len_matrix[step])
         return KVPagePlan(
             indptr=self.page_indptr,
@@ -155,6 +153,7 @@ class DecodeWindowPlan:
             last_page_len=self.page_last_page_len,
             page_size=self.block_size,
         )
+
 
 def build_decode_window_plan(
     cache: PagedKVCache,
@@ -268,14 +267,10 @@ def build_decode_window_plan(
             else None
         ),
         native_page_indices=(
-            torch.empty(max_page_total, dtype=torch.int32, device=device)
-            if include_pages
-            else None
+            torch.empty(max_page_total, dtype=torch.int32, device=device) if include_pages else None
         ),
         page_last_page_len=(
-            torch.empty(len(tables), dtype=torch.int32, device=device)
-            if include_pages
-            else None
+            torch.empty(len(tables), dtype=torch.int32, device=device) if include_pages else None
         ),
         batch_arange=torch.arange(len(tables), dtype=torch.long, device=device),
         base_lengths=lengths,
