@@ -38,6 +38,7 @@ class EngineMixinHost(Protocol):
     default_sampling: SamplingParams
     profiler: TimingProfiler | None
     prefill_chunk_size: int | None
+    batched_prefill: bool
     preemption: bool
     speculative: PromptLookupDraft | None
     trace: TraceRecorder | None
@@ -89,6 +90,8 @@ class EngineMixinHost(Protocol):
     def _live_running(self, requests: Iterable[Request]) -> list[Request]: ...
 
     def _sample_one(self, logits: torch.Tensor, request: Request) -> torch.Tensor: ...
+
+    def _sample_rows(self, logits: torch.Tensor, requests: list[Request]) -> torch.Tensor: ...
 
     def _record(
         self, request: Request, token: int | torch.Tensor, is_eos: bool, result: StepResult

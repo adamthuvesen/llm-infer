@@ -328,8 +328,8 @@ class EngineDecodeMixin(EngineMixinHost):
         An all-greedy batch — the benchmark and reference path — is one batched argmax, no
         per-row Python at all. Otherwise greedy rows take a vectorized argmax over their subset
         (no RNG) and the rest are sampled per row under that request's params, against its own
-        generated history, from its own seeded generator — so a request's draw is independent
-        of its batchmates. Returns a ``(B,)`` long tensor on the logits' device.
+        generated history, from its own seeded generator — so batchmates cannot consume its RNG
+        stream. Returns a ``(B,)`` long tensor on the logits' device.
         """
         if logits.ndim != 2:
             raise ValueError(f"expected 2-D logits, got shape {tuple(logits.shape)}")

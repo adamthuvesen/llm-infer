@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 
+from llm_infer.kernels.base import PackedPrefillAttentionBackend
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
@@ -63,6 +64,7 @@ class InferenceEngine(
         trace_clock: Callable[[], float] | None = None,
         capabilities: BackendCapabilities | None = None,
         decode_window_size: int = 8,
+        batched_prefill: bool = False,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -97,6 +99,7 @@ class InferenceEngine(
         self.profiler = profiler
         self.model.profiler = profiler
         self.prefill_chunk_size = prefill_chunk_size
+        self.batched_prefill = batched_prefill
         self.speculative = PromptLookupDraft(speculative) if speculative is not None else None
         self.trace = trace
         if trace is not None:
@@ -244,5 +247,8 @@ class InferenceEngine(
 
 def _infer_capabilities(model: CausalLMBackend) -> BackendCapabilities:
     if isinstance(model, PretrainBundleModel):
-        return DENSE_CAPABILITIES
+        return replace(
+            DENSE_CAPABILITIES,
+            batched_prefill=isinstance(model.backend, PackedPrefillAttentionBackend),
+        )
     return QWEN_CAPABILITIES
