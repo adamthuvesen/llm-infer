@@ -52,3 +52,4 @@ model-weights/
 
 # OS
 .DS_Store
+.claude/
