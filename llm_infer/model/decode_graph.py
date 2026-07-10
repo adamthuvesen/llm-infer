@@ -105,6 +105,8 @@ class DecodeGraphRunner:
     up front at construction so no capture cost can leak into a timed region later.
     """
 
+    requires_packed_read_plan = False
+
     def __init__(
         self,
         model: PretrainBundleModel,
@@ -173,8 +175,11 @@ class DecodeGraphRunner:
         elif self._active_plan is not plan:
             return None
 
+        uses_native_pages = self.model._uses_paged_decode_backend()
+        runner_needs_packed = self.requires_packed_read_plan
         write_slots, read_plan = plan.begin_step(
-            include_pages=self.model._uses_paged_decode_backend()
+            include_pages=uses_native_pages,
+            include_packed=not uses_native_pages or runner_needs_packed,
         )
         self.model._prepare_paged_decode(read_plan)
         state.tokens[:batch].copy_(token_ids.reshape(-1))

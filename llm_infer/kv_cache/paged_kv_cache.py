@@ -31,10 +31,13 @@ class KVPagePlan:
 
 @dataclass(frozen=True)
 class KVReadPlan:
-    """Layer-independent packed-read metadata for one batched decode step."""
+    """Layer-independent metadata for one batched decode step.
 
-    idx: torch.Tensor
-    cu_seqlens: torch.Tensor
+    ``idx`` is absent when a native paged backend reads the cache directly.
+    """
+
+    idx: torch.Tensor | None
+    cu_seqlens: torch.Tensor | None
     lengths: list[int]
     max_len: int
     page_plan: KVPagePlan | None = None
@@ -203,25 +206,38 @@ class PagedKVCache:
         return self._read_slots(layer, idx)
 
     def plan_read_many(
-        self, tables: list[BlockTable], lengths: list[int], *, include_pages: bool = False
+        self,
+        tables: list[BlockTable],
+        lengths: list[int],
+        *,
+        include_pages: bool = False,
+        include_packed: bool = True,
     ) -> KVReadPlan:
-        """Build reusable packed-read indices for a batched decode step."""
+        """Build the requested packed or native-page metadata for a decode step."""
         if len(tables) != len(lengths):
             raise ValueError(f"tables/lengths mismatch: {len(tables)} vs {len(lengths)}")
         if not tables:
             raise ValueError("a batched read needs at least one table")
         if any(length < 1 for length in lengths):
             raise ValueError(f"lengths must be positive; got {lengths}")
+        if not include_pages and not include_packed:
+            raise ValueError("a batched read needs packed indices or native page metadata")
 
-        slots: list[int] = []
-        for table, length in zip(tables, lengths, strict=True):
-            slots.extend(table.physical_slots(0, length))
-        idx = torch.as_tensor(slots, dtype=torch.long, device=self.key.device)
+        idx: torch.Tensor | None = None
+        if include_packed:
+            slots: list[int] = []
+            for table, length in zip(tables, lengths, strict=True):
+                slots.extend(table.physical_slots(0, length))
+            idx = torch.as_tensor(slots, dtype=torch.long, device=self.key.device)
 
-        cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.key.device)
-        cu_seqlens[1:] = torch.as_tensor(lengths, dtype=torch.int32, device=self.key.device).cumsum(
-            0
-        )
+        cu_seqlens: torch.Tensor | None = None
+        if include_packed:
+            cu_seqlens = torch.zeros(
+                len(lengths) + 1, dtype=torch.int32, device=self.key.device
+            )
+            cu_seqlens[1:] = torch.as_tensor(
+                lengths, dtype=torch.int32, device=self.key.device
+            ).cumsum(0)
         return KVReadPlan(
             idx=idx,
             cu_seqlens=cu_seqlens,
@@ -263,6 +279,8 @@ class PagedKVCache:
 
     def read_many_plan(self, layer: int, plan: KVReadPlan) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather packed K/V for ``layer`` using a prebuilt :class:`KVReadPlan`."""
+        if plan.idx is None:
+            raise ValueError("packed K/V read needs packed indices")
         return self._read_slots(layer, plan.idx)
 
     def layer_kv(self, layer: int) -> torch.Tensor:

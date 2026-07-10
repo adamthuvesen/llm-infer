@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from llm_infer.benchmarks.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.decode_graph import select_bucket
@@ -127,6 +128,68 @@ def test_engine_outputs_unchanged_with_eager_runner(runtime) -> None:
     plain = run_engine()
     runtime.model.enable_decode_graphs(capture_sizes=(4,), mode="eager")
     assert run_engine() == plain
+
+
+def test_exact_batch_grouped_eager_runner_matches_plain_window(runtime) -> None:
+    """The benchmark runner's grouped tranche keeps tiny-bundle logits exact on CPU."""
+    model = runtime.model
+
+    def run(grouped: bool) -> list[torch.Tensor]:
+        cache = _fresh_cache(model)
+        table = cache.new_request()
+        logits = model.prefill(list(_PROMPTS[0]), cache, table)
+        tokens = torch.argmax(logits).reshape(1)
+        if grouped:
+            model.decode_graphs = EngineOwnedGroupedDecodeGraphRunner(
+                model, cache, batch_size=1, grouped_layers=2, mode="eager"
+            )
+        else:
+            model.decode_graphs = None
+        plan = model.open_decode_window(cache, [table], budget=3)
+        assert plan is not None
+        rows = []
+        for _ in range(3):
+            logits = model.decode_window_step(cache, plan, tokens)
+            rows.append(logits.clone())
+            tokens = torch.argmax(logits, dim=-1)
+        return rows
+
+    expected = run(False)
+    actual = run(True)
+    for step, (plain, grouped) in enumerate(zip(expected, actual, strict=True)):
+        torch.testing.assert_close(grouped, plain, msg=f"grouped step {step} diverged")
+
+
+def test_grouped_runner_foreign_cache_falls_back_without_advancing(runtime) -> None:
+    model = runtime.model
+    bound_cache = _fresh_cache(model)
+    foreign_cache = _fresh_cache(model)
+    table = foreign_cache.new_request()
+    logits = model.prefill(list(_PROMPTS[0]), foreign_cache, table)
+    plan = model.open_decode_window(foreign_cache, [table], budget=2)
+    assert plan is not None
+    runner = EngineOwnedGroupedDecodeGraphRunner(
+        model, bound_cache, batch_size=1, grouped_layers=2, mode="eager"
+    )
+
+    assert runner.window_step(
+        foreign_cache, plan, torch.argmax(logits).reshape(1)
+    ) is None
+    assert plan.steps_used == 0
+
+
+def test_grouped_runner_validates_supported_group_sizes(runtime) -> None:
+    model = runtime.model
+    cache = _fresh_cache(model)
+
+    with pytest.raises(ValueError, match="grouped_layers must be 2 or 4"):
+        EngineOwnedGroupedDecodeGraphRunner(
+            model, cache, batch_size=1, grouped_layers=3, mode="eager"
+        )
+    with pytest.raises(ValueError, match="needs 4 layers"):
+        EngineOwnedGroupedDecodeGraphRunner(
+            model, cache, batch_size=1, grouped_layers=4, mode="eager"
+        )
 
 
 def test_batch_above_largest_bucket_falls_back_to_eager(runtime) -> None:
