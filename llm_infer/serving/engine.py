@@ -72,7 +72,7 @@ class InferenceEngine(
         batched_prefill: bool = True,
         grouped_decode_graphs: bool = False,
         grouped_capture_sizes: tuple[int, ...] = DEFAULT_GROUPED_CAPTURE_SIZES,
-        grouped_layers: int = 4,
+        grouped_layers: int | None = None,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -150,12 +150,25 @@ class InferenceEngine(
                     "grouped_decode_graphs requires a bundle model with planned decode; "
                     "omit it for this backend"
                 )
+            if grouped_layers is None:
+                # Four grouped layers is the measured A100 winner; the runner needs a
+                # following ungrouped layer, so very small (test) models group two.
+                grouped_layers = 4 if model.num_layers > 4 else 2
             self.grouped_decode_runners = build_engine_grouped_runners(
                 model,
                 self.cache,
                 grouped_capture_sizes,
                 grouped_layers=grouped_layers,
             )
+
+    @property
+    def grouped_decode_steps_total(self) -> int:
+        """Window steps the grouped runners actually ran — the silent-fallback tripwire.
+
+        Exposed on ``/metrics`` so a deployment where the grouped path quietly never fires
+        (pointer mismatch, off-bucket batches) is visible, not just slower.
+        """
+        return sum(runner.steps_handled for runner in self.grouped_decode_runners.values())
 
     def add_request(self, request: Request) -> None:
         """Register and queue a request. Duplicate ids are rejected loudly."""
