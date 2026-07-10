@@ -19,9 +19,9 @@ divergence on the fp32 reference.
 
 ## Headline
 
-Run `2026-07-07` on A100-80GB with the default CUDA Esme path,
-`FlashInferPagedAttention`: **3,776.8 tok/s at 256 concurrent requests**, **95.6x** the
-same-run naive-HF floor. At 64 concurrent requests, the engine serves **2,603.4 tok/s**.
+Run `2026-07-10` on A100-80GB with the default CUDA Esme path,
+`FlashInferPagedAttention`: **13,490.5 tok/s at 256 concurrent requests**, **610.8x** the
+same-run naive-HF floor. At 64 concurrent requests, the engine serves **4,695.2 tok/s**.
 
 `FlashInferPagedAttention` is the `auto` choice for CUDA fp16/bf16 Esme bundles and needs the
 `gpu` extra (`uv sync --extra gpu`); the Modal harnesses bake it into the shared GPU image. To
@@ -46,14 +46,22 @@ uv run scripts/plot_benchmark_curve.py
 
 | concurrent requests | llm_infer tok/s | hf_sequential tok/s |
 | ---: | ---: | ---: |
-| 8 | 658.6 | 39.4 |
-| 16 | 1,140.0 | 39.6 |
-| 32 | 1,844.9 | 39.7 |
-| 64 | 2,603.4 | 39.3 |
-| 128 | 3,275.5 | 39.5 |
-| 256 | 3,776.8 | 39.5 |
+| 8 | 645.0 | 22.1 |
+| 16 | 1,297.9 | 22.0 |
+| 32 | 2,438.9 | 22.1 |
+| 64 | 4,695.2 | 22.3 |
+| 128 | 8,417.0 | 22.2 |
+| 256 | 13,490.5 | 22.1 |
 
-At 256 concurrent requests, the engine serves **95.6x** the same-row measured naive-HF floor.
+At 256 concurrent requests, the engine serves **610.8x** the same-row measured naive-HF floor.
+
+Two things moved since the previous committed record (`2026-07-07`, 3,776.8 tok/s, 95.6x).
+Most of the gain is engine work: batched ragged prefill is now on by default, so the 256
+prompts prefill in packed calls instead of one at a time — the improvement grows with batch
+exactly as that predicts (batch 8 is unchanged within noise). The naive-HF floor also
+measured 22.1 tok/s on this run's container versus 39.5 on the previous one: the sequential
+`generate()` loop is host-bound, and cross-container host speed is the dominant term for it.
+Both sides of the multiple come from the same container in the same run, as always.
 
 ## Method
 
