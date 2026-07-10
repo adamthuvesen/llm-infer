@@ -633,6 +633,180 @@ def sweep(
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=2 * 60 * 60,
 )
+def sweep_grouped_ab(
+    batch_sizes: list[int],
+    max_new_tokens: int,
+    warmup: int,
+    iters: int,
+) -> str:
+    """Same-container curve A/B: piecewise-only engines vs engines with grouped dispatch.
+
+    Grouped runners are engine-owned and captured at engine construction, so the published
+    fresh-engine-per-iteration protocol would put capture inside the timed region. Both
+    arms therefore run the persistent-engine variant of the protocol — one engine per
+    (batch, arm) built up front, requests re-added and drained per iteration, the timed
+    span covering prefill and decode exactly like serving steady state. Alternating pair
+    order per iteration keeps thermal/clock drift out of the ratio.
+    """
+    import math
+    import statistics
+
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import (
+        build_system_evidence_record,
+        normalized_outputs_match,
+    )
+    from llm_infer.benchmarks.report import total_output_tokens
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    engine_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    eos = oracle_runtime.eos_token_ids
+    capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
+    print(f"[grouped-ab] piecewise buckets {CAPTURE_SIZES} captured in {capture_s:.1f} s")
+
+    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
+
+    def reference_for(requests) -> dict[str, list[int]]:
+        for req in requests:
+            if req.prompt_ids not in reference_by_prompt:
+                reference_by_prompt[req.prompt_ids] = greedy_decode(
+                    oracle_runtime.model,
+                    list(req.prompt_ids),
+                    max_new_tokens=max_new_tokens,
+                    eos_token_ids=set(eos),
+                )
+        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+
+    rows: list[dict] = []
+    for size in batch_sizes:
+        requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
+        needed = sum(
+            math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
+        )
+        num_blocks = needed + max(4, len(requests))
+
+        def build(grouped: bool, num_blocks=num_blocks, size=size) -> InferenceEngine:
+            kwargs = (
+                {"grouped_decode_graphs": True, "grouped_capture_sizes": (size,)} if grouped else {}
+            )
+            return InferenceEngine(
+                engine_runtime.model,
+                block_size=BLOCK_SIZE,
+                num_blocks=num_blocks,
+                device="cuda",
+                capabilities=engine_runtime.capabilities,
+                **kwargs,
+            )
+
+        engines = {"piecewise": build(False), "grouped": build(True)}
+        grouped_capture = engines["grouped"].grouped_decode_runners[size].total_capture_seconds
+
+        def run_once(engine, requests=requests) -> dict[str, list[int]]:
+            for req in requests:
+                engine.add_request(
+                    Request(req.request_id, list(req.prompt_ids), max_new_tokens, eos)
+                )
+            return engine.run()
+
+        timings: dict[str, list[float]] = {"piecewise": [], "grouped": []}
+        outputs: dict[str, dict[str, list[int]]] = {}
+        for pair in range(warmup + iters):
+            order = ("piecewise", "grouped") if pair % 2 == 0 else ("grouped", "piecewise")
+            for arm in order:
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                result = run_once(engines[arm])
+                torch.cuda.synchronize()
+                if pair >= warmup:
+                    timings[arm].append(time.perf_counter() - start)
+                    outputs[arm] = result
+
+        grouped_steps = engines["grouped"].grouped_decode_runners[size].steps_handled
+        if grouped_steps == 0:
+            raise RuntimeError(f"grouped runner never fired at batch {size}")
+        reference = reference_for(requests)
+        arm_rows: dict[str, dict] = {}
+        for arm in ("piecewise", "grouped"):
+            agreement = tie_tolerant_agreement(
+                oracle_runtime.model, requests, outputs[arm], reference, eos
+            )
+            tokens = total_output_tokens(outputs[arm], eos)
+            median_s = statistics.median(timings[arm])
+            row = {
+                "system": f"llm_infer_{arm}",
+                "batch_size": size,
+                "agreement": dataclasses.asdict(agreement),
+                "median_seconds": median_s,
+                "per_iter_seconds": timings[arm],
+                "total_output_tokens": tokens,
+                **build_system_evidence_record(
+                    agreement=agreement, median_seconds=median_s, total_tokens=tokens
+                ),
+            }
+            if arm == "grouped":
+                row["grouped_capture_seconds"] = grouped_capture
+                row["grouped_steps_handled"] = grouped_steps
+            arm_rows[arm] = row
+            rows.append(row)
+            tps = row["tokens_per_second"]
+            print(
+                f"[grouped-ab] batch={size} {arm}: median {median_s:.3f} s, "
+                f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
+            )
+
+        parity_exact = normalized_outputs_match(outputs["piecewise"], outputs["grouped"], eos)
+        ratio = arm_rows["grouped"]["median_seconds"] / arm_rows["piecewise"]["median_seconds"]
+        rows.append(
+            {
+                "policy_version": 2,
+                "system": "grouped_vs_piecewise",
+                "batch_size": size,
+                "parity_status": "exact" if parity_exact else "review_required",
+                "raw_wall_median_ratio": ratio,
+                "wall_median_ratio": ratio if parity_exact else None,
+            }
+        )
+        print(f"[grouped-ab] batch={size}: grouped/piecewise wall ratio {ratio:.3f}")
+        del engines
+        torch.cuda.empty_cache()
+
+    return json.dumps(
+        {
+            "probe": "curve-grouped-ab",
+            "policy_version": 2,
+            "rows": rows,
+            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
+            "protocol": (
+                "persistent engine per (batch, arm); per-iteration full add+drain wall "
+                "including prefill; grouped capture excluded at engine construction"
+            ),
+            "attention_backend": type(engine_runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=2 * 60 * 60,
+)
 def sweep_flashinfer_compare(
     batch_sizes: list[int],
     max_new_tokens: int,
@@ -837,15 +1011,57 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         hf_specs = []
         vllm_batches = []
         max_new_tokens, warmup, iters = 256, 1, 3
+    elif command == "grouped-ab":
+        llm_infer_batches = [8, 16, 32, 64, 128, 256]
+        context_lengths = []
+        hf_specs = []
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 256, 1, 5
+    elif command == "grouped-ab-smoke":
+        llm_infer_batches = [8]
+        context_lengths = []
+        hf_specs = []
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 16, 1, 1
     else:
         raise ValueError(
             "command must be 'smoke', 'curve', 'baseline', 'baseline-smoke', "
-            "'flashinfer-smoke', "
-            f"or 'flashinfer-curve', got {command!r}"
+            "'flashinfer-smoke', 'flashinfer-curve', 'grouped-ab', "
+            f"or 'grouped-ab-smoke', got {command!r}"
         )
 
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-curve")
+    if command.startswith("grouped-ab"):
+        print(f"[esme-curve] grouped A/B: batches {llm_infer_batches}")
+        sweep_res = json.loads(
+            sweep_grouped_ab.remote(llm_infer_batches, max_new_tokens, warmup, iters)
+        )
+        record = {
+            **sweep_res,
+            "config": {
+                "command": command,
+                "model": "Esme-214M-Chat",
+                "prompt_pool": "headline",
+                "max_new_tokens": max_new_tokens,
+                "warmup": warmup,
+                "iters": iters,
+                "block_size": BLOCK_SIZE,
+                "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
+                "same_container": {"piecewise_and_grouped": True},
+                "repro_command": (
+                    f"modal run scripts/modal_esme_batch_curve.py --command {command}"
+                ),
+            },
+        }
+        out_dir = REPO_ROOT / "bench-results"
+        out_dir.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        out_path = out_dir / f"esme-batch-curve-{command}-{stamp}.json"
+        out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        print(f"[esme-curve] wrote {out_path}")
+        return
+
     if command.startswith("flashinfer-"):
         print(f"[esme-curve] flashinfer compare: llm_infer {llm_infer_batches}")
         sweep_res = json.loads(
