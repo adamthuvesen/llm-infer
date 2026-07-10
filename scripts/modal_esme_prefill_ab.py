@@ -30,8 +30,11 @@ not touch the rows-log / resume machinery.
 from __future__ import annotations
 
 import json
+import math
+import statistics
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import modal
@@ -49,21 +52,31 @@ BLOCK_SIZE = 128
 RAGGED_LENGTHS = (16, 37, 79, 128, 257, 389, 512)
 CAPTURE_SIZES = (1, 8, 64)
 
+# Mixed-load burst cells: growing ragged bursts plus one worst-case uniform-512 burst
+# (~32k prompt tokens packed into a single prefill call).
+MIXED_LOAD_CELLS: list[dict[str, object]] = [
+    {"burst_size": 8, "burst_shape": "ragged", "burst_context": None},
+    {"burst_size": 32, "burst_shape": "ragged", "burst_context": None},
+    {"burst_size": 64, "burst_shape": "ragged", "burst_context": None},
+    {"burst_size": 64, "burst_shape": "uniform", "burst_context": 512},
+]
+
 app = modal.App("llm-infer-esme-prefill-ab")
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
-# A workload cell is uniquely identified by these four fields; resume keys on this tuple.
-ROW_KEY_FIELDS = ("batch_size", "shape", "context_length", "max_new_tokens")
+# A workload cell's identity fields, per command; --resume keys on the matching tuple.
+PREFILL_AB_KEY_FIELDS = ("batch_size", "shape", "context_length", "max_new_tokens")
+MIXED_LOAD_KEY_FIELDS = ("burst_size", "burst_shape")
 
 
-def row_key(row: dict[str, object]) -> dict[str, object]:
+def row_key(row: dict[str, object], key_fields: tuple[str, ...]) -> dict[str, object]:
     """Return the JSON-serializable identity of a workload cell (row or row event)."""
-    return {field: row[field] for field in ROW_KEY_FIELDS}
+    return {field: row[field] for field in key_fields}
 
 
-def key_tuple(key: dict[str, object]) -> tuple[object, ...]:
+def key_tuple(key: dict[str, object], key_fields: tuple[str, ...]) -> tuple[object, ...]:
     """Hashable form of a row key for set membership."""
-    return tuple(key[field] for field in ROW_KEY_FIELDS)
+    return tuple(key[field] for field in key_fields)
 
 
 def parse_event_lines(text: str) -> list[dict[str, object]]:
@@ -85,9 +98,11 @@ def parse_event_lines(text: str) -> list[dict[str, object]]:
     return events
 
 
-def completed_row_keys(events: list[dict[str, object]]) -> list[dict[str, object]]:
+def completed_row_keys(
+    events: list[dict[str, object]], key_fields: tuple[str, ...]
+) -> list[dict[str, object]]:
     """Collect the keys of every completed row event, in log order."""
-    return [row_key(event) for event in events if event.get("kind") == "row"]
+    return [row_key(event, key_fields) for event in events if event.get("kind") == "row"]
 
 
 def assemble_final_record(
@@ -187,6 +202,173 @@ def stability_summary(
     return summary
 
 
+def agreement_dict(agreement) -> dict[str, object]:  # noqa: ANN001 - EsmeAgreement is remote-only
+    """Flatten an ``EsmeAgreement`` into the JSON status/counts a row records."""
+    return {
+        "status": (
+            "exact"
+            if agreement.exact == agreement.total
+            else "tie_tolerant"
+            if agreement.all_ties_or_exact
+            else "diverged"
+        ),
+        "exact": agreement.exact,
+        "tie": agreement.tie,
+        "nontie": agreement.nontie,
+        "total": agreement.total,
+        "ties_sample": agreement.ties_sample,
+        "divergences_sample": agreement.divergences_sample,
+    }
+
+
+def percentile(values: list[float], q: float) -> float:
+    """Linear-interpolated q-th percentile (q in 0..100) of a non-empty sample."""
+    if not values:
+        raise ValueError("percentile of an empty sample is undefined")
+    if not 0.0 <= q <= 100.0:
+        raise ValueError(f"percentile q must be in [0, 100]; got {q}")
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (q / 100.0) * (len(ordered) - 1)
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return ordered[low]
+    return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
+
+
+@dataclass(frozen=True)
+class ItlSplit:
+    """One steady decoder's inter-token gaps (ms) split around the burst-admission step.
+
+    ``before_ms`` are the steady-state gaps before the burst, ``spanning_ms`` the single gap
+    that straddles the burst step (the decode-tail stall the burst injects, ``None`` if the
+    decoder produced no token across the burst boundary), ``after_ms`` the recovery gaps.
+    """
+
+    before_ms: list[float]
+    spanning_ms: float | None
+    after_ms: list[float]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "before_ms": self.before_ms,
+            "spanning_ms": self.spanning_ms,
+            "after_ms": self.after_ms,
+        }
+
+
+def split_itls_by_burst_step(
+    token_steps: list[int], token_times_s: list[float], burst_step: int
+) -> ItlSplit:
+    """Split one request's inter-token latencies around the burst-admission step.
+
+    ``token_steps[k]`` is the engine step index that produced this request's k-th recorded
+    token and ``token_times_s[k]`` the synchronized wall-clock at that step boundary. Each
+    inter-token gap is attributed by the steps its two endpoints fall in: a gap whose later
+    token landed before ``burst_step`` is steady-state, the single gap that straddles
+    ``burst_step`` (earlier token before it, later token at or after it) is the burst stall,
+    and gaps whose earlier token already sits at or past ``burst_step`` are recovery.
+    """
+    if len(token_steps) != len(token_times_s):
+        raise ValueError(
+            f"token_steps and token_times_s differ in length: "
+            f"{len(token_steps)} vs {len(token_times_s)}"
+        )
+    before: list[float] = []
+    after: list[float] = []
+    spanning: float | None = None
+    for k in range(1, len(token_times_s)):
+        gap_ms = (token_times_s[k] - token_times_s[k - 1]) * 1000.0
+        if token_steps[k] < burst_step:
+            before.append(gap_ms)
+        elif token_steps[k - 1] >= burst_step:
+            after.append(gap_ms)
+        else:
+            # Earlier token before the burst, later token at or past it: the straddling gap.
+            spanning = gap_ms
+    return ItlSplit(before_ms=before, spanning_ms=spanning, after_ms=after)
+
+
+def summarize_run(splits: list[ItlSplit], burst_ttfts_ms: list[float]) -> dict[str, float]:
+    """Reduce one run's per-decoder ITL splits and burst TTFTs to the cell's decision scalars.
+
+    ``itl_spanning_burst_ms`` is the median stall across steady decoders, ``itl_before_p50_ms``
+    the pooled steady-state baseline, and ``stall_ratio`` their quotient — how many normal
+    inter-token gaps the burst prefill costs a decoder mid-stream.
+    """
+    spanning_values = [split.spanning_ms for split in splits if split.spanning_ms is not None]
+    before_pool = [gap for split in splits for gap in split.before_ms]
+    after_pool = [gap for split in splits for gap in split.after_ms]
+    if not spanning_values:
+        raise ValueError("no steady decoder produced a token across the burst boundary")
+    if not before_pool:
+        raise ValueError("no pre-burst inter-token gaps to form a steady-state baseline")
+    if not burst_ttfts_ms:
+        raise ValueError("no burst requests produced a first token")
+    itl_before_p50 = percentile(before_pool, 50)
+    itl_spanning = statistics.median(spanning_values)
+    summary = {
+        "itl_spanning_burst_ms": itl_spanning,
+        "itl_before_p50_ms": itl_before_p50,
+        "itl_before_p95_ms": percentile(before_pool, 95),
+        "itl_before_p99_ms": percentile(before_pool, 99),
+        "stall_ratio": itl_spanning / itl_before_p50,
+        "burst_ttft_p50_ms": percentile(burst_ttfts_ms, 50),
+        "burst_ttft_p95_ms": percentile(burst_ttfts_ms, 95),
+    }
+    # After-burst recovery only exists once steady decoders keep running past the burst; the
+    # first-pass matrix always has it, but stay loud rather than silently fabricate a value.
+    if after_pool:
+        summary["itl_after_p50_ms"] = percentile(after_pool, 50)
+        summary["itl_after_p95_ms"] = percentile(after_pool, 95)
+    return summary
+
+
+# Per-run scalars carried through the cell aggregation; every measured run reports each one.
+_MIXED_LOAD_RUN_METRICS = (
+    "itl_spanning_burst_ms",
+    "itl_before_p50_ms",
+    "itl_before_p95_ms",
+    "itl_before_p99_ms",
+    "stall_ratio",
+    "burst_ttft_p50_ms",
+    "burst_ttft_p95_ms",
+)
+
+
+def aggregate_mixed_load(
+    runs_by_mode: dict[str, list[dict[str, float]]],
+) -> dict[str, object]:
+    """Median each mode's per-run scalars across pairs, then compare candidate to baseline.
+
+    ``candidate_vs_baseline`` reports the two decision ratios the roadmap turns on: whether
+    batched prefill lengthens or shortens the burst-spanning decode stall, and its effect on
+    burst TTFT. Both are candidate-over-baseline, so above 1.0 means batched prefill is worse.
+    """
+    if set(runs_by_mode) != {"baseline", "candidate"}:
+        raise ValueError(f"expected baseline and candidate runs; got {sorted(runs_by_mode)}")
+    medians: dict[str, dict[str, float]] = {}
+    for mode, runs in runs_by_mode.items():
+        if not runs:
+            raise ValueError(f"mode {mode!r} has no measured runs to aggregate")
+        medians[mode] = {
+            metric: statistics.median(run[metric] for run in runs)
+            for metric in _MIXED_LOAD_RUN_METRICS
+        }
+    comparison = {
+        "spanning_itl_ratio": (
+            medians["candidate"]["itl_spanning_burst_ms"]
+            / medians["baseline"]["itl_spanning_burst_ms"]
+        ),
+        "burst_ttft_p50_ratio": (
+            medians["candidate"]["burst_ttft_p50_ms"] / medians["baseline"]["burst_ttft_p50_ms"]
+        ),
+    }
+    return {"medians": medians, "candidate_vs_baseline": comparison}
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -247,7 +429,7 @@ def benchmark_prefill_ab(
     )
     eos = frozenset()
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
-    completed_set = {key_tuple(key) for key in completed}
+    completed_set = {key_tuple(key, PREFILL_AB_KEY_FIELDS) for key in completed}
 
     yield {
         "kind": "meta",
@@ -275,23 +457,6 @@ def benchmark_prefill_ab(
                 )
             )
         return requests
-
-    def agreement_dict(agreement) -> dict[str, object]:  # noqa: ANN001 - remote-only type
-        return {
-            "status": (
-                "exact"
-                if agreement.exact == agreement.total
-                else "tie_tolerant"
-                if agreement.all_ties_or_exact
-                else "diverged"
-            ),
-            "exact": agreement.exact,
-            "tie": agreement.tie,
-            "nontie": agreement.nontie,
-            "total": agreement.total,
-            "ties_sample": agreement.ties_sample,
-            "divergences_sample": agreement.divergences_sample,
-        }
 
     def run_once(
         requests: list[EsmeBenchRequest], max_new_tokens: int, *, batched_prefill: bool
@@ -372,7 +537,7 @@ def benchmark_prefill_ab(
                     "context_length": context_length,
                     "max_new_tokens": max_new_tokens,
                 }
-                if key_tuple(current_key) in completed_set:
+                if key_tuple(current_key, PREFILL_AB_KEY_FIELDS) in completed_set:
                     print(
                         f"[prefill-ab] skip b={batch_size} shape={shape} "
                         f"context={context_length or 'ragged'} out={max_new_tokens}"
@@ -505,6 +670,391 @@ def benchmark_prefill_ab(
                     f"candidate={agreement['candidate']['status']}"
                 )
                 yield {"kind": "row", **row}
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=3 * 60 * 60,
+)
+def benchmark_mixed_load(
+    cells: list[dict[str, object]],
+    steady_decoders: int,
+    steady_max_new_tokens: int,
+    burst_max_new_tokens: int,
+    warmup_tokens: int,
+    warmup: int,
+    iters: int,
+    completed: list[dict[str, object]],
+) -> Iterator[dict[str, object]]:
+    """Stream serial/packed-prefill decode-stall measurements under a mid-stream prompt burst.
+
+    N steady ragged decoders are stepped until each has produced ``warmup_tokens`` tokens; a
+    burst of new prompts is then admitted in one step (reserve mode, no preemption — the whole
+    burst prefills together, the worst case), and stepping continues until every request drains.
+    Each ``engine.step()`` is bracketed by ``torch.cuda.synchronize()`` so per-step wall time is
+    real host time, and ``decode_window_size=1`` keeps one decode token per step so a steady
+    decoder's inter-token latency is exactly the wall time of the step that produced its token.
+    The gap that straddles the burst step is the decode-tail stall the roadmap asks about.
+
+    Yields one ``meta`` event, then one ``row`` event per workload cell not already in
+    ``completed``. Timing is reported for every mode regardless of the fp32-oracle verdict.
+    """
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        EsmeBenchRequest,
+        build_requests,
+        reference_outputs,
+        requests_at_context_length,
+    )
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.profiling import TimingProfiler
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    if not cells:
+        raise ValueError("mixed-load needs at least one workload cell")
+    if steady_decoders < 1:
+        raise ValueError(f"steady_decoders must be >= 1; got {steady_decoders}")
+    if steady_max_new_tokens < 1 or burst_max_new_tokens < 1:
+        raise ValueError(
+            f"max_new_tokens must be positive; got steady={steady_max_new_tokens}, "
+            f"burst={burst_max_new_tokens}"
+        )
+    if warmup_tokens < 2:
+        raise ValueError(
+            f"warmup_tokens must be >= 2 to form a pre-burst baseline; got {warmup_tokens}"
+        )
+    if warmup_tokens >= steady_max_new_tokens:
+        raise ValueError(
+            f"warmup_tokens ({warmup_tokens}) must leave the steady decoders mid-stream "
+            f"before steady_max_new_tokens ({steady_max_new_tokens})"
+        )
+    if warmup < 0 or iters < 1:
+        raise ValueError(f"warmup must be >= 0 and iters >= 1; got {warmup=}, {iters=}")
+    for cell in cells:
+        missing = [
+            field for field in ("burst_size", "burst_shape", "burst_context") if field not in cell
+        ]
+        if missing:
+            raise ValueError(f"cell {cell} is missing required fields {missing}")
+        if cell["burst_shape"] not in ("ragged", "uniform"):
+            raise ValueError(
+                f"burst_shape must be 'ragged' or 'uniform'; got {cell['burst_shape']!r}"
+            )
+        if cell["burst_shape"] == "uniform" and cell["burst_context"] is None:
+            raise ValueError(f"uniform burst cell needs a burst_context; got {cell}")
+
+    esme_bundles.reload()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    engine_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    eos = frozenset()
+    graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
+    completed_set = {key_tuple(key, MIXED_LOAD_KEY_FIELDS) for key in completed}
+
+    yield {
+        "kind": "meta",
+        "gpu": gpu_snapshot(),
+        "versions": library_versions(),
+        "attention_backend": type(engine_runtime.model.backend).__name__,
+        "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": graph_capture_s},
+    }
+
+    def build_pool(
+        count: int, shape: str, id_prefix: str, uniform_context: int | None
+    ) -> list[EsmeBenchRequest]:
+        """Build a distinct-id request pool: ragged cycles RAGGED_LENGTHS, uniform is one length."""
+        base = build_requests(engine_runtime.tokenizer, count, HEADLINE_PROMPTS)
+        pool: list[EsmeBenchRequest] = []
+        for index, request in enumerate(base):
+            context_length = (
+                uniform_context
+                if shape == "uniform"
+                else RAGGED_LENGTHS[index % len(RAGGED_LENGTHS)]
+            )
+            resized = requests_at_context_length([request], context_length)[0]
+            pool.append(
+                EsmeBenchRequest(
+                    request_id=f"{id_prefix}-{index:03d}",
+                    prompt=f"{request.prompt} [{shape} context: {context_length} tokens]",
+                    prompt_ids=resized.prompt_ids,
+                )
+            )
+        return pool
+
+    def blocks_needed(prompt_len: int, max_new: int) -> int:
+        return math.ceil((prompt_len + max_new) / BLOCK_SIZE)
+
+    def run_mixed_once(
+        steady: list[EsmeBenchRequest],
+        burst: list[EsmeBenchRequest],
+        *,
+        batched_prefill: bool,
+    ) -> dict[str, object]:
+        steady_ids = [request.request_id for request in steady]
+        burst_ids = [request.request_id for request in burst]
+        reserve = sum(
+            blocks_needed(len(request.prompt_ids), steady_max_new_tokens) for request in steady
+        ) + sum(blocks_needed(len(request.prompt_ids), burst_max_new_tokens) for request in burst)
+        # Generous pool: the whole reserve fits with headroom, so reserve-mode admission pulls
+        # the entire burst into the running set in one step — the single packed prefill we want
+        # to attribute the decode-tail stall to.
+        num_blocks = reserve + max(8, len(steady) + len(burst))
+        profiler = TimingProfiler("cuda")
+        engine = InferenceEngine(
+            engine_runtime.model,
+            block_size=BLOCK_SIZE,
+            num_blocks=num_blocks,
+            device="cuda",
+            capabilities=engine_runtime.capabilities,
+            profiler=profiler,
+            batched_prefill=batched_prefill,
+            # One decode token per step so each steady decoder's ITL is a single step's wall
+            # time; the deferred window would batch several tokens behind one host sync.
+            decode_window_size=1,
+        )
+        for request in steady:
+            engine.add_request(
+                Request(request.request_id, list(request.prompt_ids), steady_max_new_tokens, eos)
+            )
+
+        token_events: dict[str, list[tuple[int, float]]] = {
+            request_id: [] for request_id in (*steady_ids, *burst_ids)
+        }
+        step_records: list[dict[str, object]] = []
+        outputs: dict[str, list[int]] = {}
+        burst_added = False
+        burst_step: int | None = None
+        burst_add_wall: float | None = None
+        step_index = 0
+
+        torch.cuda.synchronize()
+        boundary = time.perf_counter()
+        while engine.scheduler.has_work():
+            if not burst_added and all(
+                len(token_events[request_id]) >= warmup_tokens for request_id in steady_ids
+            ):
+                # Admit the whole burst just before this step so it prefills in one packed call
+                # while the steady decoders are mid-stream. The boundary is not reset here: the
+                # burst step's wall time then carries the admission and packed prefill cost.
+                torch.cuda.synchronize()
+                burst_add_wall = time.perf_counter()
+                for request in burst:
+                    engine.add_request(
+                        Request(
+                            request.request_id,
+                            list(request.prompt_ids),
+                            burst_max_new_tokens,
+                            eos,
+                        )
+                    )
+                burst_added = True
+                burst_step = step_index
+
+            result = engine.step()
+            torch.cuda.synchronize()
+            now = time.perf_counter()
+            step_wall_ms = (now - boundary) * 1000.0
+            boundary = now
+
+            prefilled_tokens = sum(end - start for start, end in result.prefill_chunks.values())
+            decode_ids = [rid for rid in result.tokens if rid not in result.prefill_chunks]
+            allocator = engine.cache.allocator
+            step_records.append(
+                {
+                    "step_index": step_index,
+                    "wall_ms": step_wall_ms,
+                    "prefilled_requests": len(result.prefill_chunks),
+                    "prefilled_tokens": prefilled_tokens,
+                    "decode_tokens": len(decode_ids),
+                    "kv_utilization": allocator.num_used / allocator.num_blocks,
+                    "running": len(engine.scheduler.running),
+                    "waiting": len(engine.scheduler.waiting),
+                }
+            )
+            for request_id, tokens in result.tokens.items():
+                for _ in tokens:
+                    token_events[request_id].append((step_index, now))
+            outputs.update(result.finished_outputs)
+            step_index += 1
+
+        if burst_step is None or burst_add_wall is None:
+            raise RuntimeError(
+                "steady decoders drained before reaching the warmup token count; "
+                "raise steady_max_new_tokens or lower warmup_tokens"
+            )
+
+        splits = {
+            request_id: split_itls_by_burst_step(
+                [step for step, _ in token_events[request_id]],
+                [when for _, when in token_events[request_id]],
+                burst_step,
+            )
+            for request_id in steady_ids
+        }
+        burst_ttfts_ms = {
+            request_id: (token_events[request_id][0][1] - burst_add_wall) * 1000.0
+            for request_id in burst_ids
+            if token_events[request_id]
+        }
+        total_wall_ms = sum(float(record["wall_ms"]) for record in step_records)
+        phases = profiler.summary().as_dict()["phases"]
+        device_ms = (
+            phases["prefill"]["total_ms"]
+            + phases["decode"]["total_ms"]
+            + phases["sampling"]["total_ms"]
+        )
+        return {
+            "burst_step": burst_step,
+            "burst_prompt_tokens_total": sum(len(request.prompt_ids) for request in burst),
+            "splits": splits,
+            "burst_ttfts_ms": burst_ttfts_ms,
+            "step_records": step_records,
+            "total_wall_ms": total_wall_ms,
+            # Coarse: total host wall minus the top-level device phases (prefill, decode,
+            # sampling). It lumps scheduler admission, Python classification, and per-step
+            # cuda syncs together — a residual, not an isolated scheduler timer.
+            "scheduler_sync_residual_ms": total_wall_ms - device_ms,
+            "phase_device_ms": {
+                "prefill": phases["prefill"]["total_ms"],
+                "decode": phases["decode"]["total_ms"],
+                "sampling": phases["sampling"]["total_ms"],
+            },
+            "outputs": outputs,
+        }
+
+    modes = {"baseline": False, "candidate": True}
+    steady = build_pool(steady_decoders, "ragged", "steady", None)
+    steady_ids = [request.request_id for request in steady]
+
+    for cell in cells:
+        burst_size = int(cell["burst_size"])
+        burst_shape = str(cell["burst_shape"])
+        burst_context = cell["burst_context"]
+        current_key = {"burst_size": burst_size, "burst_shape": burst_shape}
+        if key_tuple(current_key, MIXED_LOAD_KEY_FIELDS) in completed_set:
+            print(f"[mixed-load] skip burst={burst_size} shape={burst_shape}")
+            continue
+
+        burst = build_pool(
+            burst_size,
+            burst_shape,
+            "burst",
+            None if burst_context is None else int(burst_context),
+        )
+        # The fp32 oracle reference for steady and burst is prompt-deterministic, so compute it
+        # once per cell and gate every mode's outputs against it after the paired runs.
+        reference = {
+            **reference_outputs(
+                oracle_runtime.model,
+                steady,
+                max_new_tokens=steady_max_new_tokens,
+                eos_token_ids=eos,
+            ),
+            **reference_outputs(
+                oracle_runtime.model,
+                burst,
+                max_new_tokens=burst_max_new_tokens,
+                eos_token_ids=eos,
+            ),
+        }
+        all_requests = [*steady, *burst]
+
+        for pair_index in range(warmup):
+            order = (
+                ("baseline", "candidate")
+                if pair_index % 2 == 0
+                else ("candidate", "baseline")
+            )
+            for mode in order:
+                run_mixed_once(steady, burst, batched_prefill=modes[mode])
+
+        runs_by_mode: dict[str, list[dict[str, float]]] = {"baseline": [], "candidate": []}
+        raw_by_mode: dict[str, list[dict[str, object]]] = {"baseline": [], "candidate": []}
+        outputs_by_mode: dict[str, dict[str, list[int]]] = {}
+        pair_orders: list[list[str]] = []
+        for pair_index in range(iters):
+            order = (
+                ("baseline", "candidate")
+                if pair_index % 2 == 0
+                else ("candidate", "baseline")
+            )
+            pair_orders.append(list(order))
+            for order_position, mode in enumerate(order):
+                measured = run_mixed_once(steady, burst, batched_prefill=modes[mode])
+                outputs_by_mode[mode] = measured["outputs"]
+                splits = measured["splits"]
+                summary = summarize_run(
+                    [splits[request_id] for request_id in steady_ids],
+                    list(measured["burst_ttfts_ms"].values()),
+                )
+                runs_by_mode[mode].append(summary)
+                raw_by_mode[mode].append(
+                    {
+                        "iteration": pair_index,
+                        "order_position": order_position,
+                        "burst_step": measured["burst_step"],
+                        "burst_prompt_tokens_total": measured["burst_prompt_tokens_total"],
+                        "run_summary": summary,
+                        "itl_splits": {
+                            request_id: splits[request_id].as_dict()
+                            for request_id in steady_ids
+                        },
+                        "burst_ttfts_ms": measured["burst_ttfts_ms"],
+                        "step_records": measured["step_records"],
+                        "total_wall_ms": measured["total_wall_ms"],
+                        "scheduler_sync_residual_ms": measured["scheduler_sync_residual_ms"],
+                        "phase_device_ms": measured["phase_device_ms"],
+                    }
+                )
+
+        aggregate = aggregate_mixed_load(runs_by_mode)
+        agreement = {
+            mode: agreement_dict(
+                tie_tolerant_agreement(
+                    oracle_runtime.model, all_requests, outputs_by_mode[mode], reference, eos
+                )
+            )
+            for mode in modes
+        }
+        row = {
+            "burst_size": burst_size,
+            "burst_shape": burst_shape,
+            "burst_context": burst_context,
+            "steady_decoders": steady_decoders,
+            "steady_shape": "ragged",
+            "steady_max_new_tokens": steady_max_new_tokens,
+            "burst_max_new_tokens": burst_max_new_tokens,
+            "warmup_tokens": warmup_tokens,
+            "steady_prompt_lengths": [len(request.prompt_ids) for request in steady],
+            "burst_prompt_lengths": [len(request.prompt_ids) for request in burst],
+            "burst_prompt_tokens_total": sum(len(request.prompt_ids) for request in burst),
+            "pair_orders": pair_orders,
+            "raw_iterations": raw_by_mode,
+            "aggregate": aggregate,
+            "agreement": agreement,
+            "reference_outputs": reference,
+            "outputs": outputs_by_mode,
+        }
+        comparison = aggregate["candidate_vs_baseline"]
+        print(
+            f"[mixed-load] burst={burst_size} shape={burst_shape} "
+            f"tokens={row['burst_prompt_tokens_total']}: "
+            f"spanning-ITL {comparison['spanning_itl_ratio']:.2f}x, "
+            f"burst-TTFT {comparison['burst_ttft_p50_ratio']:.2f}x, "
+            f"candidate={agreement['candidate']['status']}"
+        )
+        yield {"kind": "row", **row}
 
 
 @app.function(
@@ -872,12 +1422,25 @@ def main(
     resume: bool = False,
     context_length: int = 0,
 ) -> None:
-    """Stage Esme, stream the A/B protocol to a rows log, and write the combined JSON record."""
+    """Stage Esme, stream a benchmark protocol to a rows log, and write the combined JSON record."""
     if command == "prefill-divergence":
         _run_prefill_divergence(bundle_path, context_length)
         return
     if context_length != 0:
         raise ValueError("--context-length only applies to --command prefill-divergence")
+
+    prefill_commands = {"prefill-smoke", "prefill-ab"}
+    mixed_commands = {"mixed-load-smoke", "mixed-load"}
+    if command in prefill_commands:
+        key_fields = PREFILL_AB_KEY_FIELDS
+    elif command in mixed_commands:
+        key_fields = MIXED_LOAD_KEY_FIELDS
+    else:
+        raise ValueError(
+            "command must be 'prefill-smoke', 'prefill-ab', 'prefill-divergence', "
+            f"'mixed-load-smoke', or 'mixed-load'; got {command!r}"
+        )
+
     if command == "prefill-smoke":
         batch_sizes = [8]
         uniform_lengths: list[int] = []
@@ -890,11 +1453,17 @@ def main(
         output_lengths = [1, 64]
         include_ragged = True
         warmup, iters = 2, 10
-    else:
-        raise ValueError(
-            "command must be 'prefill-smoke', 'prefill-ab', or 'prefill-divergence', "
-            f"got {command!r}"
-        )
+    elif command == "mixed-load-smoke":
+        # One cheap cell, short outputs, one measured pair — a Modal-side wiring check.
+        cells = [{"burst_size": 8, "burst_shape": "ragged", "burst_context": None}]
+        steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 32, 8
+        warmup_tokens = 4
+        warmup, iters = 1, 1
+    else:  # mixed-load
+        cells = MIXED_LOAD_CELLS
+        steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 256, 16
+        warmup_tokens = 8
+        warmup, iters = 1, 5
 
     out_dir = REPO_ROOT / "bench-results"
     out_dir.mkdir(exist_ok=True)
@@ -907,8 +1476,10 @@ def main(
             raise FileNotFoundError(
                 f"--resume set but no rows log at {rows_path}; drop --resume to start a fresh run"
             )
-        completed = completed_row_keys(parse_event_lines(rows_path.read_text(encoding="utf-8")))
-        print(f"[esme-prefill-ab] resuming {rows_path} with {len(completed)} completed rows")
+        completed = completed_row_keys(
+            parse_event_lines(rows_path.read_text(encoding="utf-8")), key_fields
+        )
+        print(f"[esme-{command}] resuming {rows_path} with {len(completed)} completed rows")
     elif rows_path.is_file():
         raise FileExistsError(
             f"{rows_path} already holds partial results; pass --resume to continue it "
@@ -916,11 +1487,10 @@ def main(
         )
 
     local_bundle = local_bundle_path(bundle_path)
-    stage_bundle(esme_bundles, local_bundle, label="esme-prefill-ab")
+    stage_bundle(esme_bundles, local_bundle, label=f"esme-{command}")
 
-    # Append on resume so earlier rows survive; each event is flushed the moment it arrives.
-    with rows_path.open("a" if resume else "w", encoding="utf-8") as rows_log:
-        for event in benchmark_prefill_ab.remote_gen(
+    if command in prefill_commands:
+        events = benchmark_prefill_ab.remote_gen(
             batch_sizes,
             uniform_lengths,
             output_lengths,
@@ -928,37 +1498,98 @@ def main(
             warmup,
             iters,
             completed,
-        ):
+        )
+        config = {
+            "command": command,
+            "model": "Esme-214M-Chat",
+            "dtype": "bfloat16",
+            "batch_sizes": batch_sizes,
+            "uniform_context_lengths": uniform_lengths,
+            "ragged_context_cycle": list(RAGGED_LENGTHS) if include_ragged else None,
+            "max_new_tokens": output_lengths,
+            "warmup_pairs": warmup,
+            "measured_pairs": iters,
+            "block_size": BLOCK_SIZE,
+            "baseline": "InferenceEngine(batched_prefill=False)",
+            "candidate": "InferenceEngine(batched_prefill=True)",
+            "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
+            "ignore_eos": True,
+            "timing": {
+                "engine_startup": "excluded",
+                "prefill": "CUDA-event time for the model prefill span",
+                "ttft": "synchronized first engine step, including planning and sampling",
+                "end_to_end": "first step through complete request drain",
+                "pairing": "baseline/candidate order alternates each pair",
+            },
+            "same_container_and_gpu": True,
+            "repro_command": f"modal run scripts/modal_esme_prefill_ab.py --command {command}",
+        }
+    else:
+        events = benchmark_mixed_load.remote_gen(
+            cells,
+            steady_decoders,
+            steady_max_new_tokens,
+            burst_max_new_tokens,
+            warmup_tokens,
+            warmup,
+            iters,
+            completed,
+        )
+        config = {
+            "command": command,
+            "model": "Esme-214M-Chat",
+            "dtype": "bfloat16",
+            "steady_decoders": steady_decoders,
+            "steady_shape": "ragged",
+            "ragged_context_cycle": list(RAGGED_LENGTHS),
+            "steady_max_new_tokens": steady_max_new_tokens,
+            "burst_max_new_tokens": burst_max_new_tokens,
+            "warmup_tokens": warmup_tokens,
+            "cells": cells,
+            "warmup_pairs": warmup,
+            "measured_pairs": iters,
+            "block_size": BLOCK_SIZE,
+            "baseline": "InferenceEngine(batched_prefill=False)",
+            "candidate": "InferenceEngine(batched_prefill=True)",
+            "reference": (
+                "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant over "
+                "steady+burst requests"
+            ),
+            "ignore_eos": True,
+            "preemption": False,
+            "decode_window_size": 1,
+            "burst_admission": (
+                "whole burst admitted in one reserve-mode step (generously sized pool), "
+                "preemption off — the worst-case single packed prefill"
+            ),
+            "timing": {
+                "engine_startup": "excluded",
+                "per_step": (
+                    "torch.cuda.synchronize() brackets every engine.step(); per-step wall is "
+                    "real host time, unlike the throughput harness"
+                ),
+                "itl": (
+                    "one decode token per step (decode_window_size=1), so a steady decoder's "
+                    "inter-token latency is the wall time of the step that produced its token"
+                ),
+                "spanning_itl": "the inter-token gap that straddles the burst-admission step",
+                "burst_ttft": "burst add_request wall to its first sampled token",
+                "scheduler_sync_residual": (
+                    "coarse: total wall minus prefill+decode+sampling device ms; lumps "
+                    "admission, Python classification, and per-step syncs together"
+                ),
+                "pairing": "baseline/candidate order alternates each pair",
+            },
+            "same_container_and_gpu": True,
+            "repro_command": f"modal run scripts/modal_esme_prefill_ab.py --command {command}",
+        }
+
+    # Append on resume so earlier rows survive; each event is flushed the moment it arrives.
+    with rows_path.open("a" if resume else "w", encoding="utf-8") as rows_log:
+        for event in events:
             rows_log.write(json.dumps(event) + "\n")
             rows_log.flush()
 
-    config = {
-        "command": command,
-        "model": "Esme-214M-Chat",
-        "dtype": "bfloat16",
-        "batch_sizes": batch_sizes,
-        "uniform_context_lengths": uniform_lengths,
-        "ragged_context_cycle": list(RAGGED_LENGTHS) if include_ragged else None,
-        "max_new_tokens": output_lengths,
-        "warmup_pairs": warmup,
-        "measured_pairs": iters,
-        "block_size": BLOCK_SIZE,
-        "baseline": "InferenceEngine(batched_prefill=False)",
-        "candidate": "InferenceEngine(batched_prefill=True)",
-        "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
-        "ignore_eos": True,
-        "timing": {
-            "engine_startup": "excluded",
-            "prefill": "CUDA-event time for the model prefill span",
-            "ttft": "synchronized first engine step, including planning and sampling",
-            "end_to_end": "first step through complete request drain",
-            "pairing": "baseline/candidate order alternates each pair",
-        },
-        "same_container_and_gpu": True,
-        "repro_command": (
-            f"modal run scripts/modal_esme_prefill_ab.py --command {command}"
-        ),
-    }
     # Rebuild from the full log (old plus new) so a resumed run emits every row it ever measured.
     record = assemble_final_record(
         parse_event_lines(rows_path.read_text(encoding="utf-8")), config
@@ -966,5 +1597,5 @@ def main(
     stamp = time.strftime("%Y%m%dT%H%M%S")
     out_path = out_dir / f"esme-{command}-{stamp}.json"
     out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    print(f"[esme-prefill-ab] wrote rows log {rows_path}")
-    print(f"[esme-prefill-ab] wrote {out_path}")
+    print(f"[esme-{command}] wrote rows log {rows_path}")
+    print(f"[esme-{command}] wrote {out_path}")
