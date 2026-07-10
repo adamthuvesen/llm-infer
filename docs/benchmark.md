@@ -32,8 +32,10 @@ serve or benchmark on CUDA without it, pass `--attention-backend torch_naive` or
 ![Esme batch-size throughput curve](../assets/fig-esme-batch-curve.svg)
 
 Same run as the headline: chat prompts from a fixed pool, greedy decoding, up to 256 new
-tokens per request, prefix caching off, median of 3 measured iterations after 1 warmup. The
-committed record is
+tokens per request, and prefix caching off. Each `llm_infer` row is the median of 3 measured
+iterations after 1 warmup. The sequential HF batch-8 anchor uses the same repetition count;
+the batch-16 through batch-256 HF rows are single measured flatness checks with no warmup because
+each iteration runs every request sequentially. The committed record is
 [`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json), and the figure regenerates
 from repo state with:
 
@@ -56,10 +58,19 @@ At 256 concurrent requests, the engine serves **95.6x** the same-row measured na
 
 - Workload: chat-templated prompts, 15-41 prompt tokens, greedy decoding, up to 256 new tokens,
   EOS stopping, prefix caching off.
-- Timing: median wall-clock over 3 measured iterations after 1 warmup, with a fresh engine per
-  measured iteration.
+- Engine timing: median wall-clock over 3 measured iterations after 1 warmup, with a fresh engine
+  per measured iteration.
+- HF timing: batch 8 uses 3 measured iterations after 1 warmup. Batches 16-256 use one measured
+  iteration and no warmup; these rows check that sequential HF throughput stays flat, not its
+  run-to-run spread.
 - Reference gate: fp32 full-recompute `PretrainBundleModel.logits()` is the oracle. A row with
   any non-tie divergence reports no tok/s.
+- bf16 tie rule: the Esme benchmark uses a 0.1-logit tolerance when it recomputes the first
+  divergence with the fp32 oracle. This is wider than the generic 1e-3 fused-kernel fixture rule
+  because the fast Esme row converts the whole model to bf16, not just attention. The headline
+  pool contains 8 unique prompts; larger batches repeat them. The current evidence includes
+  accepted gaps up to 0.0463 logits, but it does not establish a full error distribution up to
+  0.1. Treat the threshold as an audited acceptance bound, not a measured noise percentile.
 - Comparison rule: raw tok/s is compared only inside the same benchmark run; same-run ratios are
   the useful number.
 
