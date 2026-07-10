@@ -10,6 +10,11 @@ import torch
 
 from llm_infer.kernels.base import PackedPrefillAttentionBackend
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.model.grouped_decode_graph import (
+    DEFAULT_GROUPED_CAPTURE_SIZES,
+    EngineOwnedGroupedDecodeGraphRunner,
+    build_engine_grouped_runners,
+)
 from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
     QWEN_CAPABILITIES,
@@ -65,6 +70,9 @@ class InferenceEngine(
         capabilities: BackendCapabilities | None = None,
         decode_window_size: int = 8,
         batched_prefill: bool = True,
+        grouped_decode_graphs: bool = False,
+        grouped_capture_sizes: tuple[int, ...] = DEFAULT_GROUPED_CAPTURE_SIZES,
+        grouped_layers: int = 4,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -130,6 +138,24 @@ class InferenceEngine(
         # Observability only: a running tally of preemptions for the serving metrics endpoint.
         # Read live at scrape time; it never influences scheduling or decoding.
         self.preemption_count = 0
+        # Engine-owned grouped decode graphs, one runner per exact batch size. Unlike the
+        # model-owned piecewise runner (cache-agnostic; KV writes stay eager), grouped
+        # captures bake this engine's cache KV pointer into the graphs, so the engine — the
+        # cache owner — constructs them. Captured here, at construction, so no capture cost
+        # can land inside a timed or serving region.
+        self.grouped_decode_runners: dict[int, EngineOwnedGroupedDecodeGraphRunner] = {}
+        if grouped_decode_graphs:
+            if not self.capabilities.planned_decode or not isinstance(model, PretrainBundleModel):
+                raise ValueError(
+                    "grouped_decode_graphs requires a bundle model with planned decode; "
+                    "omit it for this backend"
+                )
+            self.grouped_decode_runners = build_engine_grouped_runners(
+                model,
+                self.cache,
+                grouped_capture_sizes,
+                grouped_layers=grouped_layers,
+            )
 
     def add_request(self, request: Request) -> None:
         """Register and queue a request. Duplicate ids are rejected loudly."""

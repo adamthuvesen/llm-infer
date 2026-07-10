@@ -216,7 +216,12 @@ class EngineDecodeMixin(EngineMixinHost):
                 )
         with self._record_time("decode"):
             if window.plan is not None:
-                logits = self.model.decode_window_step(self.cache, window.plan, last_tokens)
+                # Dispatch chain: grouped runner (exact batch, this cache) → the model's
+                # piecewise runner (padded bucket) → the eager planned step. The grouped
+                # runner declines before touching the plan, so exactly one link advances it.
+                logits = self._grouped_window_step(window.plan, last_tokens)
+                if logits is None:
+                    logits = self.model.decode_window_step(self.cache, window.plan, last_tokens)
             else:
                 logits = self.model.decode_many(
                     self.cache,
@@ -227,6 +232,20 @@ class EngineDecodeMixin(EngineMixinHost):
             window.pending.append(torch.argmax(logits, dim=-1))
         if len(window.pending) >= window.budget:
             self._flush_decode_window(result)
+
+    def _grouped_window_step(
+        self, plan: DecodeWindowPlan, token_ids: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Try the engine-owned grouped runner for this exact batch size, or ``None``.
+
+        A runner exists only for its captured batch size and only against the engine's own
+        cache (it re-checks the cache identity and KV pointer itself), so a miss here is
+        the expected path, not an error — the caller falls through to the piecewise bucket.
+        """
+        runner = self.grouped_decode_runners.get(len(plan.tables))
+        if runner is None:
+            return None
+        return runner.window_step(self.cache, plan, token_ids)
 
     def _flush_decode_window(self, result: StepResult) -> None:
         """Close the open window: stage its host copy, then consume the *previous* stage.

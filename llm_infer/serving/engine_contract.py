@@ -11,6 +11,7 @@ import torch
 from llm_infer.kv_cache.block_allocator import BlockPoolEvent
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.model.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
 from llm_infer.model.interface import BackendCapabilities, CausalLMBackend
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler
@@ -44,6 +45,7 @@ class EngineMixinHost(Protocol):
     trace: TraceRecorder | None
     preemption_count: int
     decode_window_size: int
+    grouped_decode_runners: dict[int, EngineOwnedGroupedDecodeGraphRunner]
     _eos_tensors: dict[frozenset[int], torch.Tensor]
     _decode_window: DecodeWindow | None
     _pending_flush: PendingWindowFlush | None

@@ -56,12 +56,16 @@ def build_app_from_runtime(
     decode_window_size: int = DEFAULT_DECODE_WINDOW_SIZE,
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
+    grouped_decode_graphs: bool = False,
 ):
     """Wire a loaded model runtime into the HTTP app.
 
     Decode graphs are on by default: on a CUDA bundle model the piecewise decode-window
     graphs are captured here, before the engine starts serving, so the capture cost lands
     at startup, never inside a request. On CPU or non-bundle backends this is a no-op.
+    ``grouped_decode_graphs`` additionally captures engine-owned grouped-layer graphs for
+    the same buckets; an exact-batch window decodes through them, everything else falls
+    back to the piecewise buckets.
     """
     warmup_s = _warm_flashinfer_decode_if_needed(
         runtime,
@@ -87,6 +91,8 @@ def build_app_from_runtime(
         prefill_chunk_size=prefill_chunk_size,
         speculative=prompt_lookup_speculative,
         decode_window_size=decode_window_size,
+        grouped_decode_graphs=grouped_decode_graphs,
+        grouped_capture_sizes=decode_graph_buckets,
     )
     metrics = ServerMetrics()
     async_engine = AsyncInferenceEngine(engine, metrics=metrics)
@@ -241,6 +247,12 @@ def main() -> None:
         "above the largest bucket decode on the eager window.",
     )
     parser.add_argument(
+        "--grouped-decode-graphs",
+        action="store_true",
+        help="Also capture engine-owned grouped-layer decode graphs for the same buckets; "
+        "exact-batch windows decode through them, everything else uses the piecewise path.",
+    )
+    parser.add_argument(
         "--preemption-policy",
         choices=("off", "recompute"),
         default="off",
@@ -310,6 +322,7 @@ def main() -> None:
             decode_window_size=args.decode_window_size,
             decode_graphs=args.decode_graphs,
             decode_graph_buckets=args.decode_graph_buckets,
+            grouped_decode_graphs=args.grouped_decode_graphs,
         )
     except ValueError as exc:
         parser.error(str(exc))
