@@ -50,6 +50,8 @@ from llm_infer.model.pretrain_bundle_loader import (
     read_json_object,
     read_weights,
     require_manifest_format,
+    require_supported_schema_version,
+    require_supported_weights_version,
     require_weight_key_format,
     required_file,
     resolve_tokenizer_path,
@@ -136,12 +138,14 @@ class PretrainBundleModel:
 
         manifest = read_json_object(manifest_path)
         require_manifest_format(manifest, manifest_path)
+        require_supported_schema_version(manifest, manifest_path)
         tokenizer_path = resolve_tokenizer_path(root, manifest)
         read_json_object(tokenizer_path)
 
         config = PretrainDenseConfig.from_json(read_json_object(config_path))
         state_dict, metadata = read_weights(weights_path, device)
         require_weight_key_format(metadata, weights_path)
+        require_supported_weights_version(metadata, weights_path)
         weights = normalize_state_dict(state_dict, config, dtype=dtype, device=device)
 
         return cls(

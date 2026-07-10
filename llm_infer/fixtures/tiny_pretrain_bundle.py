@@ -30,6 +30,7 @@ def write_tiny_pretrain_bundle(
         json.dumps(
             {
                 "format": BUNDLE_FORMAT,
+                "schema_version": 1,
                 "model": {"name": "tiny-dense"},
                 "tokenizer": {"path": "tokenizer.json", "format": "tokenizers-json"},
             }

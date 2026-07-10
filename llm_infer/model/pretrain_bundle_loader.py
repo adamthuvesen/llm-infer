@@ -11,6 +11,10 @@ from pathlib import Path
 import torch
 
 BUNDLE_FORMAT = "llm_pretrain_dense_v1"
+# The one bundle schema version this loader supports. esme-pretrain writes it to
+# manifest.json (schema_version) and weights.pt (format_version); the contract and its
+# compatibility policy live in esme-pretrain's docs/bundle-format.md.
+SUPPORTED_BUNDLE_SCHEMA_VERSION = 1
 _MISSING = object()
 
 
@@ -144,6 +148,33 @@ def require_manifest_format(manifest: Mapping[str, object], path: Path) -> None:
         found = ", ".join(sorted({item for item in candidates if item})) or "none"
         raise PretrainBundleError(
             f"{path.name} must identify format {BUNDLE_FORMAT!r}; found {found}"
+        )
+
+
+def require_supported_schema_version(manifest: Mapping[str, object], path: Path) -> None:
+    """Reject a manifest that declares a schema version this loader does not support.
+
+    Bundles that predate the version field load as v1.
+    """
+    declared = manifest.get("schema_version")
+    if declared is None:
+        return
+    if isinstance(declared, bool) or declared != SUPPORTED_BUNDLE_SCHEMA_VERSION:
+        raise PretrainBundleError(
+            f"{path.name} declares schema_version {declared!r}; "
+            f"this loader supports {SUPPORTED_BUNDLE_SCHEMA_VERSION}"
+        )
+
+
+def require_supported_weights_version(metadata: Mapping[str, object], path: Path) -> None:
+    """Reject weights metadata that declares a format version this loader does not support."""
+    declared = metadata.get("format_version")
+    if declared is None:
+        return
+    if isinstance(declared, bool) or declared != SUPPORTED_BUNDLE_SCHEMA_VERSION:
+        raise PretrainBundleError(
+            f"{path.name} declares format_version {declared!r}; "
+            f"this loader supports {SUPPORTED_BUNDLE_SCHEMA_VERSION}"
         )
 
 
