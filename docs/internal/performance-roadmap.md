@@ -478,6 +478,60 @@ until cache ownership, EOS/abort/window lifecycle, and the useful bucket count (
 exact-batch bucket) are settled. Do not expand beyond four layers before those serving questions
 are answered; larger groups would increase capture coupling.
 
+### Serving integration result (2026-07-10)
+
+The serving questions are now settled. The grouped runner lives in
+`llm_infer/model/grouped_decode_graph.py`; the engine constructs runners for its own cache behind
+`InferenceEngine(grouped_decode_graphs=True)` (server flag `--grouped-decode-graphs`) with capture
+at construction, and each window step dispatches grouped (exact batch, matching cache/KV pointer)
+→ piecewise (padded bucket) → eager. Lifecycle is pinned by CPU eager-mode suites (abort
+mid-window, preemption, prefix copy-on-write exclusion and solo re-entry, sampled, speculative;
+every test asserts the runner's `steps_handled` hit counter, exported as
+`llm_infer_grouped_decode_steps_total` on `/metrics`). An A100 serve-smoke through the OpenAI
+server passed reference-checked greedy at batches 1 and 8 with 62/46 real grouped steps.
+
+Bucket policy, measured (`bench-results/esme-decode-bucket-policy-20260710T174150.json`):
+
+- **Exact-size buckets only; padded grouped buckets are rejected.** Exact-batch grouped runners
+  at off-bucket batches 9/17/33/65/96/129 beat today's padded-piecewise fallback by only
+  2.5–6.0% decode wall. A padded grouped design (pad rows write KV, needing a runner-owned
+  scratch block) would land below those ceilings and clears nowhere near the ≥10%-per-complexity
+  bar.
+- **One shared FlashInfer workspace backs all buckets.** The shared 8-bucket ladder
+  (1–128) reproduced the dedicated-workspace agreement profile exactly (including the known
+  reviewed `esme-007` step-22 divergence, same tokens and margins) and cut the construction
+  allocator delta from 2,836 MiB to 1,873 MiB. Sharing is now the default.
+- **Capture is 6–10 s per bucket end to end** (group graph plus the runner's own exact-batch
+  piecewise capture and wrapper warmup) — the earlier 1–2 s figure was the group graph alone.
+  Eight buckets cost ~58 s at engine construction.
+
+Whole-run A/B with real EOS termination
+(`bench-results/esme-batch-curve-grouped-ab-20260710T174221.json`, persistent-engine protocol,
+256 new tokens, exact parity at every batch):
+
+| Batch | Grouped/piecewise wall | Tok/s change | Grouped share of decode steps |
+| ---: | ---: | ---: | ---: |
+| 8 | 0.995 | +0.5% | ~25% |
+| 16 | 0.990 | +1.0% | ~25% |
+| 32 | 0.980 | +2.0% | ~25% |
+| 64 | 0.991 | +0.9% | ~19% |
+| 128 | 0.993 | +0.7% | ~25% |
+| 256 | 0.941 | +6.3% | ~25% |
+
+This resolves the gap against the fixed-length A/B (+22–30% tok/s): those runs decode with an
+empty EOS set, so the batch never shrinks. Under real EOS the batch drains below the captured
+size after the first finisher and the rest of the run falls back to the piecewise buckets —
+exact-batch grouped coverage is structurally ~a quarter of decode steps on this workload, and
+capturing the drain ladder (N, N−1, …) is priced out by per-bucket capture cost.
+
+**Decision: grouped dispatch stays opt-in; the serving default does not flip.** At chat-scale
+batches the default would buy 0.5–2% whole-run for tens of seconds of startup capture and an
+extra dispatch layer — far under the ≥10%-per-complexity rule. The opt-in is the documented
+configuration for fixed-shape, high-batch throughput work (batch 256: +6.3% whole-run, +22%
+fixed-length decode), where the batch actually holds its captured size. The mixed-load stall
+harness is unaffected by construction: it pins `decode_window_size=1` and grouped dispatch only
+runs inside decode windows.
+
 ### Correctness checks
 
 - Exact-size eager versus grouped logits and tokens on the tiny bundle.
@@ -497,10 +551,12 @@ are answered; larger groups would increase capture coupling.
 ### Done when
 
 The experiment answers whether short attention-inclusive graph groups help this engine. The
-benchmark-only four-layer candidate clears both measurement bars: graph launches fall from 31 to
-27 per generated token, batch 1 improves by more than 10%, and batches 64 and 256 improve rather
-than regress. Keep it as a default only after the serving lifecycle checks above pass. Record a
-negative result and remove the candidate if those remaining checks miss the bar.
+four-layer candidate clears both measurement bars: graph launches fall from 31 to 27 per
+generated token, batch 1 improves by more than 10%, and batches 64 and 256 improve rather than
+regress. The serving lifecycle checks passed and the serving question is closed (see the
+serving integration result above): grouped dispatch ships as a tested opt-in for fixed-shape
+high-batch work, and the serving default keeps the piecewise runner because whole-run gains at
+chat-scale batches under real EOS termination are 0.5–2%.
 
 ## Phase 4: Fuse Measured Hot Operations
 
@@ -590,9 +646,11 @@ Keep these ideas off the main path until a new measurement changes the bottlenec
 
 - What dominates current batch-1 TTFT and ITL?
 - Can FlashInfer reuse a fixed plan for a whole decode window, or only fixed metadata buffers?
-- Can a fixed-batch FlashInfer wrapper be captured across a short group of complete layers?
 - How large is the performance cliff above the server's batch-16 graph limit?
 - What logit-error distribution supports the 0.1 bf16 tolerance?
+- Answered 2026-07-10: a fixed-batch FlashInfer wrapper captures cleanly across a short group of
+  complete layers (Phase 3), one shared workspace backs every bucket, and the win survives
+  serving only while the batch holds its captured size — see the serving integration result.
 
 ## References
 
