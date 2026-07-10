@@ -223,7 +223,7 @@ Relevant code:
 - [x] Use native GQA in the fast prefill attention path.
 - [x] Keep sequential prefill as the reference and fallback.
 - [x] Preserve whole-prompt and chunked-prefill scheduling policies.
-- [ ] Make mixed prefill/decode scheduling a separate experiment after isolated batched prefill
+- [x] Make mixed prefill/decode scheduling a separate experiment after isolated batched prefill
   passes.
 
 ### A100 results
@@ -260,6 +260,38 @@ stays coherent on both paths.
 Conclusion: these are numerical ties amplified by reduction order, not an implementation error.
 Batched prefill is enabled by default with the serial path kept as fallback and reference. No
 serial or fp32 fallback was added to force token identity.
+
+### Mixed-load results
+
+Measured 2026-07-10 on A100-80GB with the mixed-load A/B harness (`--command mixed-load`).
+Raw evidence: `bench-results/esme-mixed-load-20260710T*.json` and
+`bench-results/esme-mixed-load-rows.jsonl` — 8 steady ragged decoders at 256 output tokens with
+`decode_window_size=1` and per-step synchronization, a burst admitted in one reserve-mode step
+(worst case: the whole burst prefills in one call), 1 warmup plus 5 measured alternating pairs
+per cell. Steady-state ITL baseline is ~30 ms per token in this per-step-synchronized protocol.
+
+The decode-tail stall is the one inter-token gap that spans the burst step. Batched prefill
+shrinks it 5x to 20x versus serial prefill of the same burst; burst TTFT moves identically
+because both equal that step's wall time:
+
+| Burst | Prompt tokens | Serial stall | Packed stall | Packed/serial |
+| --- | --- | --- | --- | --- |
+| 8 ragged | 1,434 | 309 ms | 61 ms | 0.20x |
+| 32 ragged | 5,932 | 1,156 ms | 74 ms | 0.06x |
+| 64 ragged | 12,778 | 2,291 ms | 117 ms | 0.05x |
+| 64 uniform-512 | 32,768 | 2,446 ms | 241 ms | 0.10x |
+
+Packed stall grows roughly linearly at ~6 ms per 1k packed prompt tokens over a ~55 ms base.
+Correctness: one candidate divergence across all cells (1 of 40 requests, decode step 100, fp32
+top-2 gap 0.136) — the same deterministic near-tie class as the divergence review above; the
+serial baseline is itself tie-tolerant on every cell.
+
+Decision: no packed-prefill size cap for now. Batched prefill strictly reduces the decode-tail
+stall relative to the serial path at every measured burst size, including the ~32k-token worst
+case (241 ms, ~8 normal token gaps, once per burst). If a future workload needs smoother tails,
+the cap belongs in `_can_prefill_many`/`_prefill_many` (`llm_infer/serving/engine_prefill.py`)
+and the table above is the data to size it; splitting a 32k burst into ~8k sub-batches would
+trade burst TTFT for ~70 ms stall ceilings.
 
 ### Measurement matrix
 
