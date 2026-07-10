@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from llm_infer.model.interface import BatchedPrefillBackend
 from llm_infer.scheduler.scheduler import blocks_for_footprint, max_blocks_for
 from llm_infer.serving.request import Request
 
@@ -25,6 +26,10 @@ class EnginePrefillMixin(EngineMixinHost):
 
     def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
         """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
+        if self._can_prefill_many(requests):
+            self._prefill_many(requests, result)
+            return
+
         handled: set[str] = set()
         for request in requests:
             if request.request_id in handled:
@@ -50,6 +55,64 @@ class EnginePrefillMixin(EngineMixinHost):
                 continue
             self._prefill_shared_group(group, result)
             handled.update(candidate.request_id for candidate in group)
+
+    def _can_prefill_many(self, requests: list[Request]) -> bool:
+        return (
+            self.batched_prefill
+            and len(requests) >= 2
+            and self.capabilities.batched_prefill
+            and isinstance(self.model, BatchedPrefillBackend)
+            and self.prefill_chunk_size is None
+            and not self.preemption
+            and all(request.prefix_group_id is None for request in requests)
+        )
+
+    def _prefill_many(self, requests: list[Request], result: StepResult) -> None:
+        tables = []
+        for request in requests:
+            if request.block_table is None:
+                request.block_table = self.cache.new_request()
+                request.block_table.owner = request.request_id
+            if request.block_table.length != 0 or request.prompt_cached_tokens != 0:
+                raise ValueError(
+                    f"request {request.request_id!r} must have an empty cache for batched prefill"
+                )
+            end_pos = len(request.prompt_ids)
+            result.prefill_chunks[request.request_id] = (0, end_pos)
+            self._trace_prefill_chunk_started(
+                request_id=request.request_id,
+                start_pos=0,
+                end_pos=end_pos,
+                total_prompt_tokens=end_pos,
+            )
+            tables.append(request.block_table)
+
+        with self._record_time("prefill"):
+            logits = self.model.prefill_many(
+                [request.prompt_ids for request in requests], self.cache, tables
+            )
+
+        for request in requests:
+            end_pos = len(request.prompt_ids)
+            request.prompt_cached_tokens = end_pos
+            request.prefilled = True
+            self._trace_prefill_chunk_progress(
+                request_id=request.request_id,
+                start_pos=0,
+                end_pos=end_pos,
+                cached_tokens=end_pos,
+                total_prompt_tokens=end_pos,
+                completed=True,
+            )
+
+        with self._record_time("sampling"):
+            tokens = self._sample_rows(logits, requests)
+        token_rows = list(tokens.unbind())
+        eos_flags = self._eos_flags(tokens, requests)
+        for request, token, is_eos in zip(requests, token_rows, eos_flags, strict=True):
+            self._record(request, token, is_eos, result)
+        self._trace_decode_step(requests, token_rows, token_source="prefill")
+        self._release_finished_in(requests, result)
 
     def _prefill_one(self, request: Request, result: StepResult) -> None:
         logits = self._cache_prompt_chunk(request, result)
