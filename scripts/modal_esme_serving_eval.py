@@ -131,7 +131,9 @@ def measure_serving(
                 "capture_sizes": list(CAPTURE_SIZES),
                 "capture_s": capture_s,
             },
-            "grouped_decode_graphs": grouped,
+            # The experiment mode, not one arm's flag: grouped_ab records both arms in
+            # `rows` (each row's `grouped` field names its arm).
+            "grouped_mode": "ab" if grouped_ab else ("grouped" if grouped else "baseline"),
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
             "attention_backend": type(runtime.model.backend).__name__,
@@ -187,6 +189,8 @@ def main(
             "modal run scripts/modal_esme_serving_eval.py "
             f"--batch-sizes {batch_sizes} --max-new-tokens {max_new_tokens} "
             f"--warmup-runs {warmup_runs} --measured-runs {measured_runs}"
+            + (" --grouped-ab" if grouped_ab else "")
+            + (" --grouped" if grouped and not grouped_ab else "")
         ),
     }
     output_dir = REPO_ROOT / "bench-results"
