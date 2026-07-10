@@ -19,7 +19,7 @@ from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serve import build_app_from_runtime
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
-from scripts.loadgen import format_summary, run_load, summarize
+from scripts.loadgen import _percentile, format_summary, run_load, summarize
 from tests.serving.test_api import EOS_ID, TinyTokenizer
 from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
@@ -70,17 +70,17 @@ def test_loadgen_streaming_reports_nonzero_throughput() -> None:
     assert summary["requests"] == 6
     assert summary["ok"] == 6
     assert summary["errors"] == 0
-    # Six requests × six deltas each. The tiny tokenizer decodes one token per delta, so deltas
-    # equal tokens here — but the loadgen still labels the streaming unit as deltas, not tokens.
+    # Streaming usage carries the true completion-token count.
     assert summary["total_output"] == 36
+    assert summary["output_unit"] == "tokens"
     assert summary["throughput_per_s"] > 0
     assert summary["per_request_per_s_mean"] > 0
     assert summary["latency_p50"] > 0
-    # The streaming table labels the unit as deltas, never tokens.
     table = format_summary(summary, concurrency=2, stream=True)
     assert "throughput" in table
-    assert "delta/s" in table
-    assert "tok/s" not in table
+    assert "tok/s" in table
+    assert summary["itl_p50"] >= 0
+    assert summary["itl_p95"] >= 0
 
 
 def test_loadgen_rejects_nonpositive_concurrency() -> None:
@@ -106,8 +106,42 @@ def test_loadgen_blocking_reports_nonzero_throughput() -> None:
     # Blocking reads true completion tokens from usage; the table labels them tok/s.
     assert summary["total_output"] == 36
     assert summary["throughput_per_s"] > 0
+    assert summary["output_unit"] == "tokens"
+    assert summary["itl_p50"] is None
+    assert summary["itl_p95"] is None
     table = format_summary(summary, concurrency=2, stream=False)
     assert "tok/s" in table
+    assert "n/a" in table
+
+
+def test_percentile_uses_nearest_rank() -> None:
+    assert _percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.0
+    assert _percentile([1.0, 2.0, 3.0, 4.0], 95) == 4.0
+    assert _percentile([], 50) is None
+
+
+def test_summary_reads_run_local_queue_percentiles_from_server_histogram() -> None:
+    before = {
+        "llm_infer_queue_time_seconds_count": 2,
+        'llm_infer_queue_time_seconds_bucket{le="0.005"}': 1,
+        'llm_infer_queue_time_seconds_bucket{le="0.01"}': 2,
+    }
+    after = {
+        "llm_infer_queue_time_seconds_count": 6,
+        'llm_infer_queue_time_seconds_bucket{le="0.005"}': 2,
+        'llm_infer_queue_time_seconds_bucket{le="0.01"}': 5,
+        'llm_infer_queue_time_seconds_bucket{le="0.025"}': 6,
+    }
+
+    summary = summarize(
+        [],
+        1.0,
+        server_metrics_before=before,
+        server_metrics_after=after,
+    )
+
+    assert summary["queue_time_p50_bucket_upper_s"] == 0.01
+    assert summary["queue_time_p95_bucket_upper_s"] == 0.025
 
 
 def test_loadgen_drives_esme_server(tmp_path: Path) -> None:

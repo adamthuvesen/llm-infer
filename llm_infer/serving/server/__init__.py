@@ -11,13 +11,18 @@ and production backends drive the same code.
 from __future__ import annotations
 
 from llm_infer.serving.server.app import create_app
-from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
+from llm_infer.serving.server.async_engine import (
+    AsyncEngineRequestObserver,
+    AsyncInferenceEngine,
+    TokenStreamItem,
+)
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
 from llm_infer.serving.server.metrics import ServerMetrics
 from llm_infer.serving.server.webui import register_webui
 
 __all__ = [
     "AsyncInferenceEngine",
+    "AsyncEngineRequestObserver",
     "IncrementalDetokenizer",
     "ServerMetrics",
     "TokenStreamItem",

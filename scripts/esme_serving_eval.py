@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
+import socket
 import sys
 import threading
 import time
@@ -39,7 +41,7 @@ from llm_infer.serving.server import AsyncInferenceEngine, ServerMetrics, create
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
 from llm_infer.tracing import TraceRecorder
 
-Surface = Literal["engine", "asgi-http", "external-http"]
+Surface = Literal["engine", "asgi-http", "network-http", "external-http"]
 Endpoint = Literal["chat", "completions"]
 ReferenceState = Literal["pass", "fail", "partial", "skipped", "unavailable"]
 
@@ -207,6 +209,54 @@ class StepObserver:
         return arrival
 
 
+class StreamOutputObserver:
+    """Capture server outputs after its existing tensor-to-int conversion."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, ObservedEngineRequest] = {}
+
+    def submitted(self, request: Request, submitted_s: float) -> None:
+        sampling = request.sampling or GREEDY
+        record = ObservedEngineRequest(
+            request_id=request.request_id,
+            signature=RequestSignature.from_parts(
+                request.prompt_ids, request.max_new_tokens, sampling
+            ),
+            sampling=sampling,
+            arrival_s=submitted_s,
+        )
+        self._records[request.request_id] = record
+
+    def admitted(self, request_id: str, admitted_s: float) -> None:
+        record = self._records.get(request_id)
+        if record is not None:
+            record.admitted_s = admitted_s
+
+    def finished(
+        self, request_id: str, token_ids: list[int], finished_s: float
+    ) -> None:
+        record = self._records.get(request_id)
+        if record is not None:
+            record.token_ids = list(token_ids)
+            record.finished_s = finished_s
+
+    def reset(self) -> None:
+        self._records.clear()
+
+    def snapshot(
+        self, engine: InferenceEngine
+    ) -> tuple[list[ObservedEngineRequest], dict[str, object]]:
+        records = list(self._records.values())
+        return records, {
+            "preemption_count": engine.preemption_count,
+            "kv_utilization_peak": None,
+            "kv_utilization_final": engine.cache.allocator.num_used
+            / engine.cache.allocator.num_blocks,
+            "max_running_requests": None,
+            "max_waiting_requests": None,
+        }
+
+
 @dataclass(frozen=True)
 class EngineRequestSpec:
     request_id: str
@@ -262,6 +312,7 @@ class ClientRequestResult:
     start_s: float
     end_s: float
     first_token_s: float | None = None
+    token_times_s: list[float] = field(default_factory=list)
     finish_reason: str | None = None
     http_status: int | None = None
     error: str | None = None
@@ -281,6 +332,13 @@ class ClientRequestResult:
         if self.output_count < 1:
             return None
         return self.latency_s / self.output_count
+
+    @property
+    def itls_s(self) -> list[float]:
+        return [
+            max(0.0, right - left)
+            for left, right in zip(self.token_times_s, self.token_times_s[1:], strict=False)
+        ]
 
 
 def default_engine_workloads() -> tuple[EngineWorkload, ...]:
@@ -349,6 +407,37 @@ def default_http_workloads() -> tuple[HttpWorkload, ...]:
     sampled = SamplingParams(temperature=0.8, top_p=0.95, top_k=8, seed=17)
     return (
         HttpWorkload(
+            name="api-streaming-greedy",
+            description="Persistent streaming greedy requests for TTFT, ITL, and output rate.",
+            config=WorkloadConfig(block_size=8, num_blocks=64),
+            requests=tuple(
+                HttpRequestSpec(
+                    f"greedy-{idx}",
+                    "chat",
+                    f"Name one inference metric. Request {idx}.",
+                    16,
+                    True,
+                )
+                for idx in range(8)
+            ),
+        ),
+        HttpWorkload(
+            name="api-streaming-sampled",
+            description="Persistent seeded sampling requests for TTFT, ITL, and output rate.",
+            config=WorkloadConfig(block_size=8, num_blocks=64),
+            requests=tuple(
+                HttpRequestSpec(
+                    f"sampled-{idx}",
+                    "chat",
+                    f"Name one inference metric. Request {idx}.",
+                    16,
+                    True,
+                    sampled,
+                )
+                for idx in range(8)
+            ),
+        ),
+        HttpWorkload(
             name="api-streaming-mixed",
             description=(
                 "Streaming chat requests mix short and long prompts through the OpenAI path."
@@ -413,6 +502,48 @@ def default_http_workloads() -> tuple[HttpWorkload, ...]:
     )
 
 
+def phase0_http_workloads(
+    request_count: int,
+    *,
+    max_new_tokens: int = 128,
+    block_size: int = 64,
+    num_blocks: int = 1024,
+) -> tuple[HttpWorkload, HttpWorkload]:
+    """Build paired greedy and seeded-sampling workloads with the same HTTP shape."""
+    if request_count < 1:
+        raise ValueError(f"request_count must be >= 1; got {request_count}")
+    sampled = SamplingParams(temperature=0.8, top_p=0.95, top_k=32, seed=17)
+    config = WorkloadConfig(block_size=block_size, num_blocks=num_blocks)
+
+    def requests(prefix: str, sampling: SamplingParams) -> tuple[HttpRequestSpec, ...]:
+        return tuple(
+            HttpRequestSpec(
+                request_id=f"{prefix}-{index}",
+                endpoint="chat",
+                prompt="Explain one inference performance metric.",
+                max_new_tokens=max_new_tokens,
+                stream=True,
+                sampling=sampling,
+            )
+            for index in range(request_count)
+        )
+
+    return (
+        HttpWorkload(
+            name=f"phase0-http-greedy-b{request_count}",
+            description="Persistent streaming greedy Phase 0 serving measurement.",
+            config=config,
+            requests=requests("greedy", GREEDY),
+        ),
+        HttpWorkload(
+            name=f"phase0-http-sampled-b{request_count}",
+            description="Persistent streaming sampled Phase 0 serving measurement.",
+            config=config,
+            requests=requests("sampled", sampled),
+        ),
+    )
+
+
 async def run_local_eval(
     runtime: ModelRuntime,
     *,
@@ -438,7 +569,10 @@ async def run_engine_workload(
 ) -> dict[str, object]:
     observer = StepObserver()
     trace = TraceRecorder()
+    engine_build_started_s = time.perf_counter()
     engine = _build_engine(runtime, workload.config, device=device, trace=trace)
+    _synchronize_device(device)
+    engine_build_s = time.perf_counter() - engine_build_started_s
     observer.wrap(engine)
     async_engine = AsyncInferenceEngine(engine)
 
@@ -448,6 +582,7 @@ async def run_engine_workload(
         observer.expect(signature, start)
         token_count = 0
         first_token_s: float | None = None
+        token_times_s: list[float] = []
         finish_reason: str | None = None
         try:
             async for item in async_engine.stream(
@@ -459,8 +594,10 @@ async def run_engine_workload(
                 prefix_group_id=spec.prefix_group_id,
             ):
                 token_count += 1
+                token_s = time.perf_counter()
                 if first_token_s is None:
-                    first_token_s = time.perf_counter()
+                    first_token_s = token_s
+                token_times_s.append(token_s)
                 if item.finish_reason is not None:
                     finish_reason = item.finish_reason
             return ClientRequestResult(
@@ -471,6 +608,7 @@ async def run_engine_workload(
                 start_s=start,
                 end_s=time.perf_counter(),
                 first_token_s=first_token_s,
+                token_times_s=token_times_s,
                 finish_reason=finish_reason,
             )
         except Exception as exc:  # noqa: BLE001 - one bad request is an eval record, not a crash.
@@ -482,6 +620,7 @@ async def run_engine_workload(
                 start_s=start,
                 end_s=time.perf_counter(),
                 first_token_s=first_token_s,
+                token_times_s=token_times_s,
                 error=f"{type(exc).__name__}: {exc}",
             )
 
@@ -492,7 +631,9 @@ async def run_engine_workload(
     # siblings separately, which the workload's trace expectations must not depend on.
     consumers = [asyncio.create_task(consume(spec)) for spec in workload.requests]
     await asyncio.sleep(0)
+    engine_start_started_s = time.perf_counter()
     async_engine.start()
+    engine_start_s = time.perf_counter() - engine_start_started_s
     wall_start = time.perf_counter()
     try:
         client_results = await asyncio.gather(*consumers)
@@ -512,6 +653,13 @@ async def run_engine_workload(
         trace=trace,
         runtime=runtime,
         wall_s=wall_s,
+        timing_scope={
+            "engine_build_s": engine_build_s,
+            "server_start_s": engine_start_s,
+            "warmup_s": 0.0,
+            "steady_state_wall_s": wall_s,
+            "steady_state_excludes": ["engine_build", "engine_start"],
+        },
     )
 
 
@@ -520,10 +668,14 @@ async def run_asgi_http_workload(
     workload: HttpWorkload,
     *,
     device: str = "cpu",
+    reference_runtime: ModelRuntime | None = None,
 ) -> dict[str, object]:
     observer = StepObserver()
     trace = TraceRecorder()
+    engine_build_started_s = time.perf_counter()
     engine = _build_engine(runtime, workload.config, device=device, trace=trace)
+    _synchronize_device(device)
+    engine_build_s = time.perf_counter() - engine_build_started_s
     observer.wrap(engine)
     metrics = ServerMetrics()
     async_engine = AsyncInferenceEngine(engine, metrics=metrics)
@@ -546,15 +698,20 @@ async def run_asgi_http_workload(
             return await _run_streaming_http(client, spec, runtime.model_id, start)
         return await _run_blocking_http(client, spec, runtime.model_id, start)
 
-    wall_start = time.perf_counter()
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=transport, base_url="http://test", timeout=timeout) as client,
-    ):
-        before_metrics = _parse_metrics((await client.get("/metrics")).text)
-        client_results = await asyncio.gather(*(one(client, spec) for spec in workload.requests))
-        after_metrics = _parse_metrics((await client.get("/metrics")).text)
-    wall_s = time.perf_counter() - wall_start
+    server_start_started_s = time.perf_counter()
+    async with app.router.lifespan_context(app):
+        server_start_s = time.perf_counter() - server_start_started_s
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", timeout=timeout
+        ) as client:
+            before_metrics = _parse_metrics((await client.get("/metrics")).text)
+            _synchronize_device(device)
+            wall_start = time.perf_counter()
+            client_results = await asyncio.gather(
+                *(one(client, spec) for spec in workload.requests)
+            )
+            wall_s = time.perf_counter() - wall_start
+            after_metrics = _parse_metrics((await client.get("/metrics")).text)
 
     observed, engine_metrics = observer.snapshot()
     engine_metrics.update(_public_metric_delta(before_metrics, after_metrics))
@@ -567,8 +724,149 @@ async def run_asgi_http_workload(
         observed=observed,
         engine_metrics=engine_metrics,
         trace=trace,
-        runtime=runtime,
+        runtime=reference_runtime or runtime,
         wall_s=wall_s,
+        timing_scope={
+            "engine_build_s": engine_build_s,
+            "server_start_s": server_start_s,
+            "warmup_s": 0.0,
+            "steady_state_wall_s": wall_s,
+            "steady_state_excludes": ["engine_build", "server_start", "metrics_scrape"],
+        },
+    )
+
+
+async def run_network_http_workload(
+    runtime: ModelRuntime,
+    workload: HttpWorkload,
+    *,
+    device: str = "cpu",
+    reference_runtime: ModelRuntime | None = None,
+    warmup_runs: int = 0,
+    measured_runs: int = 1,
+) -> dict[str, object]:
+    """Measure streaming through localhost Uvicorn on the normal untraced decode path."""
+    import uvicorn
+
+    if warmup_runs < 0:
+        raise ValueError(f"warmup_runs must be >= 0; got {warmup_runs}")
+    if measured_runs < 1:
+        raise ValueError(f"measured_runs must be >= 1; got {measured_runs}")
+    observer = StreamOutputObserver()
+    engine_build_started_s = time.perf_counter()
+    # Tracing forces one-token decode windows, so attaching a TraceRecorder here would change
+    # the production path being measured. StreamOutputObserver captures the already-materialized
+    # token ids at the server boundary without a second CUDA tensor-to-host conversion.
+    engine = _build_engine(runtime, workload.config, device=device, trace=None)
+    _synchronize_device(device)
+    engine_build_s = time.perf_counter() - engine_build_started_s
+    metrics = ServerMetrics()
+    async_engine = AsyncInferenceEngine(
+        engine, metrics=metrics, request_observer=observer
+    )
+    app = create_app(
+        async_engine=async_engine,
+        tokenizer=runtime.tokenizer,
+        model_id=runtime.model_id,
+        eos_token_ids=runtime.eos_token_ids,
+        metrics=metrics,
+    )
+
+    with socket.socket() as port_socket:
+        port_socket.bind(("127.0.0.1", 0))
+        port = int(port_socket.getsockname()[1])
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+    )
+    server.install_signal_handlers = lambda: None
+    server_started_s = time.perf_counter()
+    server_task = asyncio.create_task(server.serve())
+    try:
+        while not server.started:
+            if server_task.done():
+                await server_task
+                raise RuntimeError("Uvicorn exited before accepting requests")
+            if time.perf_counter() - server_started_s > 30.0:
+                raise TimeoutError("Uvicorn did not start within 30 seconds")
+            await asyncio.sleep(0.01)
+        server_start_s = time.perf_counter() - server_started_s
+
+        timeout = httpx.Timeout(180.0)
+        connection_limit = max(1, len(workload.requests))
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}",
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=connection_limit,
+                max_keepalive_connections=connection_limit,
+            ),
+        ) as client:
+
+            async def one(spec: HttpRequestSpec) -> ClientRequestResult:
+                start = time.perf_counter()
+                if spec.stream:
+                    return await _run_streaming_http(client, spec, runtime.model_id, start)
+                return await _run_blocking_http(client, spec, runtime.model_id, start)
+
+            warmup_started_s = time.perf_counter()
+            for _ in range(warmup_runs):
+                warmup_results = await asyncio.gather(
+                    *(one(spec) for spec in workload.requests)
+                )
+                failures = [result.error for result in warmup_results if result.status == "error"]
+                if failures:
+                    raise RuntimeError(f"serving warmup failed: {failures[0]}")
+            warmup_s = time.perf_counter() - warmup_started_s
+            observer.reset()
+            before_metrics = _parse_metrics((await client.get("/metrics")).text)
+            client_results: list[ClientRequestResult] = []
+            wall_s = 0.0
+            for _ in range(measured_runs):
+                _synchronize_device(device)
+                wall_start = time.perf_counter()
+                run_results = await asyncio.gather(
+                    *(one(spec) for spec in workload.requests)
+                )
+                _synchronize_device(device)
+                wall_s += time.perf_counter() - wall_start
+                client_results.extend(run_results)
+            after_metrics = _parse_metrics((await client.get("/metrics")).text)
+    finally:
+        server.should_exit = True
+        await server_task
+
+    observed, engine_metrics = observer.snapshot(engine)
+    engine_metrics.update(_public_metric_delta(before_metrics, after_metrics))
+    return _workload_result(
+        name=workload.name,
+        surface="network-http",
+        description=workload.description,
+        config=workload.config,
+        client_results=client_results,
+        observed=observed,
+        engine_metrics=engine_metrics,
+        trace=None,
+        runtime=reference_runtime or runtime,
+        wall_s=wall_s,
+        timing_scope={
+            "engine_build_s": engine_build_s,
+            "server_start_s": server_start_s,
+            "warmup_runs": warmup_runs,
+            "warmup_s": warmup_s,
+            "measured_runs": measured_runs,
+            "steady_state_wall_s": wall_s,
+            "transport": "localhost Uvicorn TCP",
+            "max_connections": connection_limit,
+            "reference_capture": "one finished-output list copy per request",
+            "steady_state_excludes": ["engine_build", "server_start", "metrics_scrape"],
+        },
     )
 
 
@@ -578,6 +876,7 @@ async def run_external_http_eval(
     model_id: str,
     workload_names: set[str] | None = None,
     timeout_s: float = 60.0,
+    warmup_requests: int = 1,
 ) -> list[dict[str, object]]:
     """Run HTTP-only workloads against an already running server.
 
@@ -590,6 +889,18 @@ async def run_external_http_eval(
         for workload in default_http_workloads():
             if not _selected(workload.name, workload_names):
                 continue
+            warmup_started_s = time.perf_counter()
+            if warmup_requests:
+                warmup_spec = workload.requests[0]
+                await asyncio.gather(
+                    *(
+                        _run_streaming_http(client, warmup_spec, model_id, time.perf_counter())
+                        if warmup_spec.stream
+                        else _run_blocking_http(client, warmup_spec, model_id, time.perf_counter())
+                        for _ in range(warmup_requests)
+                    )
+                )
+            warmup_s = time.perf_counter() - warmup_started_s
             before_metrics = await _external_metric_samples(client)
             wall_start = time.perf_counter()
             client_results = await asyncio.gather(
@@ -609,6 +920,20 @@ async def run_external_http_eval(
                     client_results=client_results,
                     wall_s=wall_s,
                     engine_metrics=engine_metrics,
+                    timing_scope={
+                        "engine_build_s": None,
+                        "server_start_s": None,
+                        "warmup_requests": warmup_requests,
+                        "warmup_s": warmup_s,
+                        "steady_state_wall_s": wall_s,
+                        "steady_state_excludes": [
+                            "external_server_startup",
+                            "engine_build",
+                            "kv_pool_allocation",
+                            "warmup",
+                            "metrics_scrape",
+                        ],
+                    },
                 )
             )
         return results
@@ -619,7 +944,7 @@ def _build_engine(
     config: WorkloadConfig,
     *,
     device: str,
-    trace: TraceRecorder,
+    trace: TraceRecorder | None,
 ) -> InferenceEngine:
     return InferenceEngine(
         runtime.model,
@@ -634,6 +959,12 @@ def _build_engine(
     )
 
 
+def _synchronize_device(device: str) -> None:
+    target = torch.device(device)
+    if target.type == "cuda":
+        torch.cuda.synchronize(target)
+
+
 async def _run_streaming_http(
     client: httpx.AsyncClient,
     spec: HttpRequestSpec,
@@ -642,6 +973,7 @@ async def _run_streaming_http(
 ) -> ClientRequestResult:
     output_deltas = 0
     first_token_s: float | None = None
+    token_times_s: list[float] = []
     finish_reason: str | None = None
     usage_output_tokens: int | None = None
     try:
@@ -677,9 +1009,11 @@ async def _run_streaming_http(
                 else:
                     content = choice.get("text")
                 if content:
+                    token_s = time.perf_counter()
                     output_deltas += 1
                     if first_token_s is None:
-                        first_token_s = time.perf_counter()
+                        first_token_s = token_s
+                    token_times_s.append(token_s)
                 if choice.get("finish_reason") is not None:
                     finish_reason = choice["finish_reason"]
         return ClientRequestResult(
@@ -690,6 +1024,7 @@ async def _run_streaming_http(
             start_s=start,
             end_s=time.perf_counter(),
             first_token_s=first_token_s,
+            token_times_s=token_times_s,
             finish_reason=finish_reason,
             http_status=200,
         )
@@ -702,6 +1037,7 @@ async def _run_streaming_http(
             start_s=start,
             end_s=time.perf_counter(),
             first_token_s=first_token_s,
+            token_times_s=token_times_s,
             error=f"{type(exc).__name__}: {exc}",
         )
 
@@ -762,11 +1098,12 @@ def _workload_result(
     client_results: list[ClientRequestResult],
     observed: list[ObservedEngineRequest],
     engine_metrics: dict[str, object],
-    trace: TraceRecorder,
+    trace: TraceRecorder | None,
     runtime: ModelRuntime,
     wall_s: float,
+    timing_scope: dict[str, object],
 ) -> dict[str, object]:
-    reference = _reference_summary(runtime, observed)
+    reference = _reference_summary(runtime, observed, block_size=config.block_size)
     output_tokens = sum(len(record.token_ids) for record in observed)
     client_summary = _client_summary(client_results)
     requests_total = len(client_results)
@@ -778,14 +1115,13 @@ def _workload_result(
     engine_ttfts = [record.ttft_s for record in observed if record.ttft_s is not None]
     client_ttfts = [value for value in client_summary["ttft_values"] if isinstance(value, float)]
     latencies = [
-        value
-        for value in [
-            *(record.latency_s for record in observed),
-            *client_summary["latency_values"],
-        ]
-        if isinstance(value, float)
-    ]
-    per_token = _per_token_latencies(observed, client_results)
+        value for value in client_summary["latency_values"] if isinstance(value, float)
+    ] or [value for record in observed if isinstance((value := record.latency_s), float)]
+    itls = (
+        [itl for result in client_results for itl in result.itls_s]
+        if surface in {"asgi-http", "network-http"}
+        else _per_token_latencies(observed, client_results)
+    )
     speed_status = _speed_status(
         reference["status"],
         requests_total=requests_total,
@@ -801,6 +1137,7 @@ def _workload_result(
         "description": description,
         "config": _config_dict(config),
         "wall_s": wall_s,
+        "timing_scope": timing_scope,
         "requests": [result_to_dict(result) for result in client_results],
         "metrics": {
             "requests_total": requests_total,
@@ -814,14 +1151,20 @@ def _workload_result(
             "throughput_status": speed_status,
             "observed_output_tokens_per_s": observed_rate,
             "ttft_p50_s": _percentile(client_ttfts, 50),
+            "ttft_p95_s": _percentile(client_ttfts, 95),
             "ttft_p99_s": _percentile(client_ttfts, 99),
             "engine_ttft_p50_s": _percentile(engine_ttfts, 50),
+            "engine_ttft_p95_s": _percentile(engine_ttfts, 95),
             "engine_ttft_p99_s": _percentile(engine_ttfts, 99),
             "latency_p50_s": _percentile(latencies, 50),
+            "latency_p95_s": _percentile(latencies, 95),
             "latency_p99_s": _percentile(latencies, 99),
-            "per_token_latency_p50_s": _percentile(per_token, 50),
-            "per_token_latency_p99_s": _percentile(per_token, 99),
+            "itl_p50_s": _percentile(itls, 50),
+            "itl_p95_s": _percentile(itls, 95),
+            "per_token_latency_p50_s": _percentile(itls, 50),
+            "per_token_latency_p99_s": _percentile(itls, 99),
             "queue_time_p50_s": _percentile(queue_times, 50),
+            "queue_time_p95_s": _percentile(queue_times, 95),
             "queue_time_p99_s": _percentile(queue_times, 99),
             **engine_metrics,
         },
@@ -836,6 +1179,7 @@ def _external_workload_result(
     client_results: list[ClientRequestResult],
     wall_s: float,
     engine_metrics: dict[str, object],
+    timing_scope: dict[str, object],
 ) -> dict[str, object]:
     client_summary = _client_summary(client_results)
     public_output_tokens = engine_metrics.get("public_stream_tokens")
@@ -850,6 +1194,7 @@ def _external_workload_result(
         "description": workload.description,
         "config": _config_dict(workload.config),
         "wall_s": wall_s,
+        "timing_scope": timing_scope,
         "requests": [result_to_dict(result) for result in client_results],
         "metrics": {
             "requests_total": len(client_results),
@@ -865,16 +1210,23 @@ def _external_workload_result(
             "throughput_status": "not_reported_reference_unavailable",
             "observed_output_tokens_per_s": total_output / wall_s if wall_s > 0 else None,
             "ttft_p50_s": _percentile(client_summary["ttft_values"], 50),
+            "ttft_p95_s": _percentile(client_summary["ttft_values"], 95),
             "ttft_p99_s": _percentile(client_summary["ttft_values"], 99),
             "latency_p50_s": _percentile(client_summary["latency_values"], 50),
+            "latency_p95_s": _percentile(client_summary["latency_values"], 95),
             "latency_p99_s": _percentile(client_summary["latency_values"], 99),
-            "per_token_latency_p50_s": _percentile(
-                [value for value in client_summary["per_output_values"] if value is not None], 50
-            ),
+            "itl_p50_s": _percentile(client_summary["itl_values"], 50),
+            "itl_p95_s": _percentile(client_summary["itl_values"], 95),
+            "per_token_latency_p50_s": _percentile(client_summary["itl_values"], 50),
             "per_token_latency_p99_s": _percentile(
-                [value for value in client_summary["per_output_values"] if value is not None], 99
+                client_summary["itl_values"], 99
             ),
-            "queue_time_p50_s": None,
+            "queue_time_p50_s": engine_metrics.get(
+                "public_queue_time_p50_bucket_upper_s"
+            ),
+            "queue_time_p95_s": engine_metrics.get(
+                "public_queue_time_p95_bucket_upper_s"
+            ),
             "queue_time_p99_s": None,
             **engine_metrics,
         },
@@ -897,29 +1249,24 @@ def _external_workload_result(
 
 
 def _reference_summary(
-    runtime: ModelRuntime, records: list[ObservedEngineRequest]
+    runtime: ModelRuntime,
+    records: list[ObservedEngineRequest],
+    *,
+    block_size: int,
 ) -> dict[str, object]:
+    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
+    from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
+
     details: list[dict[str, object]] = []
+    references: dict[RequestSignature, list[int]] = {}
     passed = 0
     failed = 0
     skipped = 0
     for record in records:
-        if not record.sampling.is_greedy:
-            skipped += 1
-            details.append(
-                {
-                    "request_id": record.request_id,
-                    "status": "skipped_sampled",
-                    "output_tokens": len(record.token_ids),
-                }
-            )
-            continue
-        reference = greedy_decode(
-            runtime.model,
-            list(record.signature.prompt_ids),
-            max_new_tokens=record.signature.max_new_tokens,
-            eos_token_ids=set(runtime.eos_token_ids),
-        )
+        reference = references.get(record.signature)
+        if reference is None:
+            reference = _reference_decode(runtime, record, block_size=block_size)
+            references[record.signature] = reference
         got = normalize_at_eos(record.token_ids, runtime.eos_token_ids)
         expected = normalize_at_eos(reference, runtime.eos_token_ids)
         if got == expected:
@@ -932,6 +1279,26 @@ def _reference_summary(
                 }
             )
             continue
+        if record.sampling.is_greedy:
+            tie_result = compare_under_tie_tolerance(
+                runtime.model,
+                list(record.signature.prompt_ids),
+                got,
+                expected,
+                tolerance=BF16_AGREEMENT_TOLERANCE,
+            )
+            if tie_result.ok and tie_result.divergence is not None:
+                passed += 1
+                details.append(
+                    {
+                        "request_id": record.request_id,
+                        "status": "pass_tie",
+                        "step": tie_result.divergence.step,
+                        "gap": tie_result.divergence.reference_gap,
+                        "output_tokens": len(record.token_ids),
+                    }
+                )
+                continue
         failed += 1
         details.append(
             {
@@ -962,7 +1329,50 @@ def _reference_summary(
     }
 
 
-def _trace_summary(trace: TraceRecorder) -> dict[str, object]:
+def _reference_decode(
+    runtime: ModelRuntime, record: ObservedEngineRequest, *, block_size: int
+) -> list[int]:
+    if record.sampling.is_greedy:
+        return greedy_decode(
+            runtime.model,
+            list(record.signature.prompt_ids),
+            max_new_tokens=record.signature.max_new_tokens,
+            eos_token_ids=set(runtime.eos_token_ids),
+        )
+
+    # Seeded sampled output is not stable across fp32 and bf16 logits. Its serving reference is
+    # therefore one request through the same paged backend and dtype. This checks that batching,
+    # HTTP dispatch, and per-request RNG state do not change the sampled continuation; greedy
+    # model math remains gated against the fp32 full-recompute oracle above.
+    required_blocks = (
+        len(record.signature.prompt_ids) + record.signature.max_new_tokens + block_size - 1
+    ) // block_size
+    engine = InferenceEngine(
+        runtime.model,
+        block_size=block_size,
+        num_blocks=required_blocks + 2,
+        device=str(runtime.model.device),
+        capabilities=runtime.capabilities,
+    )
+    request_id = "sampled-reference"
+    engine.add_request(
+        Request(
+            request_id,
+            list(record.signature.prompt_ids),
+            record.signature.max_new_tokens,
+            runtime.eos_token_ids,
+            sampling=record.sampling,
+        )
+    )
+    return engine.run()[request_id]
+
+
+def _trace_summary(trace: TraceRecorder | None) -> dict[str, object]:
+    if trace is None:
+        return {
+            "available": False,
+            "reason": "disabled because tracing changes deferred decode-window behavior",
+        }
     events = trace.events
     by_event: dict[str, int] = {}
     by_token_source: dict[str, int] = {}
@@ -983,6 +1393,7 @@ def _client_summary(results: list[ClientRequestResult]) -> dict[str, list[float 
         "ttft_values": [result.ttft_s for result in results if result.ttft_s is not None],
         "latency_values": [result.latency_s for result in results],
         "per_output_values": [result.per_output_s for result in results],
+        "itl_values": [itl for result in results for itl in result.itls_s],
     }
 
 
@@ -1014,6 +1425,7 @@ def result_to_dict(result: ClientRequestResult) -> dict[str, object]:
         "ttft_s": result.ttft_s,
         "latency_s": result.latency_s,
         "per_output_s": result.per_output_s,
+        "itls_s": result.itls_s,
         "error": result.error,
     }
 
@@ -1055,7 +1467,8 @@ def _percentile(values: Iterable[float | None], pct: float) -> float | None:
     clean = sorted(value for value in values if value is not None)
     if not clean:
         return None
-    rank = max(0, min(len(clean) - 1, round(pct / 100.0 * (len(clean) - 1))))
+    rank = 0 if pct <= 0 else math.ceil(pct / 100.0 * len(clean)) - 1
+    rank = max(0, min(len(clean) - 1, rank))
     return clean[rank]
 
 
@@ -1177,6 +1590,30 @@ def _public_metric_delta(before: dict[str, float], after: dict[str, float]) -> d
             if queue_sum is not None and queue_count is not None and queue_count > 0
             else None
         ),
+        "public_queue_time_p50_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_queue_time_seconds", 50
+        ),
+        "public_queue_time_p95_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_queue_time_seconds", 95
+        ),
+        "public_ttft_p50_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_ttft_seconds", 50
+        ),
+        "public_ttft_p95_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_ttft_seconds", 95
+        ),
+        "public_itl_p50_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_itl_seconds", 50
+        ),
+        "public_itl_p95_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_itl_seconds", 95
+        ),
+        "public_latency_p50_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_request_latency_seconds", 50
+        ),
+        "public_latency_p95_bucket_upper_s": _histogram_delta_quantile(
+            before, after, "llm_infer_request_latency_seconds", 95
+        ),
     }
 
 
@@ -1187,6 +1624,14 @@ def _empty_public_metrics() -> dict[str, object]:
         "public_queue_time_count": None,
         "public_queue_time_sum_s": None,
         "public_queue_time_avg_s": None,
+        "public_queue_time_p50_bucket_upper_s": None,
+        "public_queue_time_p95_bucket_upper_s": None,
+        "public_ttft_p50_bucket_upper_s": None,
+        "public_ttft_p95_bucket_upper_s": None,
+        "public_itl_p50_bucket_upper_s": None,
+        "public_itl_p95_bucket_upper_s": None,
+        "public_latency_p50_bucket_upper_s": None,
+        "public_latency_p95_bucket_upper_s": None,
     }
 
 
@@ -1195,6 +1640,32 @@ def _sample_delta(before: dict[str, float], after: dict[str, float], name: str) 
     if value is None:
         return None
     return value - before.get(name, 0.0)
+
+
+def _histogram_delta_quantile(
+    before: dict[str, float],
+    after: dict[str, float],
+    metric: str,
+    percentile: float,
+) -> float | None:
+    count_name = f"{metric}_count"
+    total = after.get(count_name, 0.0) - before.get(count_name, 0.0)
+    if total <= 0:
+        return None
+    target = total * percentile / 100.0
+    prefix = f'{metric}_bucket{{le="'
+    buckets: list[tuple[float, float]] = []
+    for name, value in after.items():
+        if not name.startswith(prefix):
+            continue
+        upper_text = name[len(prefix) :].split('"', 1)[0]
+        if upper_text == "+Inf":
+            continue
+        buckets.append((float(upper_text), value - before.get(name, 0.0)))
+    for upper, cumulative in sorted(buckets):
+        if cumulative >= target:
+            return upper
+    return None
 
 
 def _parse_metrics(text: str) -> dict[str, float]:
@@ -1327,6 +1798,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             model_id=args.model,
             workload_names=selected,
             timeout_s=args.timeout,
+            warmup_requests=args.warmup_requests,
         )
         metadata: dict[str, object] = {
             "target": "external-http",
@@ -1412,7 +1884,15 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="esme-214m-chat")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--warmup-requests",
+        type=int,
+        default=1,
+        help="external-server requests run before each measured workload",
+    )
     args = parser.parse_args()
+    if args.warmup_requests < 0:
+        parser.error(f"--warmup-requests must be >= 0; got {args.warmup_requests}")
     try:
         raise SystemExit(asyncio.run(_main_async(args)))
     except KeyboardInterrupt:

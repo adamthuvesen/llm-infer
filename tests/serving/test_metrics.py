@@ -78,6 +78,7 @@ def test_metrics_reflect_real_traffic() -> None:
             assert "# TYPE llm_infer_kv_utilization_ratio gauge" in text
             assert "# TYPE llm_infer_queue_time_seconds histogram" in text
             assert "# TYPE llm_infer_ttft_seconds histogram" in text
+            assert "# TYPE llm_infer_itl_seconds histogram" in text
             assert "# TYPE llm_infer_preemptions_total counter" in text
 
             samples = _parse_metrics(text)
@@ -100,6 +101,7 @@ def test_metrics_reflect_real_traffic() -> None:
             # The TTFT/latency histograms observed all three requests.
             assert samples["llm_infer_queue_time_seconds_count"] == 3
             assert samples["llm_infer_ttft_seconds_count"] == 3
+            assert samples["llm_infer_itl_seconds_count"] == 12
             assert samples["llm_infer_request_latency_seconds_count"] == 3
 
     asyncio.run(go())
