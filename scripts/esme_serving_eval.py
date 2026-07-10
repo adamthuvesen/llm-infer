@@ -31,6 +31,7 @@ import torch
 from llm_infer.benchmarks.report import normalize_at_eos
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+from llm_infer.model.grouped_decode_graph import DEFAULT_GROUPED_CAPTURE_SIZES
 from llm_infer.model.interface import ModelRuntime
 from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, load_model_runtime
 from llm_infer.serve import BUNDLE_BACKENDS
@@ -283,6 +284,8 @@ class WorkloadConfig:
     preemption: bool = False
     prefill_chunk_size: int | None = None
     speculative: SpeculativeDecodingConfig | None = None
+    grouped_decode_graphs: bool = False
+    grouped_capture_sizes: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -506,12 +509,19 @@ def phase0_http_workloads(
     max_new_tokens: int = 128,
     block_size: int = 64,
     num_blocks: int = 1024,
+    grouped_decode_graphs: bool = False,
+    grouped_capture_sizes: tuple[int, ...] | None = None,
 ) -> tuple[HttpWorkload, HttpWorkload]:
     """Build paired greedy and seeded-sampling workloads with the same HTTP shape."""
     if request_count < 1:
         raise ValueError(f"request_count must be >= 1; got {request_count}")
     sampled = SamplingParams(temperature=0.8, top_p=0.95, top_k=32, seed=17)
-    config = WorkloadConfig(block_size=block_size, num_blocks=num_blocks)
+    config = WorkloadConfig(
+        block_size=block_size,
+        num_blocks=num_blocks,
+        grouped_decode_graphs=grouped_decode_graphs,
+        grouped_capture_sizes=grouped_capture_sizes,
+    )
 
     def requests(prefix: str, sampling: SamplingParams) -> tuple[HttpRequestSpec, ...]:
         return tuple(
@@ -948,6 +958,8 @@ def _build_engine(
         prefill_chunk_size=config.prefill_chunk_size,
         speculative=config.speculative,
         trace=trace,
+        grouped_decode_graphs=config.grouped_decode_graphs,
+        grouped_capture_sizes=config.grouped_capture_sizes or DEFAULT_GROUPED_CAPTURE_SIZES,
     )
 
 
@@ -1584,6 +1596,9 @@ def _public_metric_delta(before: dict[str, float], after: dict[str, float]) -> d
     return {
         "public_requests_admitted": admitted,
         "public_stream_tokens": _sample_delta(before, after, "llm_infer_stream_tokens_total"),
+        "public_grouped_decode_steps": _sample_delta(
+            before, after, "llm_infer_grouped_decode_steps_total"
+        ),
         "public_queue_time_count": queue_count,
         "public_queue_time_sum_s": queue_sum,
         "public_queue_time_avg_s": (
