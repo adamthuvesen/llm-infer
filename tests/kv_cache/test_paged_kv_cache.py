@@ -325,6 +325,8 @@ def test_read_many_plan_reuses_indices_across_layers() -> None:
     cache.write(b, layer=1, start_pos=0, key=layer1_b, value=layer1_bv)
 
     plan = cache.plan_read_many([a, b], lengths=[3, 5])
+    assert plan.idx is not None
+    assert plan.cu_seqlens is not None
     key0, value0 = cache.read_many_plan(layer=0, plan=plan)
     key1, value1 = cache.read_many_plan(layer=1, plan=plan)
 

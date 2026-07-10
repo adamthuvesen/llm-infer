@@ -143,6 +143,11 @@ class CompiledDecodeRunner:
     pinned RoPE rows, or a window that already started eager.
     """
 
+    # The opaque attention op deliberately keeps the packed gather path outside Dynamo.
+    # Native-page models therefore need both read plans while this runner is active: packed
+    # metadata for compiled steps and page metadata for an eager fallback from the same window.
+    requires_packed_read_plan = True
+
     def __init__(
         self,
         model: PretrainBundleModel,
@@ -337,13 +342,13 @@ class CompiledDecodeRunner:
             tables.append(table)
             first_tokens.append(torch.argmax(logits))
         tokens = torch.stack(first_tokens)
-        plan = model.open_decode_window(cache, tables, _WARMUP_STEPS)
-        if plan is None:
-            raise RuntimeError("warmup window unexpectedly not plan-safe")
-
         saved_runner = model.decode_graphs
-        model.decode_graphs = None  # the eager reference must not reroute into any runner
+        # Plan construction needs to know which read metadata the selected path consumes.
+        model.decode_graphs = self if use_runner else None
         try:
+            plan = model.open_decode_window(cache, tables, _WARMUP_STEPS)
+            if plan is None:
+                raise RuntimeError("warmup window unexpectedly not plan-safe")
             steps: list[torch.Tensor] = []
             for _ in range(_WARMUP_STEPS):
                 if use_runner:

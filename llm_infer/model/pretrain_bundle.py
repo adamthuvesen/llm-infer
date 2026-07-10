@@ -404,8 +404,12 @@ class PretrainBundleModel:
         # One RoPE cos/sin row per request, each at the request's own absolute position — from
         # the cached table, already in model dtype, so the per-layer apply_rope cast is a no-op.
         cos, sin = self._rope_rows(positions)
+        uses_native_pages = self._uses_paged_decode_backend()
         read_plan = cache.plan_read_many(
-            tables, new_lengths, include_pages=self._uses_paged_decode_backend()
+            tables,
+            new_lengths,
+            include_pages=uses_native_pages,
+            include_packed=not uses_native_pages,
         )
         self._prepare_paged_decode(read_plan)
         for layer in range(self.num_layers):
@@ -431,7 +435,17 @@ class PretrainBundleModel:
         Also grows the cached RoPE table to cover every position the window can reach, so
         :meth:`decode_window_step` never allocates or syncs for positions.
         """
-        plan = build_decode_window_plan(cache, tables, budget)
+        uses_native_pages = self._uses_paged_decode_backend()
+        runner_needs_packed = bool(
+            getattr(self.decode_graphs, "requires_packed_read_plan", False)
+        )
+        plan = build_decode_window_plan(
+            cache,
+            tables,
+            budget,
+            include_pages=uses_native_pages,
+            include_packed=not uses_native_pages or runner_needs_packed,
+        )
         if plan is not None:
             self._ensure_rope_rows(max(plan.base_lengths) + budget)
         return plan
@@ -506,8 +520,10 @@ class PretrainBundleModel:
             logits = self.decode_graphs.window_step(cache, plan, token_ids)
             if logits is not None:
                 return logits
+        uses_native_pages = self._uses_paged_decode_backend()
         write_slots, read_plan = plan.begin_step(
-            include_pages=self._uses_paged_decode_backend()
+            include_pages=uses_native_pages,
+            include_packed=not uses_native_pages,
         )
         self._prepare_paged_decode(read_plan)
         hidden = self.w["embed_tokens.weight"][token_ids.reshape(-1)].to(self.dtype)
@@ -603,6 +619,8 @@ class PretrainBundleModel:
 
         with self._profile("kv_read_gather"):
             k_hist, v_hist = cache.read_many_plan(layer, read_plan)
+        if read_plan.cu_seqlens is None:
+            raise ValueError("packed attention needs cumulative sequence lengths")
         k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
         return self.backend.forward_decode_batch_packed(
             queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len

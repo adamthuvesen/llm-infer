@@ -127,7 +127,9 @@ def _cache(model) -> PagedKVCache:
     )
 
 
-def test_decode_many_uses_page_plan_when_backend_supports_it(bundle: Path) -> None:
+def test_decode_many_uses_page_plan_when_backend_supports_it(
+    bundle: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     baseline = load_model_runtime("esme", bundle_path=bundle).model
     backend = PageTableReferenceAttention()
     paged = load_model_runtime("esme", bundle_path=bundle, attention_backend=backend).model
@@ -136,11 +138,24 @@ def test_decode_many_uses_page_plan_when_backend_supports_it(bundle: Path) -> No
     paged_cache = _cache(paged)
     baseline_tables, tokens = _prefill(baseline, baseline_cache)
     paged_tables, _ = _prefill(paged, paged_cache)
+    planned_reads = []
+    plan_read_many = paged_cache.plan_read_many
+
+    def track_read_plan(*args, **kwargs):
+        read_plan = plan_read_many(*args, **kwargs)
+        planned_reads.append(read_plan)
+        return read_plan
+
+    monkeypatch.setattr(paged_cache, "plan_read_many", track_read_plan)
 
     expected = baseline.decode_many(baseline_cache, baseline_tables, tokens)
     actual = paged.decode_many(paged_cache, paged_tables, tokens)
 
     torch.testing.assert_close(actual, expected)
+    assert len(planned_reads) == 1
+    assert planned_reads[0].idx is None
+    assert planned_reads[0].cu_seqlens is None
+    assert planned_reads[0].page_plan is not None
     assert backend.plan_calls == 1
     assert backend.paged_calls == paged.num_layers
     assert backend.packed_calls == 0
@@ -166,4 +181,41 @@ def test_planned_window_uses_page_plan_when_backend_supports_it(bundle: Path) ->
     torch.testing.assert_close(actual, expected)
     assert backend.plan_calls == 1
     assert backend.paged_calls == paged.num_layers
+    assert backend.packed_calls == 0
+
+
+def test_compiled_runner_keeps_packed_plan_for_native_backend(bundle: Path) -> None:
+    """The compile experiment uses packed attention and keeps native pages for fallback."""
+    backend = PageTableReferenceAttention()
+    model = load_model_runtime("esme", bundle_path=bundle, attention_backend=backend).model
+    runner = model.enable_decode_compile(capture_sizes=(2,), mode=None, compile_backend="eager")
+    backend.plan_calls = 0
+    backend.paged_calls = 0
+    backend.packed_calls = 0
+    cache = _cache(model)
+    tables, tokens = _prefill(model, cache)
+    plan = model.open_decode_window(cache, tables, budget=2)
+    assert plan is not None
+    assert plan.read_slots is not None
+    assert plan.page_indptr is not None
+
+    logits = model.decode_window_step(cache, plan, tokens)
+
+    assert logits.shape == (len(tables), model.config.vocab_size)
+    assert backend.packed_calls == model.num_layers
+
+    runner.capture_sizes = (1,)
+    fallback_cache = _cache(model)
+    fallback_tables, fallback_tokens = _prefill(model, fallback_cache)
+    fallback_plan = model.open_decode_window(fallback_cache, fallback_tables, budget=1)
+    assert fallback_plan is not None
+    assert fallback_plan.read_slots is not None
+    assert fallback_plan.page_indptr is not None
+    backend.plan_calls = 0
+    backend.paged_calls = 0
+    backend.packed_calls = 0
+
+    model.decode_window_step(fallback_cache, fallback_plan, fallback_tokens)
+
+    assert backend.paged_calls == model.num_layers
     assert backend.packed_calls == 0
