@@ -46,10 +46,15 @@ def test_tight_kv_workload_reports_reference_gated_preemption(tmp_path: Path) ->
     metrics = result["metrics"]
     assert result["surface"] == "engine"
     assert result["reference"]["status"] == "pass"
+    assert result["policy_version"] == 2
+    assert result["reference_status"] == "exact"
+    assert result["parity_status"] == "not_applicable"
+    assert result["headline_eligible"] is True
     assert metrics["requests_completed"] == 3
     assert metrics["requests_failed"] == 0
     assert metrics["preemption_count"] > 0
     assert metrics["throughput_tokens_per_s"] is not None
+    assert metrics["raw_throughput_tokens_per_s"] is not None
     assert metrics["throughput_status"] == "reported"
     assert metrics["queue_time_p50_s"] is not None
 
@@ -170,6 +175,8 @@ def test_failed_submission_suppresses_throughput(tmp_path: Path) -> None:
     assert metrics["observed_requests"] == 1
     assert metrics["unobserved_requests"] == 1
     assert metrics["throughput_tokens_per_s"] is None
+    assert metrics["raw_throughput_tokens_per_s"] is not None
+    assert result["headline_eligible"] is False
     assert metrics["throughput_status"] == "not_reported_requests_failed"
 
 

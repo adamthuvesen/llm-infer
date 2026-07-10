@@ -204,20 +204,19 @@ def stability_summary(
 
 def agreement_dict(agreement) -> dict[str, object]:  # noqa: ANN001 - EsmeAgreement is remote-only
     """Flatten an ``EsmeAgreement`` into the JSON status/counts a row records."""
+    from llm_infer.benchmarks.reference_policy import reference_status
+
     return {
-        "status": (
-            "exact"
-            if agreement.exact == agreement.total
-            else "tie_tolerant"
-            if agreement.all_ties_or_exact
-            else "diverged"
-        ),
+        "status": reference_status(agreement),
         "exact": agreement.exact,
         "tie": agreement.tie,
         "nontie": agreement.nontie,
         "total": agreement.total,
         "ties_sample": agreement.ties_sample,
         "divergences_sample": agreement.divergences_sample,
+        "review_required": agreement.review_required,
+        "failed": agreement.failed,
+        "numerical_evidence": agreement.numerical_evidence,
     }
 
 
@@ -641,7 +640,9 @@ def benchmark_prefill_ab(
                     )
                     for mode in modes
                 }
+                direct_parity = outputs_by_mode["candidate"] == outputs_by_mode["baseline"]
                 row = {
+                    "policy_version": 2,
                     "batch_size": batch_size,
                     "shape": shape,
                     "context_length": context_length,
@@ -650,11 +651,13 @@ def benchmark_prefill_ab(
                     "pair_orders": pair_orders,
                     "raw_iterations": raw,
                     "medians": medians,
-                    "candidate_relative_delta": relative_deltas,
-                    "candidate_speedup": speedups,
-                    "candidate_matches_baseline_exact": (
-                        outputs_by_mode["candidate"] == outputs_by_mode["baseline"]
-                    ),
+                    "raw_candidate_relative_delta": relative_deltas,
+                    "raw_candidate_speedup": speedups,
+                    "candidate_relative_delta": relative_deltas if direct_parity else None,
+                    "candidate_speedup": speedups if direct_parity else None,
+                    "candidate_matches_baseline_exact": direct_parity,
+                    "parity_status": "exact" if direct_parity else "review_required",
+                    "relative_claim_eligible": direct_parity,
                     "agreement": agreement,
                     "first_tokens": first_tokens_by_mode,
                     "outputs": outputs_by_mode,
@@ -667,7 +670,8 @@ def benchmark_prefill_ab(
                     f"prefill {speedups['prefill_device_seconds']:.2f}x, "
                     f"TTFT {speedups['ttft_wall_seconds']:.2f}x, "
                     f"E2E {speedups['end_to_end_wall_seconds']:.2f}x, "
-                    f"candidate={agreement['candidate']['status']}"
+                    f"candidate={agreement['candidate']['status']}, "
+                    f"relative={'eligible' if direct_parity else 'withheld; raw timing only'}"
                 )
                 yield {"kind": "row", **row}
 
@@ -1027,7 +1031,14 @@ def benchmark_mixed_load(
             )
             for mode in modes
         }
+        direct_parity = outputs_by_mode["candidate"] == outputs_by_mode["baseline"]
+        public_aggregate = aggregate if direct_parity else {
+            "baseline": aggregate["baseline"],
+            "candidate": aggregate["candidate"],
+            "candidate_vs_baseline": None,
+        }
         row = {
+            "policy_version": 2,
             "burst_size": burst_size,
             "burst_shape": burst_shape,
             "burst_context": burst_context,
@@ -1041,10 +1052,14 @@ def benchmark_mixed_load(
             "burst_prompt_tokens_total": sum(len(request.prompt_ids) for request in burst),
             "pair_orders": pair_orders,
             "raw_iterations": raw_by_mode,
-            "aggregate": aggregate,
+            "raw_aggregate": aggregate,
+            "aggregate": public_aggregate,
             "agreement": agreement,
             "reference_outputs": reference,
             "outputs": outputs_by_mode,
+            "candidate_matches_baseline_exact": direct_parity,
+            "parity_status": "exact" if direct_parity else "review_required",
+            "relative_claim_eligible": direct_parity,
         }
         comparison = aggregate["candidate_vs_baseline"]
         print(
@@ -1052,7 +1067,8 @@ def benchmark_mixed_load(
             f"tokens={row['burst_prompt_tokens_total']}: "
             f"spanning-ITL {comparison['spanning_itl_ratio']:.2f}x, "
             f"burst-TTFT {comparison['burst_ttft_p50_ratio']:.2f}x, "
-            f"candidate={agreement['candidate']['status']}"
+            f"candidate={agreement['candidate']['status']}, "
+            f"relative={'eligible' if direct_parity else 'withheld; raw timing only'}"
         )
         yield {"kind": "row", **row}
 

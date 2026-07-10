@@ -15,11 +15,14 @@ import pytest
 import torch
 
 from llm_infer.benchmarks.esme_gallery import (
+    GalleryTiming,
+    _relative_speedup,
     run_chunked_prefill_latency,
     run_preemption_starved_pool,
     run_prefix_cache_on_off,
     run_speculative_batch1,
 )
+from llm_infer.benchmarks.esme_three_way import EsmeAgreement
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
@@ -50,7 +53,7 @@ def test_prefix_cache_on_off_gates_and_reports_both_rows(tiny_runtime) -> None:
         iters=1,
     )
     assert [row["label"] for row in result["rows"]] == ["prefix caching on", "prefix caching off"]
-    assert all(row["matches_reference"] for row in result["rows"])
+    assert all(row["reference_status"] in {"exact", "accepted_numerical"} for row in result["rows"])
     assert all(row["tokens_per_second"] is not None for row in result["rows"])
     assert result["workload"]["prefilled_prompt_tokens_on"] == 6
     assert result["workload"]["prefilled_prompt_tokens_off"] == 18
@@ -72,7 +75,7 @@ def test_chunked_prefill_latency_reports_stall_for_both_configs(tiny_runtime) ->
     )
     assert [row["label"] for row in result["rows"]] == ["whole-prompt prefill", "chunked prefill"]
     for row in result["rows"]:
-        assert row["matches_reference"], row["agreement"]
+        assert row["reference_status"] in {"exact", "accepted_numerical"}, row["agreement"]
         assert row["post_arrival_max_gap_s"] > 0
         assert row["stall_vs_pre_arrival_step"] > 0
     whole, chunked = result["rows"]
@@ -94,9 +97,9 @@ def test_preemption_starved_pool_requires_real_preemptions(tiny_runtime) -> None
     on, reserve = result["rows"]
     assert on["label"] == "preemption on"
     assert on["preemptions"] > 0
-    assert on["matches_reference"], on["agreement"]
+    assert on["reference_status"] in {"exact", "accepted_numerical"}, on["agreement"]
     assert reserve["preemptions"] == 0
-    assert reserve["matches_reference"], reserve["agreement"]
+    assert reserve["reference_status"] in {"exact", "accepted_numerical"}, reserve["agreement"]
 
 
 def test_preemption_starved_pool_rejects_a_preemption_free_run(tiny_runtime) -> None:
@@ -127,7 +130,21 @@ def test_speculative_batch1_reports_acceptance_profile(tiny_runtime) -> None:
     )
     on, off = result["rows"]
     assert on["label"] == "speculative on"
-    assert on["matches_reference"], on["agreement"]
-    assert off["matches_reference"], off["agreement"]
+    assert on["reference_status"] in {"exact", "accepted_numerical"}, on["agreement"]
+    assert off["reference_status"] in {"exact", "accepted_numerical"}, off["agreement"]
     assert result["verify_steps"] >= 1
     assert result["mean_tokens_per_verify_step"] is not None
+
+
+def test_gallery_speedup_keeps_raw_ratio_but_gates_failed_reference() -> None:
+    exact = EsmeAgreement(1, 0, 0, 1, [], [])
+    failed = EsmeAgreement(0, 0, 1, 1, [], [], failed=1)
+
+    eligible, raw, public = _relative_speedup(
+        GalleryTiming("on", 1.0, 10, exact),
+        GalleryTiming("off", 2.0, 10, failed),
+    )
+
+    assert eligible is False
+    assert raw == 2.0
+    assert public is None

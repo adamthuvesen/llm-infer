@@ -12,10 +12,8 @@ writes the HF checkpoint back to the volume. Then it runs:
   attention backend. Today that is FlashInfer paged decode.
 * ``vllm`` — vLLM offline generate on the converted checkpoint (the ceiling).
 
-Agreement uses the audited tie-tolerant rule against the fp32 oracle
-(``compare_under_tie_tolerance``, tolerance 0.1): a bf16 system whose only divergences are
-genuine numerical ties counts as agreement and reports tok/s; a non-tie divergence reports no tok/s
-(match before measuring speed), with the exact/tie/non-tie profile printed per system. vLLM runs in
+Agreement uses reference policy v2 against the fp32 oracle. Raw timing is retained; public tok/s
+requires an exact or accepted numerical status, with the profile printed per system. vLLM runs in
 its own image (it ships its own torch/CUDA); the HF + llm_infer leg runs
 in the shared flash CUDA image. Both functions are A100-80GB.
 
@@ -168,6 +166,7 @@ def bench_hf_and_engine(
         reference_outputs,
     )
     from llm_infer.benchmarks.esme_three_way import run_three_way, tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
     from llm_infer.model.decode_graph import DEFAULT_CAPTURE_SIZES, enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
@@ -237,7 +236,6 @@ def bench_hf_and_engine(
         return {
             "system": t.system,
             "mode": t.mode,
-            "matches_reference": t.matches_reference,
             "agreement": {
                 "exact": agreement.exact,
                 "tie": agreement.tie,
@@ -245,10 +243,17 @@ def bench_hf_and_engine(
                 "total": agreement.total,
                 "ties_sample": agreement.ties_sample,
                 "divergences_sample": agreement.divergences_sample,
+                "review_required": agreement.review_required,
+                "failed": agreement.failed,
+                "numerical_evidence": agreement.numerical_evidence,
             },
             "median_seconds": t.median_seconds,
             "total_output_tokens": t.total_output_tokens,
-            "tokens_per_second": t.tokens_per_second,
+            **build_system_evidence_record(
+                agreement=agreement,
+                median_seconds=t.median_seconds,
+                total_tokens=t.total_output_tokens,
+            ),
         }
 
     return json.dumps(
@@ -359,11 +364,17 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
         if row["system"] == "vllm":
             row["median_seconds"] = vllm_res["median_seconds"]
             tokens = main_res["vllm_total_output_tokens"]
-            row["tokens_per_second"] = (
+            raw_tps = (
                 tokens / vllm_res["median_seconds"]
-                if row["matches_reference"] and vllm_res["median_seconds"] > 0
+                if vllm_res["median_seconds"] > 0
                 else None
             )
+            # Literal set: the local modal-run client has no torch, so it cannot import
+            # llm_infer.benchmarks.reference_policy here.
+            qualified = row["reference_status"] in {"exact", "accepted_numerical"}
+            row["raw_tokens_per_second"] = raw_tps
+            row["headline_eligible"] = qualified and raw_tps is not None and raw_tps > 0
+            row["tokens_per_second"] = raw_tps if row["headline_eligible"] else None
 
     _print_table(rows)
 

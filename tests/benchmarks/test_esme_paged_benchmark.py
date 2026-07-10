@@ -174,3 +174,4 @@ def test_diverging_system_reports_no_throughput() -> None:
         outputs={},
     )
     assert diverged.tokens_per_second is None
+    assert diverged.raw_tokens_per_second == 10.0

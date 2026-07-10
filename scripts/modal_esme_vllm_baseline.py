@@ -32,9 +32,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import modal
+
+if TYPE_CHECKING:
+    from llm_infer.benchmarks.esme_three_way import EsmeAgreement
 
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
@@ -551,7 +554,7 @@ def gate_outputs(
     outputs: dict[str, list[int]],
     oracle_case: OracleCase,
     eos_token_ids: frozenset[int] = frozenset({2}),
-) -> dict[str, object]:
+) -> EsmeAgreement:
     """Apply the existing first-divergence tie rule from serialized fp32 oracle steps.
 
     The oracle child records every token whose fp32 logit is within 0.1 of that step's maximum.
@@ -559,21 +562,21 @@ def gate_outputs(
     recorded set is exactly the same check as recomputing the step in
     ``compare_under_tie_tolerance``. The parent can therefore gate without owning a CUDA context.
     """
+    from llm_infer.benchmarks.esme_three_way import EsmeAgreement
     from llm_infer.benchmarks.report import normalize_at_eos
 
     expected_ids = {request["request_id"] for request in requests}
     output_ids = set(outputs)
-    missing = sorted(expected_ids - output_ids)
     extra = sorted(output_ids - expected_ids)
+    if extra:
+        raise ValueError(f"worker returned outputs for requests never sent: {extra[:3]}")
     exact = 0
     ties: list[dict[str, object]] = []
-    divergences: list[dict[str, object]] = []
-    if missing:
-        divergences.append({"request": missing[0], "detail": f"missing outputs for {missing[:3]}"})
-    if extra:
-        divergences.append(
-            {"request": extra[0], "detail": f"unexpected outputs for {extra[:3]}"}
-        )
+    reviews: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = [
+        {"request": request_id, "detail": "missing outputs"}
+        for request_id in sorted(expected_ids - output_ids)
+    ]
 
     golden = normalize_at_eos(oracle_case["output_tokens"], eos_token_ids)
     for request in requests:
@@ -593,7 +596,7 @@ def gate_outputs(
             if len(fast) == len(golden):
                 exact += 1
             else:
-                divergences.append(
+                failures.append(
                     {
                         "request": request_id,
                         "detail": (
@@ -620,9 +623,14 @@ def gate_outputs(
             )
         else:
             tolerance = oracle_case["tie_tolerance"]
-            divergences.append(
+            reviews.append(
                 {
                     "request": request_id,
+                    "step": step,
+                    "fast_token": fast_token,
+                    "golden_token": golden_token,
+                    "automatic_boundary": tolerance,
+                    "reference_gap": oracle_step["top2_gap"],
                     "detail": (
                         f"step {step}: token {fast_token} is not within {tolerance:g} "
                         "of the fp32 max; "
@@ -631,41 +639,46 @@ def gate_outputs(
                 }
             )
 
-    return {
-        "exact": exact,
-        "tie": len(ties),
-        "nontie": len(divergences),
-        "total": len(requests),
-        "ties_sample": ties[:3],
-        "divergences_sample": divergences[:3],
-    }
+    return EsmeAgreement(
+        exact=exact,
+        tie=len(ties),
+        nontie=len(reviews) + len(failures),
+        total=len(requests),
+        ties_sample=ties[:3],
+        divergences_sample=[*reviews, *failures][:3],
+        review_required=len(reviews),
+        failed=len(failures),
+        numerical_evidence=[*ties, *reviews],
+    )
 
 
 def finalize_row(
     worker_row: WorkerRow,
     *,
     system: str,
-    agreement: dict[str, object],
+    agreement: EsmeAgreement,
     total_output_tokens: int,
 ) -> dict[str, object]:
     """Attach gate and steady-state statistics; suppress speed for a failed gate."""
+    import dataclasses
+
+    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
+
     timings = worker_row["per_iter_seconds"]
     median_seconds = statistics.median(timings)
-    matches_reference = agreement["nontie"] == 0
     return {
         "system": system,
         "batch_size": worker_row["batch_size"],
         "context_tokens": worker_row["context_tokens"],
-        "matches_reference": matches_reference,
-        "agreement": agreement,
+        "agreement": dataclasses.asdict(agreement),
         "per_iter_seconds": timings,
         "median_seconds": median_seconds,
         "p95_seconds": percentile(timings, 95),
         "total_output_tokens": total_output_tokens,
-        "tokens_per_second": (
-            total_output_tokens / median_seconds
-            if matches_reference and median_seconds > 0
-            else None
+        **build_system_evidence_record(
+            agreement=agreement,
+            median_seconds=median_seconds,
+            total_tokens=total_output_tokens,
         ),
     }
 

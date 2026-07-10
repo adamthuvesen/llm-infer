@@ -56,6 +56,13 @@ class SystemTiming:
             return None
         return self.total_output_tokens / self.median_seconds
 
+    @property
+    def raw_tokens_per_second(self) -> float | None:
+        """Measured tok/s regardless of whether the row is fit for a public claim."""
+        if self.median_seconds <= 0:
+            return None
+        return self.total_output_tokens / self.median_seconds
+
 
 DEFAULT_PROMPTS = (
     "Write a tiny Python function that doubles an integer.",
@@ -214,8 +221,8 @@ def compare_paged_vs_recompute(
 ) -> list[SystemTiming]:
     """Time the paged engine and the full-recompute baseline, each gated on the reference.
 
-    Both systems are checked against ``reference_outputs`` before timing is reported; a diverging
-    system keeps its wall-clock and token count but reports no tok/s. Returns one
+    Both systems are checked against ``reference_outputs``. A diverging system keeps raw measured
+    facts while the legacy public tok/s property stays gated. Returns one
     :class:`SystemTiming` per system (paged first, then full recompute).
     """
     eos = runtime.eos_token_ids

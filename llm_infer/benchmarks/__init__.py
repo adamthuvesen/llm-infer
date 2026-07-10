@@ -8,11 +8,9 @@ methodology.
 from __future__ import annotations
 
 from llm_infer.benchmarks.report import (
-    assemble_markdown,
     gpu_snapshot,
     library_versions,
     normalize_at_eos,
-    throughput_rows,
     total_output_tokens,
 )
 from llm_infer.benchmarks.workload import (
@@ -25,8 +23,6 @@ __all__ = [
     "Workload",
     "normalize_at_eos",
     "total_output_tokens",
-    "throughput_rows",
     "gpu_snapshot",
     "library_versions",
-    "assemble_markdown",
 ]
