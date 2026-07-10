@@ -945,11 +945,17 @@ def flashinfer_graph_probe() -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=3 * 60 * 60,
 )
-def grouped_layer_ab(grouped_layers: int, correctness_only: bool = False) -> str:
+def grouped_layer_ab(
+    grouped_layers: int,
+    correctness_only: bool = False,
+    batch_sizes: list[int] | None = None,
+) -> str:
     """A/B of piecewise decode versus one cache-owned grouped graph.
 
     ``correctness_only`` runs one batch-8 pair and records outputs without publishing a fresh
     timing result. It exists to close a parity question in an older performance record.
+    ``batch_sizes`` defaults to the exact low-batch protocol (1 and 8); pass larger sizes for
+    the high-batch regression check that gates any serving adoption of the grouped runner.
     """
     import statistics
 
@@ -976,7 +982,8 @@ def grouped_layer_ab(grouped_layers: int, correctness_only: bool = False) -> str
     if grouped_layers not in (2, 4):
         raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
     esme_bundles.reload()
-    batch_sizes = [8] if correctness_only else [1, 8]
+    if batch_sizes is None:
+        batch_sizes = [8] if correctness_only else [1, 8]
     context_length = 256
     max_new_tokens = 128
     warmup_pairs = 0 if correctness_only else 2
@@ -1540,11 +1547,11 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         print("[esme-decode] FlashInfer fixed-buffer graph probe: exact batches 1,8")
         record = json.loads(flashinfer_graph_probe.remote())
     elif command == "two-layer-group-ab":
-        print("[esme-decode] cache-owned two-layer graph A/B: exact batches 1,8")
-        record = json.loads(grouped_layer_ab.remote(2))
+        print(f"[esme-decode] cache-owned two-layer graph A/B: exact batches {sizes}")
+        record = json.loads(grouped_layer_ab.remote(2, False, sizes))
     elif command == "four-layer-group-ab":
-        print("[esme-decode] cache-owned four-layer graph A/B: exact batches 1,8")
-        record = json.loads(grouped_layer_ab.remote(4, False))
+        print(f"[esme-decode] cache-owned four-layer graph A/B: exact batches {sizes}")
+        record = json.loads(grouped_layer_ab.remote(4, False, sizes))
     elif command == "four-layer-parity":
         print("[esme-decode] cache-owned four-layer graph: batch-8 correctness only")
         record = json.loads(grouped_layer_ab.remote(4, True))
@@ -1571,13 +1578,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             [8]
             if command == "four-layer-parity"
             else [1, 8]
-            if command
-            in (
-                "flashinfer-graph-probe",
-                "two-layer-group-ab",
-                "four-layer-group-ab",
-                "four-layer-parity",
-            )
+            if command == "flashinfer-graph-probe"
             else sizes
         ),
         "max_new_tokens": (
