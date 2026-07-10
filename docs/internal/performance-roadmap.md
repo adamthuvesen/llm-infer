@@ -37,7 +37,7 @@ behavior shared with the baseline.
 | Gate | Clarify numerical contracts | Separate deterministic greedy from stochastic sampling | Complete |
 | 2 | Batch prefill | Better TTFT and prompt throughput under burst admission | Complete; enabled by default |
 | 1 | Stabilize direct-page metadata | Remove duplicate work and support a bounded graph experiment | Complete; kept by A100 A/B |
-| 3 | Test attention-inclusive graph groups | Four-layer probe cuts decode wall about 22–23% | Candidate proven; serving validation next |
+| 3 | Test attention-inclusive graph groups | Four-layer group wins at every exact batch, 1–256 | Regression check passed; serving lifecycle next |
 | 4 | Fuse measured hot operations | Fewer kernels and larger GEMMs | Pending |
 | 5 | Optimize sampled and HTTP serving | Keep engine speed through the public API | Pending |
 
@@ -411,6 +411,7 @@ overhead. Planning stays outside capture.
   memory for the experiment.
 - [x] Expand the group size only when the smaller group improves the target row or clearly removes
   enough host work to justify another measurement.
+- [x] Check exact batches 64 and 256 for a high-batch regression before any serving work.
 - [ ] Measure padded batches 9, 17, 33, 65, 96, and 129 only after an exact-size group works. This
   separates graph-boundary savings from padding cost.
 - [ ] Compare the useful bucket set with the server default, which stops at 16 and falls back to
@@ -448,17 +449,34 @@ chooses 1616 with a 0.13044-logit margin. That row remains ineligible for an abs
 but direct parity qualifies the existing same-run 22.0% wall reduction / 28.1% throughput ratio as
 an optimization result. No timing matrix was repeated.
 
+The high-batch regression check ran 2026-07-10 on A100-SXM4-80GB with the same protocol (context
+256, 128 fixed output tokens, two warmup and ten measured alternating pairs). The four-layer group
+does not regress at high batch — it wins there too:
+
+| Group | Batch | Piecewise median / p95 | Grouped median / p95 | Median change | Tok/s change |
+| --- | ---: | --- | --- | ---: | ---: |
+| 4 layers | 64 | 1.145 s / 1.149 s | 1.099 s / 1.296 s | -4.0% | +4.2% |
+| 4 layers | 256 | 2.668 s / 2.962 s | 2.186 s / 2.222 s | -18.0% | +22.0% |
+
+Both batches have zero non-tie divergences (48/16 and 192/64 exact/tie), exact candidate/baseline
+parity, and headline-eligible rows in the record. Group capture added 1–2 s over the piecewise
+capture and the runner owns the same ~136 MiB per exact batch as at low batch. The batch-64
+candidate p95 (1.296 s) reflects one slow iteration; its median beat the baseline on the same
+pairs.
+
 Raw local evidence (gitignored):
 
 - `bench-results/esme-decode-flashinfer-graph-probe-20260710T143410.json`
 - `bench-results/esme-decode-two-layer-group-ab-20260710T150034.json`
 - `bench-results/esme-decode-four-layer-group-ab-20260710T150753.json`
 - `bench-results/esme-decode-four-layer-parity-20260710T154124.json` (correctness only)
+- `bench-results/esme-decode-four-layer-group-ab-20260710T163919.json` (batches 64 and 256)
 
-Decision: keep the grouped runner as benchmark-only candidate code. Do not enable it by default
-until cache ownership, EOS/abort/window lifecycle, useful bucket count, and batch 64/256 regression
-checks pass. Do not expand beyond four layers before those serving questions are answered; the
-four-layer result already clears the target and larger groups would increase capture coupling.
+Decision: the batch 64/256 regression bar is passed with improvement at every measured exact
+batch, so the grouped runner is now a serving candidate on its numbers. It stays benchmark-only
+until cache ownership, EOS/abort/window lifecycle, and the useful bucket count (~136 MiB per
+exact-batch bucket) are settled. Do not expand beyond four layers before those serving questions
+are answered; larger groups would increase capture coupling.
 
 ### Correctness checks
 
@@ -479,10 +497,10 @@ four-layer result already clears the target and larger groups would increase cap
 ### Done when
 
 The experiment answers whether short attention-inclusive graph groups help this engine. The
-benchmark-only four-layer candidate clears the low-batch bar: graph launches fall from 31 to 27
-per generated token and batch 1 improves by more than 10%. Keep it as a default only after batch 64
-and 256 regress by no more than 3% and the serving lifecycle checks above pass. Record a negative
-result and remove the candidate if those remaining checks miss the bar.
+benchmark-only four-layer candidate clears both measurement bars: graph launches fall from 31 to
+27 per generated token, batch 1 improves by more than 10%, and batches 64 and 256 improve rather
+than regress. Keep it as a default only after the serving lifecycle checks above pass. Record a
+negative result and remove the candidate if those remaining checks miss the bar.
 
 ## Phase 4: Fuse Measured Hot Operations
 
