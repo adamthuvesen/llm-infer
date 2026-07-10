@@ -62,6 +62,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         mode: str,
         capture_plan: DecodeWindowPlan | None = None,
         max_position: int = 8192,
+        workspace: torch.Tensor | None = None,
     ) -> None:
         if mode not in ("eager", "graph"):
             raise ValueError(f"mode must be 'eager' or 'graph'; got {mode!r}")
@@ -103,6 +104,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self.capture_memory_bytes = 0
         self.owned_group_memory_bytes = 0
         self.total_capture_seconds = 0.0
+        self._shared_workspace = workspace
         if mode == "graph":
             assert capture_plan is not None
             self._capture_group(capture_plan)
@@ -213,8 +215,13 @@ class EngineOwnedGroupedDecodeGraphRunner:
             indices=torch.empty(self.cache.num_blocks, dtype=torch.int32, device=self.model.device),
             last_page_len=torch.empty(self.batch_size, dtype=torch.int32, device=self.model.device),
         )
-        # FlashInfer requires a zeroed workspace before the wrapper's first use.
-        workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=self.model.device)
+        # FlashInfer requires a zeroed workspace before a wrapper's first use. A caller may
+        # pass one shared workspace for several runners: window steps never interleave, and
+        # every step re-plans its wrapper before running, so sequential runners can reuse
+        # the same scratch memory (the bucket-policy record checks this stays exact).
+        workspace = self._shared_workspace
+        if workspace is None:
+            workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=self.model.device)
         wrapper_class = backend._decode_wrapper_class(backend._flashinfer)
         self._graph_wrapper = build_graph_wrapper(wrapper_class, workspace, fixed_metadata)
         self._graph_workspace = workspace
@@ -244,16 +251,16 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._group_graph = graph
         self.capture_seconds = time.perf_counter() - start
         self.capture_memory_bytes = torch.cuda.memory_allocated() - allocated_before
-        fixed_buffer_bytes = sum(
-            tensor.numel() * tensor.element_size()
-            for tensor in (
-                workspace,
-                fixed_metadata.indptr,
-                fixed_metadata.indices,
-                fixed_metadata.last_page_len,
-                self._static_write_slots,
-            )
-        )
+        # A shared workspace belongs to the caller and is counted once by it, not per runner.
+        owned_tensors = [
+            fixed_metadata.indptr,
+            fixed_metadata.indices,
+            fixed_metadata.last_page_len,
+            self._static_write_slots,
+        ]
+        if self._shared_workspace is None:
+            owned_tensors.append(workspace)
+        fixed_buffer_bytes = sum(tensor.numel() * tensor.element_size() for tensor in owned_tensors)
         self.owned_group_memory_bytes = fixed_buffer_bytes + self.capture_memory_bytes
         # Capture writes the upcoming slots with warmup values. Every real layer overwrites
         # its own slot before attending to it, so no captured value reaches generation.
@@ -279,6 +286,7 @@ def build_engine_grouped_runners(
     *,
     grouped_layers: int,
     max_position: int = 8192,
+    shared_workspace: bool = False,
 ) -> dict[int, EngineOwnedGroupedDecodeGraphRunner]:
     """Capture one grouped runner per exact batch size against ``cache``, at construction.
 
@@ -292,6 +300,11 @@ def build_engine_grouped_runners(
     if not sizes or sizes[0] < 1:
         raise ValueError(f"capture_sizes must be positive; got {capture_sizes!r}")
     mode = "graph" if model.device.type == "cuda" else "eager"
+    workspace: torch.Tensor | None = None
+    if shared_workspace and mode == "graph":
+        # One 128 MiB FlashInfer workspace backs every bucket's wrapper instead of one
+        # each — safe because window steps never interleave across runners.
+        workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=model.device)
     runners: dict[int, EngineOwnedGroupedDecodeGraphRunner] = {}
     for size in sizes:
         capture_plan = None
@@ -314,6 +327,7 @@ def build_engine_grouped_runners(
                 mode=mode,
                 capture_plan=capture_plan,
                 max_position=max_position,
+                workspace=workspace,
             )
             runner.total_capture_seconds = time.perf_counter() - start
         finally:

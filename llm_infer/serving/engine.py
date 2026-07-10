@@ -73,6 +73,7 @@ class InferenceEngine(
         grouped_decode_graphs: bool = False,
         grouped_capture_sizes: tuple[int, ...] = DEFAULT_GROUPED_CAPTURE_SIZES,
         grouped_layers: int | None = None,
+        grouped_shared_workspace: bool = False,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
@@ -159,6 +160,7 @@ class InferenceEngine(
                 self.cache,
                 grouped_capture_sizes,
                 grouped_layers=grouped_layers,
+                shared_workspace=grouped_shared_workspace,
             )
 
     @property
