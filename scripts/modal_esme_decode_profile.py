@@ -12,7 +12,7 @@ bf16 CUDA Esme attention path, greedy, prefix caching off:
 * ``--command bench`` — the measured number. Per batch size it times the engine like the
   pinned three-way benchmark (fresh engine per iteration, warmup + measured iterations,
   median wall) and gates every row on the fp32 ``PretrainBundleModel.logits()`` oracle with
-  the audited tie-tolerant rule. A row that diverges beyond genuine ties reports no tok/s.
+  reference policy v2. Raw timing is kept; public tok/s remains gated.
 
     modal run scripts/modal_esme_decode_profile.py --command profile
     modal run scripts/modal_esme_decode_profile.py --command bench
@@ -28,6 +28,7 @@ custom op, ``mode='reduce-overhead'``), plus a recompile audit over the compiled
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import time
@@ -387,6 +388,7 @@ def _bench_batch(
     import torch
 
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
     from llm_infer.benchmarks.report import total_output_tokens
 
     def decode_once() -> dict[str, list[int]]:
@@ -414,7 +416,6 @@ def _bench_batch(
     tokens = total_output_tokens(outputs, oracle_runtime.eos_token_ids)
     return {
         "batch_size": num_requests,
-        "matches_reference": agreement.all_ties_or_exact,
         "agreement": {
             "exact": agreement.exact,
             "tie": agreement.tie,
@@ -426,7 +427,11 @@ def _bench_batch(
         "median_seconds": median_s,
         "per_iter_seconds": per_iter,
         "total_output_tokens": tokens,
-        "tokens_per_second": tokens / median_s if agreement.all_ties_or_exact else None,
+        **build_system_evidence_record(
+            agreement=agreement,
+            median_seconds=median_s,
+            total_tokens=tokens,
+        ),
     }
 
 
@@ -677,6 +682,661 @@ def sync_report(batch_sizes: list[int]) -> str:
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
+    timeout=30 * 60,
+)
+def flashinfer_graph_probe() -> str:
+    """Capture only FlashInfer ``run`` and re-plan fixed buffers across page boundaries."""
+    import flashinfer
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.flashinfer_graph_probe import (
+        FlashInferProbeShape,
+        build_graph_wrapper,
+        page_metadata_for_lengths,
+        plan_wrapper,
+        run_wrapper_into,
+    )
+    from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
+
+    expected_version = "0.6.14"
+    actual_version = getattr(flashinfer, "__version__", "unknown")
+    if actual_version != expected_version:
+        raise RuntimeError(
+            f"FlashInfer graph probe requires {expected_version}; got {actual_version}"
+        )
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    wrapper_class = FlashInferPagedAttention._decode_wrapper_class(flashinfer)
+    shape = FlashInferProbeShape(
+        num_qo_heads=8,
+        num_kv_heads=2,
+        head_dim=64,
+        page_size=64,
+        dtype=torch.bfloat16,
+    )
+    lengths_to_probe = [63, 64, 65, 127, 128, 129]
+    results: list[dict[str, object]] = []
+
+    for batch_size in (1, 8):
+        max_length = max(lengths_to_probe)
+        fixed_metadata = page_metadata_for_lengths(
+            [max_length] * batch_size,
+            page_size=shape.page_size,
+            device="cuda",
+        )
+        # FlashInfer requires the workspace to be zero-initialized before its first use.
+        workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+        graph_wrapper = build_graph_wrapper(wrapper_class, workspace, fixed_metadata)
+        torch.manual_seed(1234 + batch_size)
+        query = torch.randn(
+            batch_size,
+            shape.num_qo_heads,
+            shape.head_dim,
+            dtype=shape.dtype,
+            device="cuda",
+        )
+        paged_kv = torch.randn(
+            int(fixed_metadata.indices.numel()),
+            2,
+            shape.page_size,
+            shape.num_kv_heads,
+            shape.head_dim,
+            dtype=shape.dtype,
+            device="cuda",
+        )
+        graph_output = torch.empty_like(query)
+        fixed_pointers = {
+            "workspace": workspace.data_ptr(),
+            "fixed_indptr": fixed_metadata.indptr.data_ptr(),
+            "fixed_indices": fixed_metadata.indices.data_ptr(),
+            "fixed_last_page_len": fixed_metadata.last_page_len.data_ptr(),
+            "query": query.data_ptr(),
+            "output": graph_output.data_ptr(),
+            "paged_kv": paged_kv.data_ptr(),
+        }
+        initial_metadata = page_metadata_for_lengths(
+            [lengths_to_probe[0]] * batch_size,
+            page_size=shape.page_size,
+            device="cuda",
+        )
+        plan_wrapper(graph_wrapper, initial_metadata, shape)
+        for _ in range(3):
+            run_wrapper_into(graph_wrapper, query, paged_kv, graph_output)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_wrapper_into(graph_wrapper, query, paged_kv, graph_output)
+        torch.cuda.synchronize()
+        memory_after_capture = {
+            "allocated": torch.cuda.memory_allocated(),
+            "reserved": torch.cuda.memory_reserved(),
+        }
+
+        reference_workspace = torch.zeros(
+            128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+        )
+        ordinary_wrapper = wrapper_class(
+            reference_workspace,
+            "NHD",
+            use_tensor_cores=False,
+            backend="auto",
+        )
+        plan_wrapper(ordinary_wrapper, initial_metadata, shape)
+        reference_warmup_output = torch.empty_like(query)
+        run_wrapper_into(ordinary_wrapper, query, paged_kv, reference_warmup_output)
+        torch.cuda.synchronize()
+        del reference_warmup_output
+        memory_before_replans = {
+            "allocated": torch.cuda.memory_allocated(),
+            "reserved": torch.cuda.memory_reserved(),
+        }
+        comparisons: list[dict[str, object]] = []
+        for length in lengths_to_probe:
+            metadata = page_metadata_for_lengths(
+                [length] * batch_size,
+                page_size=shape.page_size,
+                device="cuda",
+            )
+            allocated_before_plan = torch.cuda.memory_allocated()
+            reserved_before_plan = torch.cuda.memory_reserved()
+            plan_wrapper(graph_wrapper, metadata, shape)
+            graph.replay()
+            torch.cuda.synchronize()
+            allocated_after_plan = torch.cuda.memory_allocated()
+            reserved_after_plan = torch.cuda.memory_reserved()
+
+            plan_wrapper(ordinary_wrapper, metadata, shape)
+            reference_output = torch.empty_like(query)
+            run_wrapper_into(ordinary_wrapper, query, paged_kv, reference_output)
+            torch.cuda.synchronize()
+            difference = (graph_output.float() - reference_output.float()).abs()
+            max_error = float(difference.max().item())
+            is_close = bool(
+                torch.allclose(graph_output, reference_output, rtol=1e-2, atol=1e-2)
+            )
+            comparisons.append(
+                {
+                    "length": length,
+                    "pages_per_request": -(-length // shape.page_size),
+                    "allclose": is_close,
+                    "max_abs_error": max_error,
+                    "allocated_before_replan": allocated_before_plan,
+                    "allocated_after_replan": allocated_after_plan,
+                    "allocated_replan_delta": allocated_after_plan - allocated_before_plan,
+                    "reserved_before_replan": reserved_before_plan,
+                    "reserved_after_replan": reserved_after_plan,
+                    "reserved_replan_delta": reserved_after_plan - reserved_before_plan,
+                    "ordinary_wrapper_id": id(ordinary_wrapper),
+                }
+            )
+            del reference_output
+
+        torch.cuda.synchronize()
+        memory_after_replans = {
+            "allocated": torch.cuda.memory_allocated(),
+            "reserved": torch.cuda.memory_reserved(),
+        }
+        final_metadata = page_metadata_for_lengths(
+            [lengths_to_probe[-1]] * batch_size,
+            page_size=shape.page_size,
+            device="cuda",
+        )
+        plan_wrapper(graph_wrapper, final_metadata, shape)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+        ) as replay_profile:
+            for _ in range(4):
+                graph.replay()
+            torch.cuda.synchronize()
+        replay_events = replay_profile.key_averages()
+        plan_wrapper(ordinary_wrapper, final_metadata, shape)
+        ordinary_output = torch.empty_like(query)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+        ) as ordinary_profile:
+            run_wrapper_into(ordinary_wrapper, query, paged_kv, ordinary_output)
+            torch.cuda.synchronize()
+        ordinary_events = ordinary_profile.key_averages()
+        pointers_after_replans = {
+            "workspace": workspace.data_ptr(),
+            "fixed_indptr": fixed_metadata.indptr.data_ptr(),
+            "fixed_indices": fixed_metadata.indices.data_ptr(),
+            "fixed_last_page_len": fixed_metadata.last_page_len.data_ptr(),
+            "query": query.data_ptr(),
+            "output": graph_output.data_ptr(),
+            "paged_kv": paged_kv.data_ptr(),
+        }
+        results.append(
+            {
+                "batch_size": batch_size,
+                "capture_count": 1,
+                "replan_count": len(lengths_to_probe) + 1,
+                "plan_count_total": len(lengths_to_probe) + 2,
+                "warmup_run_count": 3,
+                "wrapper_id": id(graph_wrapper),
+                "pointers": fixed_pointers,
+                "pointers_after_replans": pointers_after_replans,
+                "fixed_pointers_unchanged": fixed_pointers == pointers_after_replans,
+                "memory_after_capture": memory_after_capture,
+                "memory_before_replans": memory_before_replans,
+                "memory_after_replans": memory_after_replans,
+                "steady_replan_memory_delta": {
+                    key: memory_after_replans[key] - memory_before_replans[key]
+                    for key in memory_before_replans
+                },
+                "comparisons": comparisons,
+                "all_replays_match": all(row["allclose"] for row in comparisons),
+                "launch_profile": {
+                    "graph_replay": {
+                        "replays": 4,
+                        "cuda_graph_launch": sum(
+                            event.count
+                            for event in replay_events
+                            if event.key == "cudaGraphLaunch"
+                        ),
+                        "cuda_launch_kernel": sum(
+                            event.count
+                            for event in replay_events
+                            if event.key == "cudaLaunchKernel"
+                        ),
+                    },
+                    "ordinary_run": {
+                        "runs": 1,
+                        "cuda_graph_launch": sum(
+                            event.count
+                            for event in ordinary_events
+                            if event.key == "cudaGraphLaunch"
+                        ),
+                        "cuda_launch_kernel": sum(
+                            event.count
+                            for event in ordinary_events
+                            if event.key == "cudaLaunchKernel"
+                        ),
+                    },
+                },
+            }
+        )
+
+    return json.dumps(
+        {
+            "probe": "flashinfer-fixed-buffer-run-capture",
+            "flashinfer_version": actual_version,
+            "expected_flashinfer_version": expected_version,
+            "plan_contract": "plan once per token step outside capture; capture wrapper.run only",
+            "shape": {
+                "num_qo_heads": shape.num_qo_heads,
+                "num_kv_heads": shape.num_kv_heads,
+                "head_dim": shape.head_dim,
+                "page_size": shape.page_size,
+                "dtype": str(shape.dtype),
+            },
+            "lengths": lengths_to_probe,
+            "results": results,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=3 * 60 * 60,
+)
+def grouped_layer_ab(grouped_layers: int, correctness_only: bool = False) -> str:
+    """A/B of piecewise decode versus one cache-owned grouped graph.
+
+    ``correctness_only`` runs one batch-8 pair and records outputs without publishing a fresh
+    timing result. It exists to close a parity question in an older performance record.
+    """
+    import statistics
+
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        build_requests,
+        requests_at_context_length,
+    )
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
+    from llm_infer.benchmarks.reference_policy import (
+        build_reference_only_record,
+        build_system_evidence_record,
+        normalized_outputs_match,
+    )
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    if grouped_layers not in (2, 4):
+        raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
+    esme_bundles.reload()
+    batch_sizes = [8] if correctness_only else [1, 8]
+    context_length = 256
+    max_new_tokens = 128
+    warmup_pairs = 0 if correctness_only else 2
+    measured_pairs = 1 if correctness_only else 10
+    eos = frozenset()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
+    rows: list[dict[str, object]] = []
+    candidate_label = f"{grouped_layers}_layer_group"
+
+    def p95(values: list[float]) -> float:
+        ordered = sorted(values)
+        return ordered[math.ceil(0.95 * len(ordered)) - 1]
+
+    def reference_for(requests) -> dict[str, list[int]]:
+        for request in requests:
+            if request.prompt_ids not in reference_by_prompt:
+                reference_by_prompt[request.prompt_ids] = greedy_decode(
+                    oracle_runtime.model,
+                    list(request.prompt_ids),
+                    max_new_tokens=max_new_tokens,
+                    eos_token_ids=set(eos),
+                )
+        return {
+            request.request_id: list(reference_by_prompt[request.prompt_ids])
+            for request in requests
+        }
+
+    for batch_size in batch_sizes:
+        runtimes = {
+            label: load_model_runtime(
+                "esme",
+                bundle_path=Path(REMOTE_BUNDLE_PATH),
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            for label in ("piecewise", candidate_label)
+        }
+        requests_by_mode = {
+            label: requests_at_context_length(
+                build_requests(runtime.tokenizer, batch_size, HEADLINE_PROMPTS),
+                context_length,
+            )
+            for label, runtime in runtimes.items()
+        }
+
+        def build_engine(
+            label: str,
+            runtimes=runtimes,
+            requests_by_mode=requests_by_mode,
+            batch_size=batch_size,
+        ):
+            runtime = runtimes[label]
+            requests = requests_by_mode[label]
+            needed = sum(
+                math.ceil((len(request.prompt_ids) + max_new_tokens) / 64)
+                for request in requests
+            )
+            return InferenceEngine(
+                runtime.model,
+                block_size=64,
+                num_blocks=needed + max(8, batch_size),
+                device="cuda",
+                capabilities=runtime.capabilities,
+            )
+
+        engines = {label: build_engine(label) for label in runtimes}
+        baseline_model = runtimes["piecewise"].model
+        allocated_before_baseline = torch.cuda.memory_allocated()
+        capture_start = time.perf_counter()
+        baseline_model.enable_decode_graphs(capture_sizes=(batch_size,))
+        baseline_capture_seconds = time.perf_counter() - capture_start
+        baseline_capture_memory = torch.cuda.memory_allocated() - allocated_before_baseline
+        candidate_runner: EngineOwnedGroupedDecodeGraphRunner | None = None
+        timings = {"piecewise": [], candidate_label: []}
+        token_counts = {"piecewise": [], candidate_label: []}
+        last_outputs: dict[str, dict[str, list[int]]] = {}
+
+        def decode_once(
+            label: str,
+            runtimes=runtimes,
+            requests_by_mode=requests_by_mode,
+            engines=engines,
+            batch_size=batch_size,
+        ) -> tuple[float, int, dict[str, list[int]]]:
+            nonlocal candidate_runner
+            runtime = runtimes[label]
+            requests = requests_by_mode[label]
+            engine = engines[label]
+            live_requests = []
+            for request in requests:
+                live = Request(
+                    request.request_id,
+                    list(request.prompt_ids),
+                    max_new_tokens,
+                    eos,
+                )
+                live_requests.append(live)
+                engine.add_request(live)
+            outputs = {request.request_id: [] for request in requests}
+            first = engine.step()
+            for request_id, tokens in first.tokens.items():
+                outputs[request_id].extend(int(token) for token in tokens)
+            if label == candidate_label and candidate_runner is None:
+                tables = [request.block_table for request in live_requests]
+                capture_plan = runtime.model.open_decode_window(
+                    engine.cache, tables, budget=8
+                )
+                if capture_plan is None:
+                    raise RuntimeError("two-layer capture could not open a planned window")
+                candidate_start = time.perf_counter()
+                candidate_runner = EngineOwnedGroupedDecodeGraphRunner(
+                    runtime.model,
+                    engine.cache,
+                    batch_size,
+                    grouped_layers=grouped_layers,
+                    mode="graph",
+                    capture_plan=capture_plan,
+                )
+                candidate_runner.total_capture_seconds = time.perf_counter() - candidate_start
+                runtime.model.decode_graphs = candidate_runner
+            torch.cuda.synchronize()
+            decode_tokens = 0
+            start = time.perf_counter()
+            while engine.scheduler.has_work():
+                result = engine.step()
+                for request_id, tokens in result.tokens.items():
+                    values = [int(token) for token in tokens]
+                    outputs[request_id].extend(values)
+                    decode_tokens += len(values)
+            torch.cuda.synchronize()
+            return time.perf_counter() - start, decode_tokens, outputs
+
+        for pair in range(warmup_pairs + measured_pairs):
+            order = (
+                ("piecewise", candidate_label)
+                if pair % 2 == 0
+                else (candidate_label, "piecewise")
+            )
+            for label in order:
+                elapsed, tokens, outputs = decode_once(label)
+                if pair >= warmup_pairs:
+                    timings[label].append(elapsed)
+                    token_counts[label].append(tokens)
+                    last_outputs[label] = outputs
+
+        launch_profiles: dict[str, dict[str, object]] = {}
+        for label, engine in (() if correctness_only else engines.items()):
+            requests = requests_by_mode[label]
+            for request in requests:
+                engine.add_request(
+                    Request(
+                        request.request_id,
+                        list(request.prompt_ids),
+                        max_new_tokens,
+                        eos,
+                    )
+                )
+            engine.step()
+            torch.cuda.synchronize()
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]
+            ) as profile:
+                passes = 0
+                while engine.scheduler.has_work() and passes < 2:
+                    engine.step()
+                    passes += 1
+                torch.cuda.synchronize()
+            events = profile.key_averages()
+            launch_profiles[label] = {
+                "profiled_scheduler_passes": passes,
+                "cuda_graph_launch": sum(
+                    event.count for event in events if event.key == "cudaGraphLaunch"
+                ),
+                "cuda_launch_kernel": sum(
+                    event.count for event in events if event.key == "cudaLaunchKernel"
+                ),
+            }
+
+        reference = reference_for(requests_by_mode["piecewise"])
+        batch_rows: list[dict[str, object]] = []
+        agreements = {}
+        for label in ("piecewise", candidate_label):
+            agreement = tie_tolerant_agreement(
+                oracle_runtime.model,
+                requests_by_mode[label],
+                last_outputs[label],
+                reference,
+                eos,
+            )
+            agreements[label] = agreement
+            median_s = statistics.median(timings[label])
+            tokens = token_counts[label][-1]
+            row = {
+                "batch_size": batch_size,
+                "context_length": context_length,
+                "runner": label,
+                "agreement": dataclasses.asdict(agreement),
+                "decode_token_counts": token_counts[label],
+                "total_decode_tokens": tokens,
+            }
+            if correctness_only:
+                row.update(
+                    {
+                        **build_reference_only_record(agreement),
+                        "measurement_status": "not_measured",
+                        "raw_tokens_per_second": None,
+                        "tokens_per_second": None,
+                    }
+                )
+            else:
+                row.update(
+                    {
+                        "decode_median_seconds": median_s,
+                        "decode_p95_seconds": p95(timings[label]),
+                        "decode_per_iter_seconds": timings[label],
+                        **build_system_evidence_record(
+                            agreement=agreement,
+                            median_seconds=median_s,
+                            total_tokens=tokens,
+                        ),
+                        "launch_profile": launch_profiles[label],
+                    }
+                )
+            if label == "piecewise":
+                row["capture"] = {
+                    "seconds": baseline_capture_seconds,
+                    "allocator_delta_bytes": baseline_capture_memory,
+                }
+            else:
+                assert candidate_runner is not None
+                row["capture"] = {
+                    "seconds": candidate_runner.total_capture_seconds,
+                    "group_seconds": candidate_runner.capture_seconds,
+                    "group_memory_bytes": candidate_runner.capture_memory_bytes,
+                    "group_owned_memory_bytes": candidate_runner.owned_group_memory_bytes,
+                    "cache_id": id(candidate_runner.cache),
+                    "cache_kv_pointer": candidate_runner._cache_kv_pointer,
+                }
+            batch_rows.append(row)
+            rows.append(row)
+
+        baseline_row, candidate_row = batch_rows
+        parity_status = (
+            "exact"
+            if normalized_outputs_match(
+                last_outputs["piecewise"], last_outputs[candidate_label], eos
+            )
+            else "review_required"
+        )
+        relative_claim_eligible = (
+            parity_status == "exact"
+            and token_counts["piecewise"][-1] == token_counts[candidate_label][-1]
+        )
+        baseline_raw_tps = baseline_row["raw_tokens_per_second"]
+        candidate_raw_tps = candidate_row["raw_tokens_per_second"]
+        comparison: dict[str, object] = {
+            "policy_version": 2,
+            "batch_size": batch_size,
+            "context_length": context_length,
+            "runner": "candidate_vs_baseline",
+            "parity_status": parity_status,
+            "candidate_matches_baseline_exact": parity_status == "exact",
+            "relative_claim_eligible": relative_claim_eligible,
+        }
+        if correctness_only:
+            target_request = "esme-007"
+            target_step = 22
+            candidate_evidence = next(
+                (
+                    item
+                    for item in agreements[candidate_label].numerical_evidence
+                    if item.get("request") == target_request
+                    and item.get("step") == target_step
+                ),
+                None,
+            )
+            if candidate_evidence is None:
+                raise RuntimeError(
+                    "batch-8 correctness check did not reproduce esme-007 step-22 evidence"
+                )
+            comparison.update(
+                {
+                    "measurement_status": "not_measured",
+                    "performance_claim_in_record": False,
+                    "headline_eligible": False,
+                    "outputs": {
+                        "baseline": last_outputs["piecewise"],
+                        "candidate": last_outputs[candidate_label],
+                    },
+                    "reference_outputs": reference,
+                    "target_diagnostic": {
+                        "request": target_request,
+                        "step": target_step,
+                        "baseline_token": last_outputs["piecewise"][target_request][target_step],
+                        "candidate_token": last_outputs[candidate_label][target_request][
+                            target_step
+                        ],
+                        "fp32_token": reference[target_request][target_step],
+                        "baseline_matches_candidate": (
+                            last_outputs["piecewise"][target_request][target_step]
+                            == last_outputs[candidate_label][target_request][target_step]
+                        ),
+                        "fp32_evidence": candidate_evidence,
+                    },
+                }
+            )
+        else:
+            raw_decode_median_ratio = (
+                candidate_row["decode_median_seconds"]
+                / baseline_row["decode_median_seconds"]
+            )
+            comparison.update(
+                {
+                    "raw_decode_median_ratio": raw_decode_median_ratio,
+                    "decode_median_ratio": (
+                        raw_decode_median_ratio if relative_claim_eligible else None
+                    ),
+                    "tokens_per_second_ratio": (
+                        candidate_raw_tps / baseline_raw_tps
+                        if relative_claim_eligible
+                        and candidate_raw_tps is not None
+                        and baseline_raw_tps is not None
+                        else None
+                    ),
+                }
+            )
+        rows.append(comparison)
+
+    return json.dumps(
+        {
+            "probe": "engine-owned-grouped-layer-decode-graph",
+            "policy_version": 2,
+            "measurement_status": "not_measured" if correctness_only else "measured",
+            "rows": rows,
+            "experiment": {
+                "batch_sizes": batch_sizes,
+                "context_length": context_length,
+                "max_new_tokens": max_new_tokens,
+                "warmup_pairs": warmup_pairs,
+                "measured_pairs": measured_pairs,
+                "grouped_layer_count": grouped_layers,
+                "grouped_layers": list(range(grouped_layers)),
+                "expected_graph_launches_per_token": 31 - grouped_layers,
+                "planning": "outside capture every token",
+            },
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
@@ -853,20 +1513,46 @@ def capture_report(batch_sizes: list[int]) -> str:
 @app.local_entrypoint()
 def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: str = "") -> None:
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
-    if command not in ("profile", "bench", "ablate", "capture", "sync", "serve-smoke"):
+    if command not in (
+        "profile",
+        "bench",
+        "ablate",
+        "capture",
+        "sync",
+        "serve-smoke",
+        "flashinfer-graph-probe",
+        "two-layer-group-ab",
+        "four-layer-group-ab",
+        "four-layer-parity",
+    ):
         raise ValueError(
             "command must be 'profile', 'bench', 'ablate', 'capture', 'sync', "
-            f"or 'serve-smoke', got {command!r}"
+            "'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
+            "'four-layer-group-ab', or 'four-layer-parity', "
+            f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
-    local_bundle = local_bundle_path(bundle_path)
-    stage_bundle(esme_bundles, local_bundle, label="esme-decode")
+    if command != "flashinfer-graph-probe":
+        local_bundle = local_bundle_path(bundle_path)
+        stage_bundle(esme_bundles, local_bundle, label="esme-decode")
 
-    print(
-        f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, greedy, "
-        f"bf16 default attention, prefix caching off"
-    )
-    if command == "profile":
+    if command == "flashinfer-graph-probe":
+        print("[esme-decode] FlashInfer fixed-buffer graph probe: exact batches 1,8")
+        record = json.loads(flashinfer_graph_probe.remote())
+    elif command == "two-layer-group-ab":
+        print("[esme-decode] cache-owned two-layer graph A/B: exact batches 1,8")
+        record = json.loads(grouped_layer_ab.remote(2))
+    elif command == "four-layer-group-ab":
+        print("[esme-decode] cache-owned four-layer graph A/B: exact batches 1,8")
+        record = json.loads(grouped_layer_ab.remote(4, False))
+    elif command == "four-layer-parity":
+        print("[esme-decode] cache-owned four-layer graph: batch-8 correctness only")
+        record = json.loads(grouped_layer_ab.remote(4, True))
+    elif command == "profile":
+        print(
+            f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, greedy, "
+            f"bf16 default attention, prefix caching off"
+        )
         record = json.loads(profile_decode.remote(sizes))
     elif command == "ablate":
         record = json.loads(ablate_decode.remote(sizes))
@@ -881,15 +1567,72 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     record["config"] = {
         "command": command,
         "model": "Esme-214M-Chat",
-        "batch_sizes": sizes,
-        "max_new_tokens": MAX_NEW_TOKENS,
-        "warmup": WARMUP_ITERS,
-        "iters": MEASURED_ITERS,
-        "backend": f"{record.get('attention_backend', 'comparison')} (bf16)",
-        "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
+        "batch_sizes": (
+            [8]
+            if command == "four-layer-parity"
+            else [1, 8]
+            if command
+            in (
+                "flashinfer-graph-probe",
+                "two-layer-group-ab",
+                "four-layer-group-ab",
+                "four-layer-parity",
+            )
+            else sizes
+        ),
+        "max_new_tokens": (
+            None
+            if command == "flashinfer-graph-probe"
+            else 128
+            if command in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity")
+            else MAX_NEW_TOKENS
+        ),
+        "warmup": (
+            3
+            if command == "flashinfer-graph-probe"
+            else 0
+            if command == "four-layer-parity"
+            else 2
+            if command in ("two-layer-group-ab", "four-layer-group-ab")
+            else WARMUP_ITERS
+        ),
+        "iters": (
+            1
+            if command in ("flashinfer-graph-probe", "four-layer-parity")
+            else 10
+            if command in ("two-layer-group-ab", "four-layer-group-ab")
+            else MEASURED_ITERS
+        ),
+        "backend": (
+            "FlashInfer BatchDecodeWithPagedKVCacheWrapper (bf16)"
+            if command == "flashinfer-graph-probe"
+            else (
+                f"Esme FlashInfer piecewise vs cache-owned "
+                f"{'four' if command in ('four-layer-group-ab', 'four-layer-parity') else 'two'}"
+                "-layer graph (bf16)"
+                if command
+                in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity")
+                else f"{record.get('attention_backend', 'comparison')} (bf16)"
+            )
+        ),
+        "reference": (
+            "fresh ordinary FlashInfer wrapper planned for the exact page metadata"
+            if command == "flashinfer-graph-probe"
+            else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"
+        ),
         "repro_command": (
-            f"modal run scripts/modal_esme_decode_profile.py --command {command} "
-            f"--batch-sizes {batch_sizes}"
+            f"modal run scripts/modal_esme_decode_profile.py --command {command}"
+            if command
+            in (
+                "flashinfer-graph-probe",
+                "two-layer-group-ab",
+                "four-layer-group-ab",
+                "four-layer-parity",
+            )
+            else (
+                f"modal run scripts/modal_esme_decode_profile.py --command {command} "
+                f"--batch-sizes {batch_sizes}"
+            )
         ),
     }
 
