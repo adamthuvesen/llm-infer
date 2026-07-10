@@ -8,11 +8,43 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import torch
+
+PHASE_BUCKETS: dict[str, tuple[str, ...]] = {
+    "prefill": ("prefill",),
+    "decode": ("decode",),
+    "page_planning": ("paged_attention_plan",),
+    "attention": ("attention", "paged_attention"),
+    "sampling": ("sampling",),
+    "window_flushing": ("window_flushing",),
+}
+
+
+def attach_host_method_profile(
+    profiler: TimingProfiler,
+    target: object,
+    bucket: str,
+    method_names: tuple[str, ...],
+) -> None:
+    """Wrap diagnostic-only instance methods in one host timing bucket."""
+    for method_name in method_names:
+        original = getattr(target, method_name)
+        if not callable(original):
+            raise TypeError(f"{type(target).__name__}.{method_name} is not callable")
+
+        def measured(
+            *args: object,
+            _original: Callable[..., object] = original,
+            **kwargs: object,
+        ) -> object:
+            with profiler.host(bucket):
+                return _original(*args, **kwargs)
+
+        setattr(target, method_name, measured)
 
 
 @dataclass
@@ -39,9 +71,29 @@ class TimingSummary:
     buckets: list[TimingBucket] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
+        by_name = {bucket.name: bucket for bucket in self.buckets}
+        phases = {}
+        for phase, source_names in PHASE_BUCKETS.items():
+            sources = [by_name[name] for name in source_names if name in by_name]
+            phases[phase] = {
+                "available": bool(sources),
+                "calls": sum(bucket.calls for bucket in sources),
+                "total_ms": sum(bucket.total_ms for bucket in sources),
+                "mean_ms_per_call": (
+                    sum(bucket.total_ms for bucket in sources)
+                    / sum(bucket.calls for bucket in sources)
+                    if sources
+                    else None
+                ),
+                "source_buckets": [bucket.name for bucket in sources],
+            }
         return {
             "device": self.device,
             "buckets": [bucket.as_dict() for bucket in self.buckets],
+            # These spans are nested: decode includes page planning and attention. They are
+            # attribution records, not values that may be summed into total wall time.
+            "phases": phases,
+            "phase_timings_are_nested": True,
         }
 
 

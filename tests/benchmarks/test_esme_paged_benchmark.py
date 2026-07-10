@@ -17,6 +17,7 @@ from llm_infer.benchmarks.esme_paged import (
     SystemTiming,
     compare_paged_vs_recompute,
     reference_outputs,
+    requests_at_context_length,
 )
 from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
@@ -42,6 +43,20 @@ def _requests() -> list[EsmeBenchRequest]:
         EsmeBenchRequest("r0", "p0", (1, 4, 7)),
         EsmeBenchRequest("r1", "p1", (2, 5)),
     ]
+
+
+def test_requests_at_context_length_repeats_valid_prompts_to_exact_size() -> None:
+    resized = requests_at_context_length(_requests(), 8)
+
+    assert [len(request.prompt_ids) for request in resized] == [8, 8]
+    assert resized[0].prompt_ids == (1, 4, 7, 1, 4, 7, 1, 4)
+    assert resized[1].prompt_ids == (2, 5, 2, 5, 2, 5, 2, 5)
+    assert [request.request_id for request in resized] == ["r0", "r1"]
+
+
+def test_requests_at_context_length_rejects_zero() -> None:
+    with pytest.raises(ValueError, match="context_length must be >= 1"):
+        requests_at_context_length(_requests(), 0)
 
 
 class _OracleMustNotBeUsed:
