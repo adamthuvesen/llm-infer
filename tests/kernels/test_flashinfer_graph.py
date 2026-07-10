@@ -1,11 +1,11 @@
-"""CPU contracts for the benchmark-only FlashInfer graph adapter."""
+"""CPU contracts for the FlashInfer CUDA-graph adapter."""
 
 from __future__ import annotations
 
 import torch
 
-from llm_infer.benchmarks.flashinfer_graph_probe import (
-    FlashInferProbeShape,
+from llm_infer.kernels.flashinfer_graph import (
+    FlashInferDecodeShape,
     build_graph_wrapper,
     page_metadata_for_lengths,
     plan_wrapper,
@@ -46,7 +46,7 @@ def test_plan_and_run_keep_exact_metadata_and_output_contract() -> None:
     fixed = page_metadata_for_lengths([129], page_size=64, device="cpu")
     wrapper = build_graph_wrapper(_FakeWrapper, torch.empty(16, dtype=torch.uint8), fixed)
     metadata = page_metadata_for_lengths([65], page_size=64, device="cpu")
-    shape = FlashInferProbeShape(8, 2, 64, 64, torch.bfloat16)
+    shape = FlashInferDecodeShape(8, 2, 64, 64, torch.bfloat16)
     plan_wrapper(wrapper, metadata, shape)
 
     assert wrapper.plan_args[:3] == (

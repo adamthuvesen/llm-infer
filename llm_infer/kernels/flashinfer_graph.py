@@ -1,4 +1,11 @@
-"""Small host-side helpers for the benchmark-only FlashInfer CUDA-graph probe."""
+"""Host-side helpers for running FlashInfer paged decode under CUDA-graph capture.
+
+FlashInfer's graph mode pins the wrapper to caller-owned fixed-address buffers: the
+workspace and the page metadata (indptr, indices, last_page_len) must never move between
+capture and replay. These helpers build that wrapper, re-plan it outside capture each
+token step, and run it into a caller-owned output tensor so replays keep every address
+fixed.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,7 @@ import torch
 
 
 @dataclass(frozen=True)
-class FlashInferProbeShape:
+class FlashInferDecodeShape:
     num_qo_heads: int
     num_kv_heads: int
     head_dim: int
@@ -67,7 +74,7 @@ def build_graph_wrapper(
 def plan_wrapper(
     wrapper,
     metadata: FlashInferPageMetadata,
-    shape: FlashInferProbeShape,
+    shape: FlashInferDecodeShape,
 ) -> None:
     """Plan one token step outside capture; the wrapper copies into its fixed buffers."""
     wrapper.plan(

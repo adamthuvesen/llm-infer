@@ -1,4 +1,17 @@
-"""Benchmark-only exact-batch graph grouping complete Esme layers with paged attention."""
+"""Exact-batch decode graphs grouping complete Esme layers with paged attention.
+
+The piecewise runner (:mod:`llm_infer.model.decode_graph`) keeps every KV write and
+attention call out of its captures, so one model-owned capture serves any cache. The
+grouped runner goes further: it captures segments ``0..grouped_layers`` *including* their
+KV writes and a FlashInfer graph-mode attention call, which bakes one cache's KV pointer
+into the graphs. That trade wins measurably at every exact batch (A100: +30% tok/s at
+batch 1, +22% at 256), but ties each runner to one engine's cache and one exact batch
+size — an off-bucket batch or a foreign cache returns ``None`` and the caller falls back
+to the piecewise bucket path.
+
+``mode="eager"`` runs the same tranche ordering on CPU for parity tests. Planning stays
+outside capture on every token step.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +20,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from llm_infer.benchmarks.flashinfer_graph_probe import (
+from llm_infer.kernels.flashinfer_graph import (
+    FlashInferDecodeShape,
     FlashInferPageMetadata,
-    FlashInferProbeShape,
     build_graph_wrapper,
     plan_wrapper,
     run_wrapper_into,
@@ -21,13 +34,22 @@ if TYPE_CHECKING:
     from llm_infer.model.decode_plan import DecodeWindowPlan
     from llm_infer.model.pretrain_bundle import PretrainBundleModel
 
+# The window budget used for capture-time planning. Capture calls ``begin_step`` exactly
+# once, so any positive budget works; 8 matches the serving decode window default.
+_CAPTURE_PLAN_BUDGET = 8
+
+# Grouped runners capture per exact batch size (~1-2 s and ~136 MiB owned memory each on an
+# A100), so the default set mirrors the server's piecewise buckets: a handful of concurrent
+# chat sessions. An off-bucket batch falls back to the padded piecewise path.
+DEFAULT_GROUPED_CAPTURE_SIZES = (1, 2, 4, 8, 16)
+
 
 class EngineOwnedGroupedDecodeGraphRunner:
     """Tie one exact-batch grouped-layer graph to one engine cache.
 
-    ``mode="eager"`` runs the same tranche ordering on CPU for parity tests. Graph mode
-    captures segments ``0..grouped_layers`` around their KV writes and a dedicated
-    FlashInfer graph-mode wrapper. Planning remains outside capture on every token step.
+    ``steps_handled`` counts window steps this runner actually ran — serving tests assert
+    on it so a silent fall-through to the piecewise or eager path can never masquerade as
+    grouped coverage.
     """
 
     def __init__(
@@ -48,7 +70,9 @@ class EngineOwnedGroupedDecodeGraphRunner:
         if grouped_layers not in (2, 4):
             raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
         if model.num_layers < grouped_layers:
-            raise ValueError(f"grouped probe needs {grouped_layers} layers; got {model.num_layers}")
+            raise ValueError(
+                f"grouped runner needs {grouped_layers} layers; got {model.num_layers}"
+            )
         if mode == "graph" and capture_plan is None:
             raise ValueError("graph mode needs a prefilled capture plan")
         if mode == "graph" and model.num_layers == grouped_layers:
@@ -71,9 +95,10 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._static_write_slots = torch.zeros(batch_size, dtype=torch.long, device=model.device)
         self._group_graph: torch.cuda.CUDAGraph | None = None
         self._graph_wrapper = None
-        self._graph_shape: FlashInferProbeShape | None = None
+        self._graph_shape: FlashInferDecodeShape | None = None
         self._graph_workspace: torch.Tensor | None = None
         self._fixed_metadata: FlashInferPageMetadata | None = None
+        self.steps_handled = 0
         self.capture_seconds = 0.0
         self.capture_memory_bytes = 0
         self.owned_group_memory_bytes = 0
@@ -137,6 +162,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
                 )
                 self.piecewise._run_segment(state, layer + 1)
         plan.complete_step()
+        self.steps_handled += 1
         return state.logits
 
     def _run_group_eager(self, read_plan: KVReadPlan) -> None:
@@ -193,7 +219,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._graph_wrapper = build_graph_wrapper(wrapper_class, workspace, fixed_metadata)
         self._graph_workspace = workspace
         self._fixed_metadata = fixed_metadata
-        self._graph_shape = FlashInferProbeShape(
+        self._graph_shape = FlashInferDecodeShape(
             self.model.num_heads,
             self.model.num_kv_heads,
             self.model.head_dim,
@@ -244,3 +270,54 @@ class EngineOwnedGroupedDecodeGraphRunner:
             ),
             self._graph_shape,
         )
+
+
+def build_engine_grouped_runners(
+    model: PretrainBundleModel,
+    cache: PagedKVCache,
+    capture_sizes: tuple[int, ...],
+    *,
+    grouped_layers: int,
+    max_position: int = 8192,
+) -> dict[int, EngineOwnedGroupedDecodeGraphRunner]:
+    """Capture one grouped runner per exact batch size against ``cache``, at construction.
+
+    On CUDA each runner captures its graphs from a synthetic window plan over freshly
+    allocated (then freed) block tables, so no capture cost can land inside a timed or
+    serving region. Capture warmup writes into those blocks, but every later user of a
+    reused block overwrites its slots during prefill before reading them. On CPU the
+    runners run the same tranche ordering eagerly — the parity-test hook.
+    """
+    sizes = tuple(sorted(set(capture_sizes)))
+    if not sizes or sizes[0] < 1:
+        raise ValueError(f"capture_sizes must be positive; got {capture_sizes!r}")
+    mode = "graph" if model.device.type == "cuda" else "eager"
+    runners: dict[int, EngineOwnedGroupedDecodeGraphRunner] = {}
+    for size in sizes:
+        capture_plan = None
+        tables = []
+        if mode == "graph":
+            tables = [cache.new_request() for _ in range(size)]
+            capture_plan = model.open_decode_window(cache, tables, _CAPTURE_PLAN_BUDGET)
+            if capture_plan is None:
+                raise RuntimeError(
+                    f"could not open a capture window for grouped batch {size}; "
+                    "fresh tables should always be plan-safe"
+                )
+        try:
+            start = time.perf_counter()
+            runner = EngineOwnedGroupedDecodeGraphRunner(
+                model,
+                cache,
+                size,
+                grouped_layers=grouped_layers,
+                mode=mode,
+                capture_plan=capture_plan,
+                max_position=max_position,
+            )
+            runner.total_capture_seconds = time.perf_counter() - start
+        finally:
+            for table in tables:
+                table.free()
+        runners[size] = runner
+    return runners

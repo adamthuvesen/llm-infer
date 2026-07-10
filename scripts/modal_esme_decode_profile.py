@@ -690,8 +690,8 @@ def flashinfer_graph_probe() -> str:
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.benchmarks.flashinfer_graph_probe import (
-        FlashInferProbeShape,
+    from llm_infer.kernels.flashinfer_graph import (
+        FlashInferDecodeShape,
         build_graph_wrapper,
         page_metadata_for_lengths,
         plan_wrapper,
@@ -707,7 +707,7 @@ def flashinfer_graph_probe() -> str:
         )
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     wrapper_class = FlashInferPagedAttention._decode_wrapper_class(flashinfer)
-    shape = FlashInferProbeShape(
+    shape = FlashInferDecodeShape(
         num_qo_heads=8,
         num_kv_heads=2,
         head_dim=64,
@@ -962,13 +962,13 @@ def grouped_layer_ab(
         requests_at_context_length,
     )
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
-    from llm_infer.benchmarks.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
     from llm_infer.benchmarks.reference_policy import (
         build_reference_only_record,
         build_system_evidence_record,
         normalized_outputs_match,
     )
     from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
