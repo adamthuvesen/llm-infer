@@ -1130,8 +1130,22 @@ def _workload_result(
     )
     throughput = output_tokens / wall_s if speed_status == "reported" and wall_s > 0 else None
     observed_rate = output_tokens / wall_s if output_tokens > 0 and wall_s > 0 else None
+    reference_policy_status = (
+        "accepted_numerical"
+        if reference["status"] == "pass"
+        and any(detail.get("status") == "pass_tie" for detail in reference["details"])
+        else "exact"
+        if reference["status"] == "pass"
+        else "failed"
+    )
 
     return {
+        "policy_version": 2,
+        "reference_status": reference_policy_status,
+        "parity_status": "not_applicable",
+        "headline_eligible": (
+            speed_status == "reported" and throughput is not None and throughput > 0
+        ),
         "name": name,
         "surface": surface,
         "description": description,
@@ -1148,6 +1162,7 @@ def _workload_result(
             "output_tokens": output_tokens,
             "output_token_source": "engine_observer",
             "throughput_tokens_per_s": throughput,
+            "raw_throughput_tokens_per_s": observed_rate,
             "throughput_status": speed_status,
             "observed_output_tokens_per_s": observed_rate,
             "ttft_p50_s": _percentile(client_ttfts, 50),

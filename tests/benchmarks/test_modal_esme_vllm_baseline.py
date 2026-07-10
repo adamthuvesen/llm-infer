@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
-from llm_infer.benchmarks.esme_three_way import vllm_decode_closure
+from llm_infer.benchmarks.esme_three_way import EsmeAgreement, vllm_decode_closure
 from scripts.modal_esme_vllm_baseline import (
     VLLM_PYTHON,
     _command_config,
@@ -123,6 +123,18 @@ def test_same_host_validation_requires_distinct_pid_and_matching_gpu() -> None:
         )
 
 
+def _typed_agreement(*, exact: int = 0, tie: int = 0, failed: int = 0) -> EsmeAgreement:
+    return EsmeAgreement(
+        exact=exact,
+        tie=tie,
+        nontie=failed,
+        total=exact + tie + failed,
+        ties_sample=[],
+        divergences_sample=[],
+        failed=failed,
+    )
+
+
 def test_failed_reference_gate_suppresses_throughput() -> None:
     worker_row = {
         "batch_size": 1,
@@ -133,20 +145,28 @@ def test_failed_reference_gate_suppresses_throughput() -> None:
     passed = finalize_row(
         worker_row,
         system="vllm",
-        agreement={"exact": 1, "tie": 0, "nontie": 0, "total": 1},
+        agreement=_typed_agreement(exact=1),
         total_output_tokens=6,
     )
     failed = finalize_row(
         worker_row,
         system="vllm",
-        agreement={"exact": 0, "tie": 0, "nontie": 1, "total": 1},
+        agreement=_typed_agreement(failed=1),
         total_output_tokens=6,
     )
 
     assert passed["median_seconds"] == 2.0
     assert passed["p95_seconds"] == 3.0
+    assert passed["policy_version"] == 2
+    assert passed["reference_status"] == "exact"
+    assert passed["parity_status"] == "not_applicable"
+    assert passed["raw_tokens_per_second"] == 3.0
+    assert passed["headline_eligible"] is True
     assert passed["tokens_per_second"] == 3.0
-    assert failed["matches_reference"] is False
+    assert passed["agreement"]["exact"] == 1
+    assert failed["reference_status"] == "failed"
+    assert failed["raw_tokens_per_second"] == 3.0
+    assert failed["headline_eligible"] is False
     assert failed["tokens_per_second"] is None
 
 
@@ -176,6 +196,38 @@ def test_serialized_fp32_gate_accepts_only_recorded_near_max_tokens() -> None:
     tie = gate_outputs([request], {"r0": [9, 4]}, oracle_case)
     nontie = gate_outputs([request], {"r0": [8, 4]}, oracle_case)
 
-    assert (exact["exact"], exact["tie"], exact["nontie"]) == (1, 0, 0)
-    assert (tie["exact"], tie["tie"], tie["nontie"]) == (0, 1, 0)
-    assert (nontie["exact"], nontie["tie"], nontie["nontie"]) == (0, 0, 1)
+    assert (exact.exact, exact.tie, exact.nontie) == (1, 0, 0)
+    assert (tie.exact, tie.tie, tie.nontie) == (0, 1, 0)
+    assert (nontie.exact, nontie.tie, nontie.nontie) == (0, 0, 1)
+    assert nontie.review_required == 1
+    assert nontie.failed == 0
+
+    tie_row = finalize_row(
+        {
+            "batch_size": 1,
+            "context_tokens": 32,
+            "per_iter_seconds": [2.0],
+            "outputs": {"r0": [9, 4]},
+        },
+        system="vllm",
+        agreement=tie,
+        total_output_tokens=2,
+    )
+    assert tie_row["reference_status"] == "accepted_numerical"
+    assert tie_row["headline_eligible"] is True
+    assert tie_row["tokens_per_second"] == 1.0
+
+    reviewed_row = finalize_row(
+        {
+            "batch_size": 1,
+            "context_tokens": 32,
+            "per_iter_seconds": [2.0],
+            "outputs": {"r0": [8, 4]},
+        },
+        system="vllm",
+        agreement=nontie,
+        total_output_tokens=2,
+    )
+    assert reviewed_row["reference_status"] == "review_required"
+    assert reviewed_row["raw_tokens_per_second"] == 1.0
+    assert reviewed_row["tokens_per_second"] is None

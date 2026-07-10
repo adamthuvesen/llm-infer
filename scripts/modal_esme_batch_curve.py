@@ -5,7 +5,7 @@ batch grows from 8 to 256 concurrent chat requests, against the measured naive
 HF-sequential floor. Same workload family as the headline benchmark (HEADLINE_PROMPTS
 pool, up to 256 new tokens, greedy, prefix caching off) and the same gate: every reported
 row must agree with the fp32 ``PretrainBundleModel.logits()`` oracle under the audited
-tie-tolerant rule, or it reports no tok/s.
+reference policy v2; raw timing is retained while public tok/s stays gated.
 
 Same-container methodology (cross-container A100 variance is ±20% for this CPU-bound
 decode; see docs/benchmark.md): every llm_infer row and every HF floor row runs in ONE
@@ -24,6 +24,7 @@ how the right side of the curve fits in memory.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -170,6 +171,11 @@ def sweep_baseline(
         single_request_prompt_coverage,
     )
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import (
+        QUALIFIED_REFERENCE_STATUSES,
+        build_reference_only_record,
+        build_system_evidence_record,
+    )
     from llm_infer.benchmarks.report import total_output_tokens
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
@@ -214,7 +220,7 @@ def sweep_baseline(
             for request in requests
         }
 
-    def agreement_record(requests, outputs) -> tuple[dict[str, object], bool]:
+    def agreement_record(requests, outputs):
         agreement = tie_tolerant_agreement(
             oracle_runtime.model, requests, outputs, reference_for(requests), eos
         )
@@ -226,8 +232,11 @@ def sweep_baseline(
                 "total": agreement.total,
                 "ties_sample": agreement.ties_sample,
                 "divergences_sample": agreement.divergences_sample,
+                "review_required": agreement.review_required,
+                "failed": agreement.failed,
+                "numerical_evidence": agreement.numerical_evidence,
             },
-            agreement.all_ties_or_exact,
+            agreement,
         )
 
     rows: list[dict] = []
@@ -279,7 +288,7 @@ def sweep_baseline(
                 torch.cuda.synchronize()
                 per_iter.append(time.perf_counter() - start)
 
-            agreement, matches_reference = agreement_record(requests, outputs)
+            agreement, agreement_assessment = agreement_record(requests, outputs)
             tokens = total_output_tokens(outputs, eos)
             expected_tokens = size * max_new_tokens
             if tokens != expected_tokens:
@@ -287,6 +296,9 @@ def sweep_baseline(
                     f"baseline row produced {tokens} tokens, expected {expected_tokens}"
                 )
             median_s = statistics.median(per_iter)
+            policy = build_system_evidence_record(
+                agreement=agreement_assessment, median_seconds=median_s, total_tokens=tokens
+            )
 
             profiler = TimingProfiler("cuda")
             profile_engine = InferenceEngine(
@@ -332,16 +344,13 @@ def sweep_baseline(
                 "context_length": context_length,
                 "workload_request_ids": [request.request_id for request in requests],
                 "reference_scope": "measured_workload_only",
-                "matches_reference": matches_reference,
                 "agreement": agreement,
                 "engine_kv_startup_seconds": engine_kv_startup_s,
                 "steady_state_median_seconds": median_s,
                 "steady_state_p95_seconds": p95(per_iter),
                 "steady_state_per_iter_seconds": per_iter,
                 "total_output_tokens": tokens,
-                "tokens_per_second": (
-                    tokens / median_s if matches_reference and median_s > 0 else None
-                ),
+                **policy,
                 "phase_profile": phase_profile,
                 "kv_pool": {
                     "block_size": BLOCK_SIZE,
@@ -380,20 +389,21 @@ def sweep_baseline(
             )
         )
         outputs = coverage_engine.run()
-        agreement, matches_reference = agreement_record([request], outputs)
+        agreement, agreement_assessment = agreement_record([request], outputs)
+        policy = build_reference_only_record(agreement_assessment)
         coverage_rows.append(
             {
                 "context_length": context_length,
                 "request_id": request.request_id,
                 "prompt": request.prompt,
-                "matches_reference": matches_reference,
                 "agreement": agreement,
+                **policy,
             }
         )
 
     coverage_by_context = {
         context_length: all(
-            bool(row["matches_reference"])
+            row["reference_status"] in QUALIFIED_REFERENCE_STATUSES
             for row in coverage_rows
             if row["context_length"] == context_length
         )
@@ -442,6 +452,7 @@ def sweep(
         run_hf_sequential_esme,
         tie_tolerant_agreement,
     )
+    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
@@ -490,20 +501,12 @@ def sweep(
         return {
             "system": system,
             "batch_size": size,
-            "matches_reference": agreement.all_ties_or_exact,
-            "agreement": {
-                "exact": agreement.exact,
-                "tie": agreement.tie,
-                "nontie": agreement.nontie,
-                "total": agreement.total,
-                "ties_sample": agreement.ties_sample,
-                "divergences_sample": agreement.divergences_sample,
-            },
+            "agreement": dataclasses.asdict(agreement),
             "median_seconds": median_s,
             "per_iter_seconds": per_iter,
             "total_output_tokens": tokens,
-            "tokens_per_second": (
-                tokens / median_s if agreement.all_ties_or_exact and median_s > 0 else None
+            **build_system_evidence_record(
+                agreement=agreement, median_seconds=median_s, total_tokens=tokens
             ),
         }
 
@@ -651,6 +654,7 @@ def sweep_flashinfer_compare(
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
     from llm_infer.benchmarks.report import total_output_tokens
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
@@ -722,20 +726,12 @@ def sweep_flashinfer_compare(
         return {
             "system": system,
             "batch_size": size,
-            "matches_reference": agreement.all_ties_or_exact,
-            "agreement": {
-                "exact": agreement.exact,
-                "tie": agreement.tie,
-                "nontie": agreement.nontie,
-                "total": agreement.total,
-                "ties_sample": agreement.ties_sample,
-                "divergences_sample": agreement.divergences_sample,
-            },
+            "agreement": dataclasses.asdict(agreement),
             "median_seconds": median_s,
             "per_iter_seconds": per_iter,
             "total_output_tokens": tokens,
-            "tokens_per_second": (
-                tokens / median_s if agreement.all_ties_or_exact and median_s > 0 else None
+            **build_system_evidence_record(
+                agreement=agreement, median_seconds=median_s, total_tokens=tokens
             ),
             "kv_bytes_per_token": kv_bytes_per_token,
         }

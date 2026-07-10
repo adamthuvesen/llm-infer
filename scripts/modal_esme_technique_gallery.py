@@ -136,7 +136,9 @@ def run_gallery(command: str) -> str:
             iters=1 if smoke else 3,
         )
     )
-    print(f"[gallery] prefix-caching done: {results[-1]['wall_speedup_on_vs_off']:.2f}x wall")
+    prefix_speedup = results[-1]["wall_speedup_on_vs_off"]
+    prefix_label = f"{prefix_speedup:.2f}x wall" if prefix_speedup is not None else "withheld"
+    print(f"[gallery] prefix-caching done: {prefix_label}")
 
     # 2. Chunked prefill: short chats decoding, then a burst of long prompts arrives.
     active_prompts = [chat_ids(p) for p in (DEFAULT_PROMPTS if smoke else HEADLINE_PROMPTS)]
@@ -205,8 +207,14 @@ def run_gallery(command: str) -> str:
             iters=1 if smoke else 3,
         )
     )
+    speculative_speedup = results[-1]["latency_speedup_on_vs_off"]
+    speculative_label = (
+        f"{speculative_speedup:.2f}x latency"
+        if speculative_speedup is not None
+        else "latency speedup withheld"
+    )
     print(
-        f"[gallery] speculative done: {results[-1]['latency_speedup_on_vs_off']:.2f}x latency, "
+        f"[gallery] speculative done: {speculative_label}, "
         f"{results[-1]['mean_tokens_per_verify_step']} tok/verify-step"
     )
 

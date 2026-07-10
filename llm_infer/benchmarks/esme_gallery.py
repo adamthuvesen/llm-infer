@@ -31,6 +31,12 @@ import torch
 
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, _time, reference_outputs
 from llm_infer.benchmarks.esme_three_way import EsmeAgreement, tie_tolerant_agreement
+from llm_infer.benchmarks.reference_policy import (
+    QUALIFIED_REFERENCE_STATUSES,
+    build_reference_only_record,
+    build_system_evidence_record,
+    reference_status,
+)
 from llm_infer.model.runtime import ModelRuntime
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
@@ -52,15 +58,37 @@ class GalleryTiming:
             return None
         return self.total_output_tokens / self.median_seconds
 
+    @property
+    def raw_tokens_per_second(self) -> float | None:
+        if self.median_seconds <= 0:
+            return None
+        return self.total_output_tokens / self.median_seconds
+
     def as_dict(self) -> dict[str, object]:
         return {
             "label": self.label,
             "median_seconds": self.median_seconds,
             "total_output_tokens": self.total_output_tokens,
-            "tokens_per_second": self.tokens_per_second,
-            "matches_reference": self.agreement.all_ties_or_exact,
             "agreement": _agreement_dict(self.agreement),
+            **build_system_evidence_record(
+                agreement=self.agreement,
+                median_seconds=self.median_seconds,
+                total_tokens=self.total_output_tokens,
+            ),
         }
+
+
+def _relative_speedup(
+    on: GalleryTiming, off: GalleryTiming
+) -> tuple[bool, float | None, float | None]:
+    raw = off.median_seconds / on.median_seconds if on.median_seconds > 0 else None
+    eligible = (
+        reference_status(on.agreement) in QUALIFIED_REFERENCE_STATUSES
+        and reference_status(off.agreement) in QUALIFIED_REFERENCE_STATUSES
+        and raw is not None
+        and raw > 0
+    )
+    return eligible, raw, raw if eligible else None
 
 
 def _agreement_dict(agreement: EsmeAgreement) -> dict[str, object]:
@@ -71,6 +99,9 @@ def _agreement_dict(agreement: EsmeAgreement) -> dict[str, object]:
         "total": agreement.total,
         "ties_sample": agreement.ties_sample,
         "divergences_sample": agreement.divergences_sample,
+        "review_required": agreement.review_required,
+        "failed": agreement.failed,
+        "numerical_evidence": agreement.numerical_evidence,
     }
 
 
@@ -150,6 +181,7 @@ def run_prefix_cache_on_off(
         timings.append(GalleryTiming(label, median_s, tokens, agreement))
 
     on, off = timings
+    relative_claim_eligible, raw_speedup, public_speedup = _relative_speedup(on, off)
     return {
         "experiment": "prefix-caching",
         "workload": {
@@ -160,9 +192,9 @@ def run_prefix_cache_on_off(
             "prefilled_prompt_tokens_off": len(prompt_ids) * num_siblings,
         },
         "rows": [t.as_dict() for t in timings],
-        "wall_speedup_on_vs_off": (
-            off.median_seconds / on.median_seconds if on.median_seconds > 0 else None
-        ),
+        "relative_claim_eligible": relative_claim_eligible,
+        "raw_wall_speedup_on_vs_off": raw_speedup,
+        "wall_speedup_on_vs_off": public_speedup,
     }
 
 
@@ -278,8 +310,8 @@ def run_chunked_prefill_latency(
                 "label": label,
                 **run,
                 "stall_vs_pre_arrival_step": stall,
-                "matches_reference": agreement.all_ties_or_exact,
                 "agreement": _agreement_dict(agreement),
+                **build_reference_only_record(agreement),
             }
         )
     return {
@@ -352,8 +384,8 @@ def run_preemption_starved_pool(
                 "wall_s": wall_s,
                 "completed_requests": len(outputs),
                 "total_output_tokens": tokens,
-                "matches_reference": agreement.all_ties_or_exact,
                 "agreement": _agreement_dict(agreement),
+                **build_reference_only_record(agreement),
             }
         )
     if preemption_count_on == 0:
@@ -433,6 +465,7 @@ def run_speculative_batch1(
     emitted = [len(event.token_ids or []) for event in speculative_steps]
 
     on, off = timings
+    relative_claim_eligible, raw_speedup, public_speedup = _relative_speedup(on, off)
     return {
         "experiment": "speculative-decoding",
         "workload": {
@@ -442,9 +475,9 @@ def run_speculative_batch1(
             "max_ngram_size": speculative.max_ngram_size,
         },
         "rows": [t.as_dict() for t in timings],
-        "latency_speedup_on_vs_off": (
-            off.median_seconds / on.median_seconds if on.median_seconds > 0 else None
-        ),
+        "relative_claim_eligible": relative_claim_eligible,
+        "raw_latency_speedup_on_vs_off": raw_speedup,
+        "latency_speedup_on_vs_off": public_speedup,
         "verify_steps": len(speculative_steps),
         "mean_tokens_per_verify_step": (sum(emitted) / len(emitted) if emitted else None),
     }
