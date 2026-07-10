@@ -225,6 +225,45 @@ def test_rejects_bad_manifest_format(tmp_path: Path) -> None:
         PretrainBundleModel.load(bundle)
 
 
+def test_rejects_unsupported_manifest_schema_version(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    manifest["schema_version"] = 2
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(PretrainBundleError, match="declares schema_version 2"):
+        PretrainBundleModel.load(bundle)
+
+
+def test_rejects_unsupported_weights_format_version(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    torch.save(
+        {
+            "format_version": 2,
+            "metadata": {"key_format": BUNDLE_FORMAT},
+            "state_dict": _tiny_state_dict(),
+        },
+        bundle / "weights.pt",
+    )
+
+    with pytest.raises(PretrainBundleError, match="declares format_version 2"):
+        PretrainBundleModel.load(bundle)
+
+
+def test_accepts_bundle_predating_version_fields(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    del manifest["schema_version"]
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    torch.save(
+        {"metadata": {"key_format": BUNDLE_FORMAT}, "state_dict": _tiny_state_dict()},
+        bundle / "weights.pt",
+    )
+
+    model = PretrainBundleModel.load(bundle)
+    assert model.config.vocab_size == VOCAB_SIZE
+
+
 def test_rejects_tokenizer_paths_outside_bundle(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
     (bundle / "manifest.json").write_text(
