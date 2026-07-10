@@ -136,6 +136,55 @@ def test_esme_paged_prefill_matches_reference_last_row(tiny_model: PretrainBundl
     assert table.length == len(token_ids)
 
 
+def test_esme_paged_ragged_prefill_matches_sequential_prefill(
+    tiny_model: PretrainBundleModel,
+) -> None:
+    prompts = [[1, 4, 7], [2], [3, 5, 8, 6, 9]]
+    block_size = 4
+
+    sequential_cache = _new_cache(tiny_model, block_size=block_size, num_blocks=32)
+    sequential_tables = [sequential_cache.new_request() for _ in prompts]
+    sequential_logits = torch.stack(
+        [
+            tiny_model.prefill(prompt, sequential_cache, table)
+            for prompt, table in zip(prompts, sequential_tables, strict=True)
+        ]
+    )
+
+    packed_cache = _new_cache(tiny_model, block_size=block_size, num_blocks=32)
+    packed_tables = [packed_cache.new_request() for _ in prompts]
+    packed_logits = tiny_model.prefill_many(prompts, packed_cache, packed_tables)
+
+    torch.testing.assert_close(packed_logits, sequential_logits, rtol=SYNTH_RTOL, atol=SYNTH_ATOL)
+    assert packed_logits.argmax(dim=-1).tolist() == sequential_logits.argmax(dim=-1).tolist()
+    assert [table.length for table in packed_tables] == [len(prompt) for prompt in prompts]
+
+    for layer in range(tiny_model.num_layers):
+        for prompt, sequential_table, packed_table in zip(
+            prompts, sequential_tables, packed_tables, strict=True
+        ):
+            sequential_kv = sequential_cache.read(sequential_table, layer, len(prompt))
+            packed_kv = packed_cache.read(packed_table, layer, len(prompt))
+            torch.testing.assert_close(packed_kv[0], sequential_kv[0])
+            torch.testing.assert_close(packed_kv[1], sequential_kv[1])
+
+
+def test_esme_paged_ragged_prefill_validates_inputs(tiny_model: PretrainBundleModel) -> None:
+    cache = _new_cache(tiny_model, block_size=4, num_blocks=16)
+
+    with pytest.raises(ValueError, match="at least one prompt"):
+        tiny_model.prefill_many([], cache, [])
+    with pytest.raises(ValueError, match="length mismatch"):
+        tiny_model.prefill_many([[1]], cache, [])
+    with pytest.raises(ValueError, match="token_ids must be non-empty"):
+        tiny_model.prefill_many([[]], cache, [cache.new_request()])
+
+    table = cache.new_request()
+    tiny_model.prefill([1], cache, table)
+    with pytest.raises(ValueError, match="expected empty tables"):
+        tiny_model.prefill_many([[2]], cache, [table])
+
+
 def test_esme_paged_batched_decode_matches_per_sequence_reference(
     tiny_model: PretrainBundleModel,
 ) -> None:

@@ -12,6 +12,8 @@ import math
 
 import torch
 
+from llm_infer.kernels.base import packed_prefill_lengths, validate_packed_prefill_inputs
+
 
 class TorchNaiveAttention:
     """Materialized-mask causal attention for one request.
@@ -81,6 +83,39 @@ class TorchNaiveAttention:
         keys = [chunk.transpose(0, 1).contiguous() for chunk in key.split(lengths)]
         values = [chunk.transpose(0, 1).contiguous() for chunk in value.split(lengths)]
         return self.forward_decode_batch(queries, keys, values)
+
+    def forward_prefill_batch_packed(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        """Split packed prompts and run causal attention without cross-request leakage."""
+        validate_packed_prefill_inputs(query, key, value, cu_seqlens, max_seqlen)
+        lengths = packed_prefill_lengths(
+            cu_seqlens,
+            total_tokens=query.shape[0],
+            max_seqlen=max_seqlen,
+        )
+        gqa_repeats = query.shape[1] // key.shape[1]
+        outputs = []
+        for query_chunk, key_chunk, value_chunk in zip(
+            query.split(lengths),
+            key.split(lengths),
+            value.split(lengths),
+            strict=True,
+        ):
+            expanded_key = key_chunk.repeat_interleave(gqa_repeats, dim=1)
+            expanded_value = value_chunk.repeat_interleave(gqa_repeats, dim=1)
+            output = self.forward(
+                query_chunk.transpose(0, 1),
+                expanded_key.transpose(0, 1),
+                expanded_value.transpose(0, 1),
+            )
+            outputs.append(output.transpose(0, 1))
+        return torch.cat(outputs, dim=0)
 
 
 def _causal_mask(q_len: int, kv_len: int, device: torch.device) -> torch.Tensor:

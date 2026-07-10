@@ -33,6 +33,8 @@ import math
 
 import torch
 
+from llm_infer.kernels.base import validate_packed_prefill_inputs
+
 # flash-attn only builds/imports on CUDA. Importing this module on a CPU-only host (the
 # dev Mac) must not explode at import time — only at construction, with a clear message.
 try:
@@ -134,6 +136,35 @@ class FlashAttnPagedAttention:
             max_seqlen_k=max_seqlen_k,
             dropout_p=0.0,
             softmax_scale=1.0 / math.sqrt(head_dim),
+            causal=True,
+        )
+        return out.to(out_dtype)
+
+    def forward_prefill_batch_packed(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        """Run one causal varlen call over packed prompts with native GQA K/V heads."""
+        validate_packed_prefill_inputs(query, key, value, cu_seqlens, max_seqlen)
+
+        out_dtype = query.dtype
+        q = query.contiguous().to(_KERNEL_DTYPE)
+        k = key.contiguous().to(_KERNEL_DTYPE)
+        v = value.contiguous().to(_KERNEL_DTYPE)
+        out = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            dropout_p=0.0,
+            softmax_scale=1.0 / math.sqrt(query.shape[2]),
             causal=True,
         )
         return out.to(out_dtype)

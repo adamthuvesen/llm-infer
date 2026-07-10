@@ -9,7 +9,7 @@ from typing import Literal
 
 import torch
 
-from llm_infer.kernels.base import AttentionBackend
+from llm_infer.kernels.base import AttentionBackend, PackedPrefillAttentionBackend
 from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
@@ -295,6 +295,7 @@ def _load_bundle_runtime(
             model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
         ),
         planned_decode=DENSE_CAPABILITIES.planned_decode,
+        batched_prefill=isinstance(model.backend, PackedPrefillAttentionBackend),
     )
     return ModelRuntime(
         backend_id=backend_id,
