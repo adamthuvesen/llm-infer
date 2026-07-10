@@ -199,7 +199,7 @@ metadata copy counts.
 
 ## Phase 2: Add Ragged Batched Prefill
 
-**Implementation complete; measurement paused at a useful checkpoint.** Phase 0 measured serial
+**Implementation complete; full A100 matrix measured; enabled by default.** Phase 0 measured serial
 prefill above the 20% selection bar at high batch sizes.
 
 ### Hypothesis
@@ -226,24 +226,40 @@ Relevant code:
 - [ ] Make mixed prefill/decode scheduling a separate experiment after isolated batched prefill
   passes.
 
-### A100 checkpoint
+### A100 results
 
-The packed path remains opt-in through `InferenceEngine(batched_prefill=True)`. A corrected
-same-container smoke run used one paired warmup and two alternating measured pairs on an A100-80GB.
-For a ragged batch of 8 with prompt lengths from 16 to 512 and 4 output tokens, it measured:
+The full matrix completed on 2026-07-10 on an A100-80GB with the resumable A/B harness. Raw
+evidence: `bench-results/esme-prefill-ab-20260710T113123.json` and
+`bench-results/esme-prefill-ab-rows.jsonl` — 24 rows, each cell 2 warmup plus 10 measured
+alternating pairs. The packed path (`InferenceEngine(batched_prefill=True)`) is now the default;
+serial prefill stays the reference and fallback.
 
-- 9.32x faster prefill device time: 371.3 ms to 39.8 ms.
-- 9.25x faster synchronized TTFT: 373.3 ms to 40.3 ms.
-- 5.85x faster end-to-end wall time: 401.4 ms to 68.6 ms.
-- Exact fp32-oracle classification for all 8 requests on both paths.
+Speedups (candidate vs. serial baseline):
 
-The full matrix was stopped at the requested checkpoint. Completed rows showed batch 1 within
-0.98x to 1.02x and exact, batch-8 TTFT improvements from 8.9x to 9.5x, and an exact batch-64,
-context-16 first-token row at 64.8x faster TTFT. Some 64-token batch-8 continuations were
-tie-tolerant and two were labeled divergent by the existing 0.1-logit rule. The run ended before
-it wrote raw JSON, so these partial rows are directional rather than durable benchmark evidence.
-Before enabling the path by default, rerun the remaining rows and inspect the first divergence as
-a numerical-quality question; do not add a serial or fp32 fallback solely to force token identity.
+- Batch 1: exact tokens with roughly 0% delta on all 8 rows — the serial fallback fires for a
+  single request, so baseline and candidate run the same path.
+- Batch 8: prefill/TTFT 8.9x to 9.5x across uniform 16/128/512 and the ragged mixture; end-to-end
+  1.52x to 1.55x at 64 output tokens.
+- Batch 64: TTFT 65.6x (ctx 16), 38.6x (ctx 128), 11.2x (ctx 512), and 24.9x (ragged); end-to-end
+  3.65x to 5.32x at 64 output tokens.
+
+All 1-token TTFT rows are exact for the candidate.
+
+### Divergence review
+
+Evidence: `bench-results/esme-prefill-divergence-20260710T112250.json`, `-113643.json`, and
+`-113908.json`. Every 64-token divergence is a deterministic near-tie: the same step and token
+pair recur across all repeats. The two rows the 0.1-logit rule flags — batch-8 uniform-128 at
+step 5 and uniform-512 at step 53 — have fp32 top-2 gaps of 0.142 and 0.146, with engine-side
+bf16 gaps of 0.125 and 0.031 (1 ulp at that magnitude). The serial baseline itself diverges from
+the fp32 oracle on other requests with engine-side gaps up to 0.094, and one request diverges
+identically in both modes (pure decode-path noise, unrelated to prefill packing). Packed-vs-serial
+prefill K/V agrees within 1-2 bf16 ulp per layer (max abs diff <= 0.26, mean ~0.007). Decoded text
+stays coherent on both paths.
+
+Conclusion: these are numerical ties amplified by reduction order, not an implementation error.
+Batched prefill is enabled by default with the serial path kept as fallback and reference. No
+serial or fp32 fallback was added to force token identity.
 
 ### Measurement matrix
 
