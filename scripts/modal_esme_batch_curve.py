@@ -167,6 +167,7 @@ def sweep_baseline(
         HEADLINE_PROMPTS,
         build_requests,
         requests_at_context_length,
+        single_request_prompt_coverage,
     )
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
     from llm_infer.benchmarks.report import total_output_tokens
@@ -329,6 +330,8 @@ def sweep_baseline(
                 "system": "llm_infer_persistent",
                 "batch_size": size,
                 "context_length": context_length,
+                "workload_request_ids": [request.request_id for request in requests],
+                "reference_scope": "measured_workload_only",
                 "matches_reference": matches_reference,
                 "agreement": agreement,
                 "engine_kv_startup_seconds": engine_kv_startup_s,
@@ -356,9 +359,55 @@ def sweep_baseline(
                 f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
             )
 
+    coverage_rows: list[dict[str, object]] = []
+    for context_length, request in single_request_prompt_coverage(
+        engine_runtime.tokenizer, tuple(context_lengths), HEADLINE_PROMPTS
+    ):
+        needed = math.ceil((len(request.prompt_ids) + max_new_tokens) / BLOCK_SIZE)
+        coverage_engine = InferenceEngine(
+            engine_runtime.model,
+            block_size=BLOCK_SIZE,
+            num_blocks=needed + 2,
+            device="cuda",
+            capabilities=engine_runtime.capabilities,
+        )
+        coverage_engine.add_request(
+            Request(
+                request.request_id,
+                list(request.prompt_ids),
+                max_new_tokens,
+                eos,
+            )
+        )
+        outputs = coverage_engine.run()
+        agreement, matches_reference = agreement_record([request], outputs)
+        coverage_rows.append(
+            {
+                "context_length": context_length,
+                "request_id": request.request_id,
+                "prompt": request.prompt,
+                "matches_reference": matches_reference,
+                "agreement": agreement,
+            }
+        )
+
+    coverage_by_context = {
+        context_length: all(
+            bool(row["matches_reference"])
+            for row in coverage_rows
+            if row["context_length"] == context_length
+        )
+        for context_length in context_lengths
+    }
+    for row in rows:
+        row["all_prompt_single_request_coverage_passed"] = coverage_by_context[
+            row["context_length"]
+        ]
+
     return json.dumps(
         {
             "rows": rows,
+            "single_request_prompt_coverage": coverage_rows,
             "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
             "attention_backend": type(engine_runtime.model.backend).__name__,
             "gpu": gpu_snapshot(),
@@ -865,6 +914,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         )
         record = {
             "rows": sweep_res["rows"],
+            "single_request_prompt_coverage": sweep_res["single_request_prompt_coverage"],
             "decode_graphs": sweep_res["decode_graphs"],
             "gpu": sweep_res["gpu"],
             "versions": sweep_res["versions"],

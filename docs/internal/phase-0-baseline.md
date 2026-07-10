@@ -2,8 +2,8 @@
 
 This is the decision record for Phase 0 of the
 [performance roadmap](performance-roadmap.md). The harness and evidence runs are complete. They
-found two correctness blockers: the engine's batch-8/context-768 row has a non-tie divergence,
-and seeded sampled serving fails batch invariance at batches 8, 64, and 256.
+found two numerical-contract gaps. One cached bf16 prompt differs from full recompute, and seeded
+sampling produces different valid continuations when the bf16 decode batch shape changes.
 
 A row reports speed only after the fp32 oracle accepts every request as exact or a traced bf16
 tie. Raw benchmark JSON is gitignored; this file is the curated record.
@@ -77,9 +77,14 @@ length; they are useful for scaling, not a natural-text workload.
 | 768 | 256 | 15.607 s | 15.794 s | 2,099.6 | 192 exact, 64 ties |
 
 The failing batch-8/context-768 request diverged at decode step 11. The fp32 oracle preferred
-token 458 over token 46 by 0.108 logits, outside the 0.1 tie rule. The same context passes at
-batches 1, 64, and 256, so this points to a batch-dependent numeric path. It needs a root-cause
-check before that workload can support a speed claim.
+token 458 over token 46 by 0.108 logits, outside the 0.1 tie rule. A focused probe found the same
+result when that prompt ran alone at batch 1; the matrix's batch-1 row had tested another prompt.
+Graphs, decode windows, attention backends, page planning, and KV layout all produced token 46.
+The difference accumulates in whole-model bf16 cached decode before the LM head. Batch 64 happens
+to choose token 458 because its low-precision matrix shapes differ. Matrix rows now state which
+prompts they measured and report the all-prompt single-request result separately. Do not treat the
+isolated failing prompt as correctness evidence, and do not add a slow fp32 fallback for one
+marginal token decision.
 
 Engine and KV-pool construction took 0.2–5.9 ms across the matrix. Graph capture took 58.0 s and
 was recorded separately. Model loading was outside both measurements. These costs must not be
@@ -137,15 +142,19 @@ Each request generates 128 tokens.
 | Greedy | 256 | 11.81/12.29 s | 0.02/612 ms | 1,480.9 | 2,560/2,560 pass |
 | Sampled | 256 | 11.82/12.08 s | 392/466 ms | — | **2,527/2,560 pass** |
 
-Greedy uses the fp32 full-recompute oracle with traced bf16 ties. Sampled uses a seeded
-single-request run with the same bf16 backend and page geometry, so it tests batching, HTTP
-dispatch, and per-request RNG invariance without claiming fp32 and bf16 sampling are identical.
-Any failing sampled row suppresses tok/s; raw observed rates remain diagnostic only.
+Greedy uses the fp32 full-recompute oracle with traced bf16 ties. The Phase 0 sampled gate used a
+seeded single-request continuation as an exact reference, so it suppressed every batch shape that
+crossed a categorical sampling boundary. A100 probes showed identical per-request RNG states and
+up to 0.25-logit bf16 differences before sampling. Exact tokens across batch shapes are therefore
+the wrong long-term contract for stochastic output. The historical table keeps its original
+suppression, while future sampled checks should require same-shape reproducibility, RNG isolation,
+and teacher-forced distribution comparisons.
 
 Greedy HTTP ITL is bursty because deferred eight-token windows deliver several tokens together:
 p50 is about 0.02–0.03 ms, while p95 grows from 52.7 ms at batch 1 to 612 ms at batch 256. Sampled
-requests do not use that fast path: even at batch 1, the accepted sampled row is 4.7x slower than
-greedy in output tok/s. Fix sampled correctness before using its timing to guide optimization.
+requests do not use that fast path: even at batch 1, the sampled row is 4.7x slower than greedy in
+output tok/s. That performance gap is useful diagnostic evidence even though the old exact-token
+gate withheld larger-batch sampled rates.
 
 The first HTTP run was discarded. Tracing disabled deferred decode windows, a step observer
 duplicated token materialization, warmups used fresh servers, and httpx's default 100-connection

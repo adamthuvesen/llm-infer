@@ -126,6 +126,22 @@ def requests_at_context_length(
     return resized
 
 
+def single_request_prompt_coverage(
+    tokenizer: object,
+    context_lengths: tuple[int, ...],
+    prompts: tuple[str, ...] = HEADLINE_PROMPTS,
+) -> list[tuple[int, EsmeBenchRequest]]:
+    """Build every prompt as its own request at every synthetic context length."""
+    if not context_lengths:
+        raise ValueError("context_lengths must not be empty")
+    base_requests = build_requests(tokenizer, len(prompts), prompts)
+    return [
+        (context_length, request)
+        for context_length in context_lengths
+        for request in requests_at_context_length(base_requests, context_length)
+    ]
+
+
 def reference_outputs(
     model: CausalLMBackend,
     requests: list[EsmeBenchRequest],

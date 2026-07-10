@@ -137,6 +137,24 @@ def test_seed_is_reproducible() -> None:
     assert torch.equal(a, b)
 
 
+def test_same_rng_state_can_sample_different_close_logits() -> None:
+    """A fixed seed reproduces a draw from fixed logits, not across changed distributions."""
+    params = SamplingParams(temperature=1.0, seed=17)
+    serial_generator = _gen(17)
+    batched_generator = _gen(17)
+
+    serial = sample_row(
+        torch.tensor([0.0, 0.468]), params, generated=[], generator=serial_generator
+    )
+    batched = sample_row(
+        torch.tensor([0.0, 0.469]), params, generated=[], generator=batched_generator
+    )
+
+    assert int(serial) == 0
+    assert int(batched) == 1
+    assert torch.equal(serial_generator.get_state(), batched_generator.get_state())
+
+
 def test_different_seeds_diverge() -> None:
     """Different seeds explore different sampled continuations."""
     logits = torch.randn(4096, generator=_gen(2))
