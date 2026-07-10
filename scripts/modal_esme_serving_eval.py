@@ -46,7 +46,11 @@ def _parse_batch_sizes(raw: str) -> list[int]:
     timeout=3 * 60 * 60,
 )
 def measure_serving(
-    batch_sizes: list[int], max_new_tokens: int, warmup_runs: int, measured_runs: int
+    batch_sizes: list[int],
+    max_new_tokens: int,
+    warmup_runs: int,
+    measured_runs: int,
+    grouped: bool = False,
 ) -> str:
     """Run greedy and sampled HTTP rows in one A100 process."""
     import asyncio
@@ -77,9 +81,14 @@ def measure_serving(
     capture_s = enable_decode_graphs_if_cuda(runtime.model, CAPTURE_SIZES)
     rows: list[dict[str, object]] = []
     for batch_size in batch_sizes:
+        # Grouped runners are per-engine and exact-batch; capture only this workload's
+        # steady batch so per-workload engine builds stay cheap. Ramp-up windows below the
+        # steady batch fall back to the piecewise buckets, which is the serving reality.
         for workload in phase0_http_workloads(
             batch_size,
             max_new_tokens=max_new_tokens,
+            grouped_decode_graphs=grouped,
+            grouped_capture_sizes=(batch_size,) if grouped else None,
         ):
             reference_runtime = (
                 oracle_runtime if workload.requests[0].sampling.is_greedy else runtime
@@ -111,6 +120,7 @@ def measure_serving(
                 "capture_sizes": list(CAPTURE_SIZES),
                 "capture_s": capture_s,
             },
+            "grouped_decode_graphs": grouped,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
             "attention_backend": type(runtime.model.backend).__name__,
@@ -125,6 +135,7 @@ def main(
     warmup_runs: int = 2,
     measured_runs: int = 10,
     bundle_path: str = "",
+    grouped: bool = False,
 ) -> None:
     sizes = _parse_batch_sizes(batch_sizes)
     if max_new_tokens < 2:
@@ -138,7 +149,9 @@ def main(
         local_bundle_path(bundle_path),
         label="esme-serving",
     )
-    record = json.loads(measure_serving.remote(sizes, max_new_tokens, warmup_runs, measured_runs))
+    record = json.loads(
+        measure_serving.remote(sizes, max_new_tokens, warmup_runs, measured_runs, grouped)
+    )
     record["config"] = {
         "model": "Esme-214M-Chat",
         "batch_sizes": sizes,
@@ -165,6 +178,7 @@ def main(
     output_dir = REPO_ROOT / "bench-results"
     output_dir.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    output_path = output_dir / f"esme-serving-baseline-{stamp}.json"
+    label = "esme-serving-grouped" if grouped else "esme-serving-baseline"
+    output_path = output_dir / f"{label}-{stamp}.json"
     output_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"[esme-serving] wrote {output_path}")
