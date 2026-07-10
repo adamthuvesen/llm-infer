@@ -181,6 +181,20 @@ def test_enabled_batched_prefill_routes_once_and_preserves_step_semantics() -> N
     assert decoded[0].token_source == "prefill"
 
 
+def test_batched_prefill_is_the_default() -> None:
+    """No explicit flag: an eligible batch routes through prefill_many (enabled by default)."""
+    model = BatchedPrefillModel()
+
+    _run_step(
+        model,
+        batched_prefill=None,
+        capabilities=_capabilities(batched_prefill=True),
+    )
+
+    assert model.prefill_many_calls == [[[1, 2], [3, 4, 5]]]
+    assert model.prefill_calls == []
+
+
 @pytest.mark.parametrize(
     (
         "reason",
@@ -192,15 +206,6 @@ def test_enabled_batched_prefill_routes_once_and_preserves_step_semantics() -> N
         "preemption",
     ),
     [
-        (
-            "default-off",
-            BatchedPrefillModel,
-            None,
-            _capabilities(batched_prefill=True),
-            _requests,
-            None,
-            False,
-        ),
         (
             "explicit-off",
             BatchedPrefillModel,

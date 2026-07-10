@@ -64,7 +64,7 @@ class InferenceEngine(
         trace_clock: Callable[[], float] | None = None,
         capabilities: BackendCapabilities | None = None,
         decode_window_size: int = 8,
-        batched_prefill: bool = False,
+        batched_prefill: bool = True,
     ) -> None:
         if prefill_chunk_size is not None and prefill_chunk_size < 1:
             raise ValueError(f"prefill_chunk_size must be >= 1 when set; got {prefill_chunk_size}")
