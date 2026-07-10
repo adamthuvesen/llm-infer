@@ -43,8 +43,8 @@ class EngineOwnedGroupedDecodeGraphRunner:
     ) -> None:
         if mode not in ("eager", "graph"):
             raise ValueError(f"mode must be 'eager' or 'graph'; got {mode!r}")
-        if batch_size not in (1, 8):
-            raise ValueError(f"grouped probe supports exact batches 1 and 8; got {batch_size}")
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive; got {batch_size}")
         if grouped_layers not in (2, 4):
             raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
         if model.num_layers < grouped_layers:
