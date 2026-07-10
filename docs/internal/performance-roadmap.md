@@ -14,9 +14,9 @@ the reference check reports no tok/s.
 
 | Phase | Work | Main result | Status |
 | ---: | --- | --- | --- |
-| 0 | Fix the measurement baseline | Batch-1, phase, serving, and mature-engine evidence | Complete; blockers found |
-| Gate | Fix batch-dependent correctness | Restore greedy long-context and sampled batch parity | Next |
-| 2 | Batch prefill | Better TTFT and prompt throughput under burst admission | After gate |
+| 0 | Fix the measurement baseline | Batch-1, phase, serving, and mature-engine evidence | Complete; bottleneck selected |
+| Gate | Clarify numerical contracts | Separate deterministic greedy from stochastic sampling | Complete |
+| 2 | Batch prefill | Better TTFT and prompt throughput under burst admission | Built; A/B checkpoint |
 | 1 | Remove direct-page planning overhead | Less metadata work on every decode token | Deprioritized |
 | 3 | Reduce CUDA graph boundaries | Lower batch-1 and low-batch decode latency | Pending |
 | 4 | Fuse measured hot operations | Fewer kernels and larger GEMMs | Pending |
@@ -26,8 +26,11 @@ the reference check reports no tok/s.
 
 Apply these rules to every phase:
 
-1. Match the fp32 reference before timing. Exact tokens are required unless the first
-   divergence is a traced bf16 tie under the documented rule.
+1. Deterministic greedy rows match the fp32 reference before they report speed. Exact tokens are
+   required unless the first divergence is a traced bf16 tie under the documented rule. Sampled
+   rows use same-shape seeded replay, per-request RNG isolation, and teacher-forced distribution
+   checks; cross-shape exact tokens are not required. Label sampled timing diagnostic until those
+   checks exist for the workload.
 2. Run A/B variants back to back in one container. Cross-container raw tok/s can vary by about
    20% on the current Modal setup.
 3. Report prefill, decode, time to first token (TTFT), inter-token latency (ITL), and end-to-end
@@ -36,8 +39,8 @@ Apply these rules to every phase:
    timing.
 5. Keep a change only when it clears the phase's success criteria. The normal rollback bar is a
    10% same-run improvement on the workload the change targets.
-6. Record token counts beside tok/s. Accepted bf16 ties can change the continuation length and
-   bias close comparisons.
+6. Record token counts beside tok/s. Numerical ties and stochastic continuations can change output
+   length and bias close comparisons.
 
 ## Starting Point
 
@@ -126,13 +129,14 @@ and KV-pool construction.
 ### Result
 
 Phase 0 selects ragged batched prefill as the first performance experiment. Serial prefill clearly
-clears the 20% decision bar at batches 64 and 256; page planning does not. Before performance work
-starts, fix or explain both confirmed correctness failures:
+clears the 20% decision bar at batches 64 and 256; page planning does not. The two numerical
+findings change benchmark coverage and wording, not the production execution path:
 
-1. Greedy batch 8 at context 768 has one non-tie divergence, although batches 1, 64, and 256 pass
-   at the same context length.
-2. Seeded sampled serving matches its single-request reference at batch 1 but fails the gate at
-   batches 8, 64, and 256.
+1. The context-768 `esme-001` prompt differs between bf16 cached decode and full recompute at both
+   batch 1 and batch 8. Add all-prompt single-request coverage and keep affected speed rows blank.
+2. Seeded sampled output keeps independent RNG state, but batch-shaped bf16 logits can produce a
+   different valid draw. Check same-shape replay and distributions instead of forcing serial
+   decode to preserve one continuation.
 
 See [phase-0-baseline.md](phase-0-baseline.md) for the measurements and timing caveats.
 
@@ -195,8 +199,8 @@ metadata copy counts.
 
 ## Phase 2: Add Ragged Batched Prefill
 
-**First performance phase after the correctness gate.** Phase 0 measured serial prefill above the
-20% selection bar from batch 8 upward.
+**Implementation complete; measurement paused at a useful checkpoint.** Phase 0 measured serial
+prefill above the 20% selection bar at high batch sizes.
 
 ### Hypothesis
 
@@ -213,14 +217,33 @@ Relevant code:
 
 ### Work
 
-- [ ] Add a ragged batch-prefill contract to the model backend.
-- [ ] Pack prompt tokens and request boundaries without padding to the longest prompt.
-- [ ] Write each request's K/V into its own page table.
-- [ ] Use native GQA in the fast prefill attention path.
-- [ ] Keep sequential prefill as the reference and fallback.
-- [ ] Preserve whole-prompt and chunked-prefill scheduling policies.
+- [x] Add a ragged batch-prefill contract to the model backend.
+- [x] Pack prompt tokens and request boundaries without padding to the longest prompt.
+- [x] Write each request's K/V into its own page table.
+- [x] Use native GQA in the fast prefill attention path.
+- [x] Keep sequential prefill as the reference and fallback.
+- [x] Preserve whole-prompt and chunked-prefill scheduling policies.
 - [ ] Make mixed prefill/decode scheduling a separate experiment after isolated batched prefill
   passes.
+
+### A100 checkpoint
+
+The packed path remains opt-in through `InferenceEngine(batched_prefill=True)`. A corrected
+same-container smoke run used one paired warmup and two alternating measured pairs on an A100-80GB.
+For a ragged batch of 8 with prompt lengths from 16 to 512 and 4 output tokens, it measured:
+
+- 9.32x faster prefill device time: 371.3 ms to 39.8 ms.
+- 9.25x faster synchronized TTFT: 373.3 ms to 40.3 ms.
+- 5.85x faster end-to-end wall time: 401.4 ms to 68.6 ms.
+- Exact fp32-oracle classification for all 8 requests on both paths.
+
+The full matrix was stopped at the requested checkpoint. Completed rows showed batch 1 within
+0.98x to 1.02x and exact, batch-8 TTFT improvements from 8.9x to 9.5x, and an exact batch-64,
+context-16 first-token row at 64.8x faster TTFT. Some 64-token batch-8 continuations were
+tie-tolerant and two were labeled divergent by the existing 0.1-logit rule. The run ended before
+it wrote raw JSON, so these partial rows are directional rather than durable benchmark evidence.
+Before enabling the path by default, rerun the remaining rows and inspect the first divergence as
+a numerical-quality question; do not add a serial or fp32 fallback solely to force token identity.
 
 ### Measurement matrix
 
