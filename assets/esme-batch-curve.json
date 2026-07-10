@@ -3,7 +3,6 @@
     {
       "system": "llm_infer",
       "batch_size": 8,
-      "matches_reference": true,
       "agreement": {
         "exact": 5,
         "tie": 3,
@@ -42,12 +41,16 @@
         "peak_used_blocks": 12,
         "peak_kv_bytes": 47185920,
         "kv_bytes_per_token": 30720
-      }
+      },
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 658.5921674771322
     },
     {
       "system": "llm_infer",
       "batch_size": 16,
-      "matches_reference": true,
       "agreement": {
         "exact": 4,
         "tie": 12,
@@ -86,12 +89,16 @@
         "peak_used_blocks": 24,
         "peak_kv_bytes": 94371840,
         "kv_bytes_per_token": 30720
-      }
+      },
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 1140.0219082447907
     },
     {
       "system": "llm_infer",
       "batch_size": 32,
-      "matches_reference": true,
       "agreement": {
         "exact": 8,
         "tie": 24,
@@ -130,12 +137,16 @@
         "peak_used_blocks": 48,
         "peak_kv_bytes": 188743680,
         "kv_bytes_per_token": 30720
-      }
+      },
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 1844.936764810281
     },
     {
       "system": "llm_infer",
       "batch_size": 64,
-      "matches_reference": true,
       "agreement": {
         "exact": 16,
         "tie": 48,
@@ -174,12 +185,16 @@
         "peak_used_blocks": 96,
         "peak_kv_bytes": 377487360,
         "kv_bytes_per_token": 30720
-      }
+      },
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 2603.3540469014506
     },
     {
       "system": "llm_infer",
       "batch_size": 128,
-      "matches_reference": true,
       "agreement": {
         "exact": 64,
         "tie": 64,
@@ -218,12 +233,16 @@
         "peak_used_blocks": 192,
         "peak_kv_bytes": 754974720,
         "kv_bytes_per_token": 30720
-      }
+      },
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 3275.460206711394
     },
     {
       "system": "llm_infer",
       "batch_size": 256,
-      "matches_reference": true,
       "agreement": {
         "exact": 96,
         "tie": 160,
@@ -262,12 +281,16 @@
         "peak_used_blocks": 384,
         "peak_kv_bytes": 1509949440,
         "kv_bytes_per_token": 30720
-      }
+      },
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 3776.797992507003
     },
     {
       "system": "hf_sequential",
       "batch_size": 8,
-      "matches_reference": true,
       "agreement": {
         "exact": 3,
         "tie": 5,
@@ -300,12 +323,16 @@
       ],
       "total_output_tokens": 1304,
       "tokens_per_second": 39.402125306795135,
-      "flatness_check": false
+      "flatness_check": false,
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 39.402125306795135
     },
     {
       "system": "hf_sequential",
       "batch_size": 16,
-      "matches_reference": true,
       "agreement": {
         "exact": 6,
         "tie": 10,
@@ -336,12 +363,16 @@
       ],
       "total_output_tokens": 2608,
       "tokens_per_second": 39.623653198845666,
-      "flatness_check": true
+      "flatness_check": true,
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 39.623653198845666
     },
     {
       "system": "hf_sequential",
       "batch_size": 32,
-      "matches_reference": true,
       "agreement": {
         "exact": 12,
         "tie": 20,
@@ -372,12 +403,16 @@
       ],
       "total_output_tokens": 5216,
       "tokens_per_second": 39.717470764652425,
-      "flatness_check": true
+      "flatness_check": true,
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 39.717470764652425
     },
     {
       "system": "hf_sequential",
       "batch_size": 64,
-      "matches_reference": true,
       "agreement": {
         "exact": 24,
         "tie": 40,
@@ -408,12 +443,16 @@
       ],
       "total_output_tokens": 10432,
       "tokens_per_second": 39.3430591446757,
-      "flatness_check": true
+      "flatness_check": true,
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 39.3430591446757
     },
     {
       "system": "hf_sequential",
       "batch_size": 128,
-      "matches_reference": true,
       "agreement": {
         "exact": 48,
         "tie": 80,
@@ -444,12 +483,16 @@
       ],
       "total_output_tokens": 20864,
       "tokens_per_second": 39.49472225961495,
-      "flatness_check": true
+      "flatness_check": true,
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 39.49472225961495
     },
     {
       "system": "hf_sequential",
       "batch_size": 256,
-      "matches_reference": true,
       "agreement": {
         "exact": 96,
         "tie": 160,
@@ -480,7 +523,12 @@
       ],
       "total_output_tokens": 41728,
       "tokens_per_second": 39.459355264917455,
-      "flatness_check": true
+      "flatness_check": true,
+      "policy_version": 2,
+      "reference_status": "accepted_numerical",
+      "parity_status": "not_applicable",
+      "headline_eligible": true,
+      "raw_tokens_per_second": 39.459355264917455
     }
   ],
   "kv_evidence": {

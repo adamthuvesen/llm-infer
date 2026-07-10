@@ -16,11 +16,19 @@ PUBLIC_BENCHMARK_DOC = ROOT / "docs" / "benchmark.md"
 PLOT_SCRIPT = ROOT / "scripts" / "plot_benchmark_curve.py"
 EXPECTED_BATCHES = (8, 16, 32, 64, 128, 256)
 PLOTTED_SYSTEMS = ("llm_infer", "hf_sequential")
+QUALIFIED_REFERENCE_STATUSES = frozenset({"exact", "accepted_numerical"})
+
+
+def _record_rows(record: dict[str, object]) -> object:
+    rows = record.get("rows")
+    if rows is None and isinstance(record.get("result"), dict):
+        rows = record["result"].get("rows")
+    return rows
 
 
 def _failures() -> list[str]:
     record = json.loads(CURVE_RECORD.read_text(encoding="utf-8"))
-    rows = record.get("rows")
+    rows = _record_rows(record)
     if not isinstance(rows, list):
         return [f"{CURVE_RECORD}: expected top-level rows list"]
 
@@ -30,10 +38,20 @@ def _failures() -> list[str]:
         system = row.get("system")
         if system in by_system:
             by_system[system].append(row)
-        if row.get("matches_reference") is False and row.get("tokens_per_second") is not None:
+        if row.get("policy_version") != 2:
             errors.append(
-                f"{CURVE_RECORD}: {system} batch={row.get('batch_size')} reports tok/s "
-                "despite failed reference agreement"
+                f"{CURVE_RECORD}: {system} batch={row.get('batch_size')} does not declare "
+                "policy_version 2"
+            )
+        if not isinstance(row.get("headline_eligible"), bool):
+            errors.append(
+                f"{CURVE_RECORD}: {system} batch={row.get('batch_size')} does not declare "
+                "headline_eligible"
+            )
+        if row.get("headline_eligible") is not True and row.get("tokens_per_second") is not None:
+            errors.append(
+                f"{CURVE_RECORD}: {system} batch={row.get('batch_size')} reports public tok/s "
+                "without headline eligibility"
             )
 
     for system, system_rows in by_system.items():
@@ -44,8 +62,10 @@ def _failures() -> list[str]:
             )
         for row in system_rows:
             batch = row.get("batch_size")
-            if row.get("matches_reference") is not True:
+            if row.get("reference_status") not in QUALIFIED_REFERENCE_STATUSES:
                 errors.append(f"{CURVE_RECORD}: {system} batch={batch} is not reference-gated")
+            if row.get("headline_eligible") is not True:
+                errors.append(f"{CURVE_RECORD}: {system} batch={batch} is not headline-eligible")
             if row.get("tokens_per_second") is None:
                 errors.append(f"{CURVE_RECORD}: {system} batch={batch} has no tok/s")
             agreement = row.get("agreement", {})

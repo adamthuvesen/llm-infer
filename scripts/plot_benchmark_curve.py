@@ -46,6 +46,16 @@ CARD_WIDTH = 920
 CARD_HEIGHT = 560
 
 
+def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
+    """Read the legacy flat rows or the policy-v2 result envelope."""
+    rows = record.get("rows")
+    if rows is None and isinstance(record.get("result"), dict):
+        rows = record["result"].get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"{path}: expected a rows list")
+    return rows
+
+
 def load_rows(path: Path) -> dict[str, list[dict]]:
     """Plotted rows per system, sorted by batch size; a diverged (ungated) row is a hard error.
 
@@ -55,11 +65,16 @@ def load_rows(path: Path) -> dict[str, list[dict]]:
     """
     record = json.loads(path.read_text(encoding="utf-8"))
     by_system: dict[str, list[dict]] = {"llm_infer": [], "hf_sequential": []}
-    for row in record["rows"]:
+    for row in _record_rows(record, path):
         system = row["system"]
         if system not in by_system:
             continue
-        if row["tokens_per_second"] is None:
+        if row.get("policy_version") != 2 or row.get("headline_eligible") is not True:
+            raise ValueError(
+                f"{path}: {system} batch={row['batch_size']} is not a headline-eligible "
+                "policy-v2 row"
+            )
+        if row.get("tokens_per_second") is None:
             raise ValueError(
                 f"{path}: {system} batch={row['batch_size']} reports no tok/s "
                 "(reference gate failed); the figure only plots gated rows"
