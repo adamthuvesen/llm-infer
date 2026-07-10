@@ -365,9 +365,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             row["median_seconds"] = vllm_res["median_seconds"]
             tokens = main_res["vllm_total_output_tokens"]
             raw_tps = (
-                tokens / vllm_res["median_seconds"]
-                if vllm_res["median_seconds"] > 0
-                else None
+                tokens / vllm_res["median_seconds"] if vllm_res["median_seconds"] > 0 else None
             )
             # Literal set: the local modal-run client has no torch, so it cannot import
             # llm_infer.benchmarks.reference_policy here.

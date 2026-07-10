@@ -163,9 +163,7 @@ def validate_packed_prefill_inputs(
             f"got shape {tuple(cu_seqlens.shape)}"
         )
     if cu_seqlens.dtype != torch.int32:
-        raise ValueError(
-            f"packed prefill cu_seqlens must have dtype int32; got {cu_seqlens.dtype}"
-        )
+        raise ValueError(f"packed prefill cu_seqlens must have dtype int32; got {cu_seqlens.dtype}")
     if cu_seqlens.device != query.device:
         raise ValueError(
             "packed prefill cu_seqlens must be on the same device as query/key/value; "

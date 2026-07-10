@@ -232,9 +232,7 @@ class PagedKVCache:
 
         cu_seqlens: torch.Tensor | None = None
         if include_packed:
-            cu_seqlens = torch.zeros(
-                len(lengths) + 1, dtype=torch.int32, device=self.key.device
-            )
+            cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.key.device)
             cu_seqlens[1:] = torch.as_tensor(
                 lengths, dtype=torch.int32, device=self.key.device
             ).cumsum(0)
@@ -262,8 +260,7 @@ class PagedKVCache:
         for table, length, page_count in zip(tables, lengths, page_counts, strict=True):
             if page_count > len(table.blocks):
                 raise ValueError(
-                    f"table has {len(table.blocks)} blocks but length {length} needs "
-                    f"{page_count}"
+                    f"table has {len(table.blocks)} blocks but length {length} needs {page_count}"
                 )
             indices_host.extend(table.blocks[:page_count])
             indptr_host.append(indptr_host[-1] + page_count)

@@ -975,11 +975,7 @@ def benchmark_mixed_load(
         all_requests = [*steady, *burst]
 
         for pair_index in range(warmup):
-            order = (
-                ("baseline", "candidate")
-                if pair_index % 2 == 0
-                else ("candidate", "baseline")
-            )
+            order = ("baseline", "candidate") if pair_index % 2 == 0 else ("candidate", "baseline")
             for mode in order:
                 run_mixed_once(steady, burst, batched_prefill=modes[mode])
 
@@ -988,11 +984,7 @@ def benchmark_mixed_load(
         outputs_by_mode: dict[str, dict[str, list[int]]] = {}
         pair_orders: list[list[str]] = []
         for pair_index in range(iters):
-            order = (
-                ("baseline", "candidate")
-                if pair_index % 2 == 0
-                else ("candidate", "baseline")
-            )
+            order = ("baseline", "candidate") if pair_index % 2 == 0 else ("candidate", "baseline")
             pair_orders.append(list(order))
             for order_position, mode in enumerate(order):
                 measured = run_mixed_once(steady, burst, batched_prefill=modes[mode])
@@ -1011,8 +1003,7 @@ def benchmark_mixed_load(
                         "burst_prompt_tokens_total": measured["burst_prompt_tokens_total"],
                         "run_summary": summary,
                         "itl_splits": {
-                            request_id: splits[request_id].as_dict()
-                            for request_id in steady_ids
+                            request_id: splits[request_id].as_dict() for request_id in steady_ids
                         },
                         "burst_ttfts_ms": measured["burst_ttfts_ms"],
                         "step_records": measured["step_records"],
@@ -1032,11 +1023,15 @@ def benchmark_mixed_load(
             for mode in modes
         }
         direct_parity = outputs_by_mode["candidate"] == outputs_by_mode["baseline"]
-        public_aggregate = aggregate if direct_parity else {
-            "baseline": aggregate["baseline"],
-            "candidate": aggregate["candidate"],
-            "candidate_vs_baseline": None,
-        }
+        public_aggregate = (
+            aggregate
+            if direct_parity
+            else {
+                "baseline": aggregate["baseline"],
+                "candidate": aggregate["candidate"],
+                "candidate_vs_baseline": None,
+            }
+        )
         row = {
             "policy_version": 2,
             "burst_size": burst_size,
@@ -1159,9 +1154,7 @@ def diagnose_prefill_divergence(
     )
 
     def first_diff(fast: list[int], golden: list[int]) -> int | None:
-        return next(
-            (i for i, (f, g) in enumerate(zip(fast, golden, strict=False)) if f != g), None
-        )
+        return next((i for i, (f, g) in enumerate(zip(fast, golden, strict=False)) if f != g), None)
 
     def margin_fields(logits: torch.Tensor, fast_token: int, golden_token: int) -> dict[str, float]:
         values = logits.float()
@@ -1288,9 +1281,7 @@ def diagnose_prefill_divergence(
             table = tables[request_id]
             logits = prefill_logits[request_id]
         else:
-            cache = new_replay_cache(
-                math.ceil((len(prompt_ids) + step_index + 1) / BLOCK_SIZE) + 2
-            )
+            cache = new_replay_cache(math.ceil((len(prompt_ids) + step_index + 1) / BLOCK_SIZE) + 2)
             table = cache.new_request()
             logits = model.prefill(prompt_ids, cache, table)
         for t in range(1, step_index + 1):
@@ -1607,9 +1598,7 @@ def main(
             rows_log.flush()
 
     # Rebuild from the full log (old plus new) so a resumed run emits every row it ever measured.
-    record = assemble_final_record(
-        parse_event_lines(rows_path.read_text(encoding="utf-8")), config
-    )
+    record = assemble_final_record(parse_event_lines(rows_path.read_text(encoding="utf-8")), config)
     stamp = time.strftime("%Y%m%dT%H%M%S")
     out_path = out_dir / f"esme-{command}-{stamp}.json"
     out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")

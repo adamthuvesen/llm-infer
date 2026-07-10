@@ -73,9 +73,7 @@ class FlashInferPagedAttention:
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
-        return self._packed.forward_prefill_batch_packed(
-            query, key, value, cu_seqlens, max_seqlen
-        )
+        return self._packed.forward_prefill_batch_packed(query, key, value, cu_seqlens, max_seqlen)
 
     def plan_decode_batch_paged(
         self,
@@ -88,8 +86,7 @@ class FlashInferPagedAttention:
     ) -> None:
         if dtype not in (torch.float16, torch.bfloat16):
             raise RuntimeError(
-                "FlashInferPagedAttention needs a fp16/bf16 paged KV cache; "
-                f"got {dtype}"
+                f"FlashInferPagedAttention needs a fp16/bf16 paged KV cache; got {dtype}"
             )
         wrapper = self._ensure_wrapper(page_plan.indptr.device)
         wrapper.plan(

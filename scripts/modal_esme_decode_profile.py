@@ -773,9 +773,7 @@ def flashinfer_graph_probe() -> str:
             "reserved": torch.cuda.memory_reserved(),
         }
 
-        reference_workspace = torch.zeros(
-            128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-        )
+        reference_workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
         ordinary_wrapper = wrapper_class(
             reference_workspace,
             "NHD",
@@ -812,9 +810,7 @@ def flashinfer_graph_probe() -> str:
             torch.cuda.synchronize()
             difference = (graph_output.float() - reference_output.float()).abs()
             max_error = float(difference.max().item())
-            is_close = bool(
-                torch.allclose(graph_output, reference_output, rtol=1e-2, atol=1e-2)
-            )
+            is_close = bool(torch.allclose(graph_output, reference_output, rtol=1e-2, atol=1e-2))
             comparisons.append(
                 {
                     "length": length,
@@ -891,9 +887,7 @@ def flashinfer_graph_probe() -> str:
                     "graph_replay": {
                         "replays": 4,
                         "cuda_graph_launch": sum(
-                            event.count
-                            for event in replay_events
-                            if event.key == "cudaGraphLaunch"
+                            event.count for event in replay_events if event.key == "cudaGraphLaunch"
                         ),
                         "cuda_launch_kernel": sum(
                             event.count
@@ -1041,8 +1035,7 @@ def grouped_layer_ab(
             runtime = runtimes[label]
             requests = requests_by_mode[label]
             needed = sum(
-                math.ceil((len(request.prompt_ids) + max_new_tokens) / 64)
-                for request in requests
+                math.ceil((len(request.prompt_ids) + max_new_tokens) / 64) for request in requests
             )
             return InferenceEngine(
                 runtime.model,
@@ -1091,9 +1084,7 @@ def grouped_layer_ab(
                 outputs[request_id].extend(int(token) for token in tokens)
             if label == candidate_label and candidate_runner is None:
                 tables = [request.block_table for request in live_requests]
-                capture_plan = runtime.model.open_decode_window(
-                    engine.cache, tables, budget=8
-                )
+                capture_plan = runtime.model.open_decode_window(engine.cache, tables, budget=8)
                 if capture_plan is None:
                     raise RuntimeError("two-layer capture could not open a planned window")
                 candidate_start = time.perf_counter()
@@ -1121,9 +1112,7 @@ def grouped_layer_ab(
 
         for pair in range(warmup_pairs + measured_pairs):
             order = (
-                ("piecewise", candidate_label)
-                if pair % 2 == 0
-                else (candidate_label, "piecewise")
+                ("piecewise", candidate_label) if pair % 2 == 0 else (candidate_label, "piecewise")
             )
             for label in order:
                 elapsed, tokens, outputs = decode_once(label)
@@ -1133,7 +1122,7 @@ def grouped_layer_ab(
                     last_outputs[label] = outputs
 
         launch_profiles: dict[str, dict[str, object]] = {}
-        for label, engine in (() if correctness_only else engines.items()):
+        for label, engine in () if correctness_only else engines.items():
             requests = requests_by_mode[label]
             for request in requests:
                 engine.add_request(
@@ -1261,8 +1250,7 @@ def grouped_layer_ab(
                 (
                     item
                     for item in agreements[candidate_label].numerical_evidence
-                    if item.get("request") == target_request
-                    and item.get("step") == target_step
+                    if item.get("request") == target_request and item.get("step") == target_step
                 ),
                 None,
             )
@@ -1298,8 +1286,7 @@ def grouped_layer_ab(
             )
         else:
             raw_decode_median_ratio = (
-                candidate_row["decode_median_seconds"]
-                / baseline_row["decode_median_seconds"]
+                candidate_row["decode_median_seconds"] / baseline_row["decode_median_seconds"]
             )
             comparison.update(
                 {
@@ -1611,8 +1598,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 f"Esme FlashInfer piecewise vs cache-owned "
                 f"{'four' if command in ('four-layer-group-ab', 'four-layer-parity') else 'two'}"
                 "-layer graph (bf16)"
-                if command
-                in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity")
+                if command in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity")
                 else f"{record.get('attention_backend', 'comparison')} (bf16)"
             )
         ),

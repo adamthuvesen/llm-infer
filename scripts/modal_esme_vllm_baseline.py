@@ -137,18 +137,15 @@ app = modal.App("llm-infer-esme-vllm-baseline")
 # llm_infer/FlashInfer stack used by the headline. The vLLM environment installs the current
 # release and its own pinned Torch/CUDA stack. Sequential child processes select the matching
 # interpreter, so neither engine rewrites the other's dependencies or retains CUDA memory.
-comparison_image = (
-    FLASH_IMAGE.run_commands(
-        f"python -m venv {VLLM_PYTHON.rsplit('/', 2)[0]}",
-        f"{VLLM_PYTHON} -m pip install vllm modal==1.5.0",
-        f"{VLLM_PYTHON} -m pip install --no-deps -e {REMOTE_ROOT}",
-    )
-    .env(
-        {
-            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-            "VLLM_USE_FLASHINFER_SAMPLER": "0",
-        }
-    )
+comparison_image = FLASH_IMAGE.run_commands(
+    f"python -m venv {VLLM_PYTHON.rsplit('/', 2)[0]}",
+    f"{VLLM_PYTHON} -m pip install vllm modal==1.5.0",
+    f"{VLLM_PYTHON} -m pip install --no-deps -e {REMOTE_ROOT}",
+).env(
+    {
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+    }
 )
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -299,9 +296,7 @@ def run_oracle_process(worker_input: WorkerInput, directory: Path) -> OracleResu
     return _run_child_process("oracle", worker_input, directory)
 
 
-def run_engine_process(
-    system: str, worker_input: WorkerInput, directory: Path
-) -> WorkerResult:
+def run_engine_process(system: str, worker_input: WorkerInput, directory: Path) -> WorkerResult:
     if system not in {"llm_infer", "vllm"}:
         raise ValueError(f"engine system must be 'llm_infer' or 'vllm'; got {system!r}")
     return _run_child_process(system, worker_input, directory)
@@ -749,8 +744,7 @@ def run_same_host(
             worker_results.append(child)
 
     workloads_by_shape = {
-        (workload["batch_size"], workload["context_tokens"]): workload
-        for workload in workloads
+        (workload["batch_size"], workload["context_tokens"]): workload for workload in workloads
     }
     rows: list[dict[str, object]] = []
     for worker_result in worker_results:
@@ -853,9 +847,7 @@ def main(command: str = "focused", bundle_path: str = "") -> None:
             "separate_processes": True,
             "prefix_caching": False,
             "ignore_eos": True,
-            "repro_command": (
-                f"modal run scripts/modal_esme_vllm_baseline.py --command {command}"
-            ),
+            "repro_command": (f"modal run scripts/modal_esme_vllm_baseline.py --command {command}"),
         },
     }
     out_dir = REPO_ROOT / "bench-results"

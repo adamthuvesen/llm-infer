@@ -138,9 +138,7 @@ def main(
         local_bundle_path(bundle_path),
         label="esme-serving",
     )
-    record = json.loads(
-        measure_serving.remote(sizes, max_new_tokens, warmup_runs, measured_runs)
-    )
+    record = json.loads(measure_serving.remote(sizes, max_new_tokens, warmup_runs, measured_runs))
     record["config"] = {
         "model": "Esme-214M-Chat",
         "batch_sizes": sizes,

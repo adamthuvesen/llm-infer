@@ -363,8 +363,7 @@ def _require_cuda_low_precision(
     device_type = torch.device(device).type
     if device_type != "cuda":
         raise ModelRegistryError(
-            f"attention backend {attention_backend_name!r} requires a CUDA device; "
-            f"got {device!r}"
+            f"attention backend {attention_backend_name!r} requires a CUDA device; got {device!r}"
         )
     if dtype not in (torch.float16, torch.bfloat16):
         raise ModelRegistryError(
