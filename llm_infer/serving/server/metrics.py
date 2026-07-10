@@ -191,6 +191,7 @@ class ServerMetrics:
     stream_tokens_total: Counter = field(init=False)
     queue_time_seconds: Histogram = field(init=False)
     ttft_seconds: Histogram = field(init=False)
+    itl_seconds: Histogram = field(init=False)
     request_latency_seconds: Histogram = field(init=False)
 
     def __post_init__(self) -> None:
@@ -220,6 +221,10 @@ class ServerMetrics:
         self.ttft_seconds = Histogram(
             "llm_infer_ttft_seconds", "Time from request arrival to its first generated token."
         )
+        self.itl_seconds = Histogram(
+            "llm_infer_itl_seconds",
+            "Time between generated tokens delivered to a request consumer.",
+        )
         self.request_latency_seconds = Histogram(
             "llm_infer_request_latency_seconds", "End-to-end request latency, arrival to finish."
         )
@@ -233,6 +238,7 @@ class ServerMetrics:
             self.registry.register(counter)
         self.registry.register(self.queue_time_seconds)
         self.registry.register(self.ttft_seconds)
+        self.registry.register(self.itl_seconds)
         self.registry.register(self.request_latency_seconds)
 
     def bind_engine_gauges(

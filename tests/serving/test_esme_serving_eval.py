@@ -17,8 +17,10 @@ from scripts.esme_serving_eval import (
     WorkloadConfig,
     default_engine_workloads,
     default_http_workloads,
+    phase0_http_workloads,
     run_asgi_http_workload,
     run_engine_workload,
+    run_network_http_workload,
 )
 
 
@@ -86,12 +88,48 @@ def test_asgi_streaming_workload_records_http_and_reference_metrics(tmp_path: Pa
     assert metrics["public_queue_time_avg_s"] is not None
     assert metrics["throughput_tokens_per_s"] is not None
     assert metrics["ttft_p50_s"] is not None
+    assert metrics["ttft_p95_s"] is not None
+    assert metrics["itl_p50_s"] is not None
+    assert metrics["itl_p95_s"] is not None
     assert metrics["queue_time_p50_s"] is not None
+    assert metrics["queue_time_p95_s"] is not None
+    assert result["timing_scope"]["engine_build_s"] >= 0
+    assert result["timing_scope"]["server_start_s"] >= 0
+    assert result["timing_scope"]["steady_state_wall_s"] == result["wall_s"]
     assert trace["available"] is True
     assert trace["by_event"]["decode_step"] >= 3
 
 
-def test_sampled_http_workload_records_tokens_without_speed_claim(tmp_path: Path) -> None:
+def test_network_streaming_workload_uses_uvicorn_and_keeps_reference_gate(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    workload, _ = phase0_http_workloads(1, max_new_tokens=4, block_size=8, num_blocks=16)
+
+    result = asyncio.run(
+        run_network_http_workload(
+            runtime, workload, device="cpu", warmup_runs=1, measured_runs=3
+        )
+    )
+
+    assert result["surface"] == "network-http"
+    assert result["reference"]["status"] == "pass"
+    assert result["reference"]["passed"] == 3
+    assert result["metrics"]["requests_total"] == 3
+    assert result["metrics"]["public_requests_admitted"] == 3
+    assert result["metrics"]["throughput_tokens_per_s"] is not None
+    assert result["metrics"]["ttft_p50_s"] < result["metrics"]["latency_p50_s"]
+    assert result["timing_scope"]["transport"] == "localhost Uvicorn TCP"
+    assert result["timing_scope"]["warmup_runs"] == 1
+    assert result["timing_scope"]["measured_runs"] == 3
+    assert result["timing_scope"]["max_connections"] == 1
+    assert result["trace"] == {
+        "available": False,
+        "reason": "disabled because tracing changes deferred decode-window behavior",
+    }
+
+
+def test_sampled_http_workload_is_reference_gated(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 
     result = asyncio.run(
@@ -100,14 +138,14 @@ def test_sampled_http_workload_records_tokens_without_speed_claim(tmp_path: Path
 
     metrics = result["metrics"]
     reference = result["reference"]
-    assert reference["status"] == "partial"
-    assert reference["passed"] == 2
-    assert reference["skipped_sampled"] == 2
+    assert reference["status"] == "pass"
+    assert reference["passed"] == 4
+    assert reference["skipped_sampled"] == 0
     assert metrics["requests_completed"] == 4
     assert metrics["requests_failed"] == 0
     assert metrics["output_tokens"] == 24
-    assert metrics["throughput_tokens_per_s"] is None
-    assert metrics["throughput_status"] == "not_reported_contains_sampled_requests"
+    assert metrics["throughput_tokens_per_s"] is not None
+    assert metrics["throughput_status"] == "reported"
     assert metrics["observed_output_tokens_per_s"] is not None
 
 
@@ -133,3 +171,15 @@ def test_failed_submission_suppresses_throughput(tmp_path: Path) -> None:
     assert metrics["unobserved_requests"] == 1
     assert metrics["throughput_tokens_per_s"] is None
     assert metrics["throughput_status"] == "not_reported_requests_failed"
+
+
+def test_phase0_http_workloads_pair_identical_greedy_and_sampled_shapes() -> None:
+    greedy, sampled = phase0_http_workloads(8, max_new_tokens=32)
+
+    assert len(greedy.requests) == len(sampled.requests) == 8
+    assert all(request.stream for request in (*greedy.requests, *sampled.requests))
+    assert all(request.sampling.is_greedy for request in greedy.requests)
+    assert all(not request.sampling.is_greedy for request in sampled.requests)
+    assert {request.prompt for request in greedy.requests} == {
+        request.prompt for request in sampled.requests
+    }

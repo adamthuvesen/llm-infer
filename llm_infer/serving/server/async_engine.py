@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Protocol
 
 import torch
 
@@ -24,6 +25,18 @@ class TokenStreamItem:
 
     token_id: int
     finish_reason: str | None = None
+
+
+class AsyncEngineRequestObserver(Protocol):
+    """Optional request-output capture after normal token materialization."""
+
+    def submitted(self, request: Request, submitted_s: float) -> None: ...
+
+    def admitted(self, request_id: str, admitted_s: float) -> None: ...
+
+    def finished(
+        self, request_id: str, token_ids: list[int], finished_s: float
+    ) -> None: ...
 
 
 @dataclass
@@ -56,10 +69,12 @@ class AsyncInferenceEngine:
         *,
         idle_sleep_s: float = 0.001,
         metrics: ServerMetrics | None = None,
+        request_observer: AsyncEngineRequestObserver | None = None,
     ) -> None:
         self._engine = engine
         self._idle_sleep_s = idle_sleep_s
         self._metrics = metrics
+        self._request_observer = request_observer
         self._submissions: list[tuple[Request, _Stream]] = []
         self._streams: dict[str, _Stream] = {}
         self._lock = threading.Lock()
@@ -162,6 +177,8 @@ class AsyncInferenceEngine:
             prefix_group_id=prefix_group_id,
             sampling=sampling,
         )
+        if self._request_observer is not None:
+            self._request_observer.submitted(request, submitted_s)
         with self._lock:
             if self._fatal is not None:
                 raise RuntimeError("inference engine is no longer running") from self._fatal
@@ -171,6 +188,7 @@ class AsyncInferenceEngine:
         if self._metrics is not None:
             self._metrics.requests_total.inc()
         first_token_seen = False
+        previous_token_s: float | None = None
         try:
             while True:
                 item = await queue.get()
@@ -179,16 +197,21 @@ class AsyncInferenceEngine:
                         raise stream.error
                     return
                 if self._metrics is not None:
+                    token_s = time.perf_counter()
                     self._metrics.generated_tokens_total.inc()
                     self._metrics.stream_tokens_total.inc()
                     if not first_token_seen:
                         first_token_seen = True
-                        self._metrics.ttft_seconds.observe(time.perf_counter() - submitted_s)
+                        self._metrics.ttft_seconds.observe(token_s - submitted_s)
+                    elif previous_token_s is not None:
+                        self._metrics.itl_seconds.observe(token_s - previous_token_s)
+                    previous_token_s = token_s
                 yield item
                 if item.finish_reason is not None:
+                    finished_s = time.perf_counter()
                     if self._metrics is not None:
                         self._metrics.request_latency_seconds.observe(
-                            time.perf_counter() - submitted_s
+                            finished_s - submitted_s
                         )
                         self._metrics.requests_completed_total.inc(finish_reason=item.finish_reason)
                     return
@@ -273,6 +296,10 @@ class AsyncInferenceEngine:
                     continue
                 self._metrics.requests_admitted_total.inc()
                 self._metrics.queue_time_seconds.observe(max(0.0, admitted_s - stream.submitted_s))
+        if self._request_observer is not None:
+            for request_id in result.admitted:
+                if request_id in self._streams:
+                    self._request_observer.admitted(request_id, admitted_s)
         for request_id, tokens in result.tokens.items():
             stream = self._streams.get(request_id)
             if stream is None:
@@ -285,6 +312,12 @@ class AsyncInferenceEngine:
                 reason = self._finish_reason(stream, token_id) if is_last else None
                 self._enqueue(stream, TokenStreamItem(token_id=token_id, finish_reason=reason))
         for request_id in result.finished:
+            if self._request_observer is not None:
+                self._request_observer.finished(
+                    request_id,
+                    result.finished_outputs[request_id],
+                    time.perf_counter(),
+                )
             stream = self._streams.pop(request_id, None)
             if stream is not None:
                 self._enqueue(stream, None)  # end-of-stream sentinel
