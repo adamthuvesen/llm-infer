@@ -95,6 +95,7 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
         num_blocks=needed + max(4, len(requests)),
         device=device,
         capabilities=capabilities,
+        profiler=config.get("profiler"),
         **window_kwargs,
     )
     for req in requests:
@@ -338,6 +339,25 @@ def _python_profile(runtime, num_requests: int) -> dict:
     return {"profile_total_s": total_s, "top_functions_by_tottime": rows}
 
 
+def _phase_profile(runtime, num_requests: int) -> dict:
+    """One diagnostic generation projected to the Phase 0 timing buckets."""
+    import torch
+
+    from llm_infer.profiling import TimingProfiler, attach_host_method_profile
+
+    profiler = TimingProfiler("cuda")
+    engine, _ = _build_engine(runtime, num_requests, "cuda", {"profiler": profiler})
+    attach_host_method_profile(
+        profiler,
+        engine,
+        "window_flushing",
+        ("_stage_window_flush", "_consume_window_flush"),
+    )
+    engine.run()
+    torch.cuda.synchronize()
+    return profiler.summary().as_dict()
+
+
 def _reference_by_request(oracle_runtime, requests) -> dict[str, list[int]]:
     """fp32 oracle greedy outputs per request, computed once per unique prompt.
 
@@ -435,7 +455,16 @@ def profile_decode(batch_sizes: list[int]) -> str:
         wall = _decode_wall(runtime, size)
         kineto = _torch_profile(runtime, size)
         python = _python_profile(runtime, size)
-        results.append({"batch_size": size, "wall": wall, "torch_profiler": kineto, **python})
+        phases = _phase_profile(runtime, size)
+        results.append(
+            {
+                "batch_size": size,
+                "wall": wall,
+                "torch_profiler": kineto,
+                "phase_profile": phases,
+                **python,
+            }
+        )
         print(
             f"[profile] batch={size}: wall/step {wall['wall_ms_per_step']:.2f} ms, "
             f"gpu busy/step {kineto['gpu_busy_ms_per_step']:.2f} ms, "
@@ -822,7 +851,7 @@ def capture_report(batch_sizes: list[int]) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "bench", batch_sizes: str = "8,32,128", bundle_path: str = "") -> None:
+def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: str = "") -> None:
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
     if command not in ("profile", "bench", "ablate", "capture", "sync", "serve-smoke"):
         raise ValueError(

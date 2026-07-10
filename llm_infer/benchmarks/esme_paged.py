@@ -105,6 +105,27 @@ def build_requests(
     return requests
 
 
+def requests_at_context_length(
+    requests: list[EsmeBenchRequest], context_length: int
+) -> list[EsmeBenchRequest]:
+    """Repeat each valid tokenized prompt to an exact synthetic cached-context length."""
+    if context_length < 1:
+        raise ValueError(f"context_length must be >= 1; got {context_length}")
+    resized: list[EsmeBenchRequest] = []
+    for request in requests:
+        prompt_ids = request.prompt_ids
+        repeats = (context_length + len(prompt_ids) - 1) // len(prompt_ids)
+        exact_ids = (prompt_ids * repeats)[:context_length]
+        resized.append(
+            EsmeBenchRequest(
+                request_id=request.request_id,
+                prompt=f"{request.prompt} [synthetic context: {context_length} tokens]",
+                prompt_ids=exact_ids,
+            )
+        )
+    return resized
+
+
 def reference_outputs(
     model: CausalLMBackend,
     requests: list[EsmeBenchRequest],

@@ -147,6 +147,230 @@ def bench_vllm_batches(batch_sizes: list[int], max_new_tokens: int, warmup: int,
     image=FLASH_IMAGE,
     gpu="A100-80GB",
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=3 * 60 * 60,
+)
+def sweep_baseline(
+    batch_sizes: list[int],
+    context_lengths: list[int],
+    max_new_tokens: int,
+    warmup: int,
+    iters: int,
+) -> str:
+    """Reference-gated Phase 0 matrix with cold startup and persistent timing separated."""
+    import math
+    import statistics
+
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        build_requests,
+        requests_at_context_length,
+    )
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.report import total_output_tokens
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.profiling import TimingProfiler, attach_host_method_profile
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    engine_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    # This diagnostic measures exactly ``max_new_tokens`` decode steps at every synthetic
+    # context length. Natural EOS would turn some repeated-token contexts into one-token rows.
+    eos = frozenset()
+    capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
+    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
+
+    def p95(values: list[float]) -> float:
+        ordered = sorted(values)
+        return ordered[math.ceil(0.95 * len(ordered)) - 1]
+
+    def matrix_requests(size: int, context_length: int):
+        return requests_at_context_length(
+            build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS), context_length
+        )
+
+    def reference_for(requests) -> dict[str, list[int]]:
+        for request in requests:
+            if request.prompt_ids not in reference_by_prompt:
+                reference_by_prompt[request.prompt_ids] = greedy_decode(
+                    oracle_runtime.model,
+                    list(request.prompt_ids),
+                    max_new_tokens=max_new_tokens,
+                    eos_token_ids=set(eos),
+                )
+        return {
+            request.request_id: list(reference_by_prompt[request.prompt_ids])
+            for request in requests
+        }
+
+    def agreement_record(requests, outputs) -> tuple[dict[str, object], bool]:
+        agreement = tie_tolerant_agreement(
+            oracle_runtime.model, requests, outputs, reference_for(requests), eos
+        )
+        return (
+            {
+                "exact": agreement.exact,
+                "tie": agreement.tie,
+                "nontie": agreement.nontie,
+                "total": agreement.total,
+                "ties_sample": agreement.ties_sample,
+                "divergences_sample": agreement.divergences_sample,
+            },
+            agreement.all_ties_or_exact,
+        )
+
+    rows: list[dict] = []
+    for context_length in context_lengths:
+        for size in batch_sizes:
+            requests = matrix_requests(size, context_length)
+            needed = sum(
+                math.ceil((len(request.prompt_ids) + max_new_tokens) / BLOCK_SIZE)
+                for request in requests
+            )
+            num_blocks = needed + max(4, len(requests))
+            peak = _PeakBlocks()
+
+            torch.cuda.synchronize()
+            startup_start = time.perf_counter()
+            engine = InferenceEngine(
+                engine_runtime.model,
+                block_size=BLOCK_SIZE,
+                num_blocks=num_blocks,
+                device="cuda",
+                capabilities=engine_runtime.capabilities,
+            )
+            torch.cuda.synchronize()
+            engine_kv_startup_s = time.perf_counter() - startup_start
+
+            def persistent_once(
+                requests=requests, engine=engine
+            ) -> dict[str, list[int]]:
+                for request in requests:
+                    engine.add_request(
+                        Request(
+                            request.request_id,
+                            list(request.prompt_ids),
+                            max_new_tokens,
+                            eos,
+                        )
+                    )
+                return engine.run()
+
+            for _ in range(warmup):
+                persistent_once()
+                torch.cuda.synchronize()
+            per_iter: list[float] = []
+            outputs: dict[str, list[int]] = {}
+            for _ in range(iters):
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                outputs = persistent_once()
+                torch.cuda.synchronize()
+                per_iter.append(time.perf_counter() - start)
+
+            agreement, matches_reference = agreement_record(requests, outputs)
+            tokens = total_output_tokens(outputs, eos)
+            expected_tokens = size * max_new_tokens
+            if tokens != expected_tokens:
+                raise AssertionError(
+                    f"baseline row produced {tokens} tokens, expected {expected_tokens}"
+                )
+            median_s = statistics.median(per_iter)
+
+            profiler = TimingProfiler("cuda")
+            profile_engine = InferenceEngine(
+                engine_runtime.model,
+                block_size=BLOCK_SIZE,
+                num_blocks=num_blocks,
+                device="cuda",
+                capabilities=engine_runtime.capabilities,
+                profiler=profiler,
+            )
+            # KV peak is diagnostic. Keep allocator callbacks out of steady-state timing.
+            profile_engine.cache.allocator.observer = peak
+            attach_host_method_profile(
+                profiler,
+                profile_engine,
+                "window_flushing",
+                ("_stage_window_flush", "_consume_window_flush"),
+            )
+            for request in requests:
+                profile_engine.add_request(
+                    Request(
+                        request.request_id,
+                        list(request.prompt_ids),
+                        max_new_tokens,
+                        eos,
+                    )
+                )
+            profile_engine.run()
+            torch.cuda.synchronize()
+            phase_profile = profiler.summary().as_dict()
+
+            model = engine_runtime.model
+            kv_bytes_per_token = (
+                model.num_layers
+                * 2
+                * model.num_kv_heads
+                * model.head_dim
+                * model.dtype.itemsize
+            )
+            row = {
+                "system": "llm_infer_persistent",
+                "batch_size": size,
+                "context_length": context_length,
+                "matches_reference": matches_reference,
+                "agreement": agreement,
+                "engine_kv_startup_seconds": engine_kv_startup_s,
+                "steady_state_median_seconds": median_s,
+                "steady_state_p95_seconds": p95(per_iter),
+                "steady_state_per_iter_seconds": per_iter,
+                "total_output_tokens": tokens,
+                "tokens_per_second": (
+                    tokens / median_s if matches_reference and median_s > 0 else None
+                ),
+                "phase_profile": phase_profile,
+                "kv_pool": {
+                    "block_size": BLOCK_SIZE,
+                    "num_blocks": num_blocks,
+                    "peak_used_blocks": peak.peak,
+                    "peak_kv_bytes": peak.peak * BLOCK_SIZE * kv_bytes_per_token,
+                    "kv_bytes_per_token": kv_bytes_per_token,
+                },
+            }
+            rows.append(row)
+            tps = row["tokens_per_second"]
+            print(
+                f"[baseline/llm_infer] context={context_length} batch={size}: "
+                f"startup {engine_kv_startup_s:.3f} s, steady {median_s:.3f} s, "
+                f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
+            )
+
+    return json.dumps(
+        {
+            "rows": rows,
+            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
+            "attention_backend": type(engine_runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=2 * 60 * 60,
 )
 def sweep(
@@ -543,27 +767,44 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
     """Stage + convert the bundle, run the (optional) vLLM rows, then the one-container sweep."""
     if command == "smoke":
         llm_infer_batches = [2, 4]
+        context_lengths: list[int] = []
         hf_specs = [[2, 1]]
         vllm_batches = [2]
         max_new_tokens, warmup, iters = 8, 0, 1
     elif command == "curve":
-        llm_infer_batches = [8, 16, 32, 64, 128, 256]
+        llm_infer_batches = [1, 8, 16, 32, 64, 128, 256]
+        context_lengths = []
         hf_specs = [[8, 3], [16, 1], [32, 1], [64, 1], [128, 1], [256, 1]]
-        vllm_batches = [8, 64, 256]
+        vllm_batches = [1, 8, 64, 256]
         max_new_tokens, warmup, iters = 256, 1, 3
+    elif command == "baseline":
+        llm_infer_batches = [1, 8, 64, 256]
+        context_lengths = [32, 256, 768]
+        hf_specs = []
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 128, 2, 10
+    elif command == "baseline-smoke":
+        llm_infer_batches = [1]
+        context_lengths = [32]
+        hf_specs = []
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 8, 0, 1
     elif command == "flashinfer-smoke":
         llm_infer_batches = [8]
+        context_lengths = []
         hf_specs = []
         vllm_batches = []
         max_new_tokens, warmup, iters = 16, 1, 1
     elif command == "flashinfer-curve":
-        llm_infer_batches = [8, 16, 32, 64, 128, 256]
+        llm_infer_batches = [1, 8, 16, 32, 64, 128, 256]
+        context_lengths = []
         hf_specs = []
         vllm_batches = []
         max_new_tokens, warmup, iters = 256, 1, 3
     else:
         raise ValueError(
-            "command must be 'smoke', 'curve', 'flashinfer-smoke', "
+            "command must be 'smoke', 'curve', 'baseline', 'baseline-smoke', "
+            "'flashinfer-smoke', "
             f"or 'flashinfer-curve', got {command!r}"
         )
 
@@ -606,6 +847,59 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         out_path = out_dir / f"esme-batch-curve-{command}-{stamp}.json"
         out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         print(f"[esme-curve] wrote {out_path}")
+        return
+
+    if command in ("baseline", "baseline-smoke"):
+        print(
+            f"[baseline] llm_infer matrix: batches {llm_infer_batches}, "
+            f"contexts {context_lengths}"
+        )
+        sweep_res = json.loads(
+            sweep_baseline.remote(
+                llm_infer_batches,
+                context_lengths,
+                max_new_tokens,
+                warmup,
+                iters,
+            )
+        )
+        record = {
+            "rows": sweep_res["rows"],
+            "decode_graphs": sweep_res["decode_graphs"],
+            "gpu": sweep_res["gpu"],
+            "versions": sweep_res["versions"],
+            "config": {
+                "command": command,
+                "model": "Esme-214M-Chat",
+                "batch_sizes": llm_infer_batches,
+                "context_lengths": context_lengths,
+                "max_new_tokens": max_new_tokens,
+                "warmup": warmup,
+                "iters": iters,
+                "block_size": BLOCK_SIZE,
+                "attention_backend": sweep_res.get("attention_backend"),
+                "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
+                "ignore_eos": True,
+                "timing": {
+                    "engine_kv_startup": "one synchronized engine construction per matrix row",
+                    "steady_state": (
+                        f"persistent engine, {warmup} warmups then {iters} measured runs"
+                    ),
+                    "phase_profile": "one diagnostic run outside steady-state timing; nested spans",
+                },
+                "same_container": {"llm_infer_matrix": True},
+                "repro_command": (
+                    f"modal run scripts/modal_esme_batch_curve.py --command {command}"
+                ),
+            },
+        }
+        out_dir = REPO_ROOT / "bench-results"
+        out_dir.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        suffix = "-smoke" if command == "baseline-smoke" else ""
+        out_path = out_dir / f"esme-measurement-baseline{suffix}-{stamp}.json"
+        out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        print(f"[baseline] wrote {out_path}")
         return
 
     print("[esme-curve] converting bundle -> HF Qwen3 checkpoint (remote) ...")

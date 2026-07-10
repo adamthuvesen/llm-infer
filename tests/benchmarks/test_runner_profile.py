@@ -8,6 +8,7 @@ from llm_infer.benchmarks.runners import run_llm_infer
 from llm_infer.benchmarks.workload import BenchRequest, Workload
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.profiling import TimingProfiler, attach_host_method_profile
 from tests.support.fake_causal_lm import FakeCausalLMBase
 
 
@@ -71,6 +72,53 @@ def test_llm_infer_profile_runs_after_timed_iterations() -> None:
     assert len(result.profiles) == 1
     # warmup + 2 measured runs are unprofiled; the single extra diagnostic run is profiled.
     assert model.profile_flags == [False, False, False, False, False, False, True, True]
+
+
+def test_profile_summary_projects_raw_buckets_to_phase_records() -> None:
+    profiler = TimingProfiler("cpu")
+
+    with profiler.record("prefill"):
+        pass
+    with profiler.record("paged_attention_plan"):
+        pass
+    with profiler.record("paged_attention"):
+        pass
+    with profiler.record("sampling"):
+        pass
+
+    summary = profiler.summary().as_dict()
+    phases = summary["phases"]
+
+    assert isinstance(phases, dict)
+    assert phases["prefill"]["available"] is True
+    assert phases["page_planning"]["source_buckets"] == ["paged_attention_plan"]
+    assert phases["attention"]["source_buckets"] == ["paged_attention"]
+    assert phases["sampling"]["calls"] == 1
+    assert phases["sampling"]["mean_ms_per_call"] is not None
+    assert phases["window_flushing"]["available"] is False
+    assert phases["window_flushing"]["mean_ms_per_call"] is None
+    assert summary["phase_timings_are_nested"] is True
+
+
+def test_attach_host_method_profile_records_private_diagnostic_calls() -> None:
+    class Target:
+        def stage(self, value: int) -> int:
+            return value + 1
+
+        def consume(self, value: int) -> int:
+            return value - 1
+
+    target = Target()
+    profiler = TimingProfiler("cpu")
+    attach_host_method_profile(profiler, target, "window_flushing", ("stage", "consume"))
+
+    assert target.stage(4) == 5
+    assert target.consume(4) == 3
+    phases = profiler.summary().as_dict()["phases"]
+
+    assert isinstance(phases, dict)
+    assert phases["window_flushing"]["available"] is True
+    assert phases["window_flushing"]["calls"] == 2
 
 
 def _logits_for(token_id: int) -> torch.Tensor:

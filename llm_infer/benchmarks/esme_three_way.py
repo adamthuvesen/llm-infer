@@ -132,6 +132,7 @@ def vllm_decode_closure(
     *,
     max_new_tokens: int,
     eos_token_ids: frozenset[int],
+    ignore_eos: bool = False,
 ) -> DecodeOnce:
     """The greedy offline-generate closure for one workload on an already-built engine."""
     from vllm import SamplingParams
@@ -140,8 +141,8 @@ def vllm_decode_closure(
         temperature=0.0,
         max_tokens=max_new_tokens,
         n=1,
-        stop_token_ids=sorted(eos_token_ids),
-        ignore_eos=False,
+        stop_token_ids=[] if ignore_eos else sorted(eos_token_ids),
+        ignore_eos=ignore_eos,
     )
     prompts = [{"prompt_token_ids": list(req.prompt_ids)} for req in requests]
     ids_by_index = [req.request_id for req in requests]
