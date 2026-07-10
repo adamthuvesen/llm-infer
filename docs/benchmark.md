@@ -1,7 +1,8 @@
 # Benchmarks
 
-`llm-infer` reports speed only after the generated tokens match the reference output for
-the same prompt and model. The public benchmark compares:
+`llm-infer` keeps raw benchmark timing, but reports public headline speed only after the generated
+tokens qualify under the reference policy for the same prompt and model. The public benchmark
+compares:
 
 | system | role |
 | --- | --- |
@@ -63,16 +64,21 @@ At 256 concurrent requests, the engine serves **95.6x** the same-row measured na
 - HF timing: batch 8 uses 3 measured iterations after 1 warmup. Batches 16-256 use one measured
   iteration and no warmup; these rows check that sequential HF throughput stays flat, not its
   run-to-run spread.
-- Reference gate: fp32 full-recompute `PretrainBundleModel.logits()` is the oracle. A row with
-  any non-tie divergence reports no tok/s.
+- Reference policy: fp32 full-recompute `PretrainBundleModel.logits()` is the oracle. Policy-v2
+  records keep raw tok/s in every measured row and expose `headline_eligible` separately. Public
+  tables use only eligible rows.
 - bf16 tie rule: the Esme benchmark uses a 0.1-logit tolerance when it recomputes the first
   divergence with the fp32 oracle. This is wider than the generic 1e-3 fused-kernel fixture rule
   because the fast Esme row converts the whole model to bf16, not just attention. The headline
   pool contains 8 unique prompts; larger batches repeat them. The current evidence includes
   accepted gaps up to 0.0463 logits, but it does not establish a full error distribution up to
-  0.1. Treat the threshold as an audited acceptance bound, not a measured noise percentile.
+  0.1. Treat the threshold as an audited acceptance bound, not a measured noise percentile. A
+  larger numerical difference is `review_required`, not automatically a bug; accepting it needs
+  a durable diagnostic.
 - Comparison rule: raw tok/s is compared only inside the same benchmark run; same-run ratios are
-  the useful number.
+  the useful number. An A/B ratio also needs `exact` or explicitly reviewed `accepted_numerical`
+  candidate/baseline parity and equal token counts. It does not need both paths to independently
+  clear an fp32 review when they share the same continuation.
 
 ## Local Checks
 

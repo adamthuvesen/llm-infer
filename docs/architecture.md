@@ -118,15 +118,19 @@ packs the ragged batch, and passes it to the active `AttentionBackend`.
 
 ## Reference Contract
 
-Esme speed rows are gated against direct bundle logits/generation. The full-recompute
-`PretrainBundleModel.logits()` path is the reference; the paged prefill/decode path must agree
-with it before throughput is reported.
+Esme rows are checked against direct bundle logits/generation. The full-recompute
+`PretrainBundleModel.logits()` path is the reference. Measured rows retain raw timing and tok/s;
+`headline_eligible` controls whether a public consumer may report that speed.
 
 Qwen is the independent HF reference for correctness tests, replaying frozen HuggingFace
 full-recompute greedy fixtures.
 
-bf16 can produce genuine near-ties. The project allows those only when they are traced as
-within the documented tolerance; a non-tie divergence fails the reference gate.
+Policy v2 separates fp32 reference status from direct A/B parity. bf16 differences inside the
+documented 0.1-logit bound are accepted numerical choices. Larger numerical differences require
+review, while malformed output and confirmed bugs fail. Exact candidate/baseline parity can support
+a same-run relative claim even when both paths share a reference review. This distinction keeps
+correctness checks useful without suppressing evidence about whether an optimization changed the
+model's behavior.
 
 ## Serving Surface
 
