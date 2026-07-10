@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -28,9 +29,9 @@ _PROMPTS = ("tok_1 tok_4 tok_7", "tok_2 tok_5 tok_3 tok_6 tok_9", "tok_8 tok_1")
 _MAX_NEW_TOKENS = 10
 
 
-def _stream_completions(runtime) -> list[list[str]]:
-    """Serve every prompt concurrently over SSE; return each request's delta sequence."""
-    app = build_app_from_runtime(runtime, block_size=4, num_blocks=64)
+def _stream_completions(runtime, **app_kwargs) -> tuple[list[list[str]], str]:
+    """Serve every prompt concurrently over SSE; return delta sequences and /metrics text."""
+    app = build_app_from_runtime(runtime, block_size=4, num_blocks=64, **app_kwargs)
 
     async def one(client: httpx.AsyncClient, prompt: str) -> list[str]:
         deltas: list[str] = []
@@ -56,13 +57,15 @@ def _stream_completions(runtime) -> list[list[str]]:
                     deltas.append(text)
         return deltas
 
-    async def go() -> list[list[str]]:
+    async def go() -> tuple[list[list[str]], str]:
         transport = httpx.ASGITransport(app=app)
         async with (
             app.router.lifespan_context(app),
             httpx.AsyncClient(transport=transport, base_url="http://test") as client,
         ):
-            return list(await asyncio.gather(*(one(client, p) for p in _PROMPTS)))
+            deltas = list(await asyncio.gather(*(one(client, p) for p in _PROMPTS)))
+            metrics = (await client.get("/metrics")).text
+            return deltas, metrics
 
     return asyncio.run(go())
 
@@ -72,12 +75,37 @@ def test_streams_identical_with_and_without_decode_graph_runner(tmp_path: Path) 
     runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
     assert runtime.model.decode_graphs is None  # CPU: the serve default must not enable it
 
-    plain = _stream_completions(runtime)
+    plain, _ = _stream_completions(runtime)
     runtime.model.enable_decode_graphs(capture_sizes=(4,), mode="eager")
-    padded = _stream_completions(runtime)
+    padded, _ = _stream_completions(runtime)
 
     assert all(deltas for deltas in plain)  # every request actually streamed tokens
     assert padded == plain
+
+
+def test_streams_identical_with_grouped_dispatch_and_metrics_count_its_steps(
+    tmp_path: Path,
+) -> None:
+    """The serve-level grouped wiring: identical streams, and /metrics proves real hits.
+
+    Buckets 1-4 cover every batch shape three concurrent requests can produce, so each
+    decode window runs through a grouped runner — the exported step counter must be
+    positive, pinning that the flag reaches the engine and the runners actually fire.
+    """
+    runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
+    runtime.model.decode_graphs = None
+
+    plain, plain_metrics = _stream_completions(runtime)
+    assert "llm_infer_grouped_decode_steps_total 0" in plain_metrics
+
+    grouped, grouped_metrics = _stream_completions(
+        runtime,
+        grouped_decode_graphs=True,
+        decode_graph_buckets=(1, 2, 3, 4),
+    )
+    assert grouped == plain
+    match = re.search(r"llm_infer_grouped_decode_steps_total (\d+)", grouped_metrics)
+    assert match is not None and int(match.group(1)) > 0
 
 
 def test_build_app_decode_graphs_default_is_noop_on_cpu(tmp_path: Path) -> None:

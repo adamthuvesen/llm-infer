@@ -245,6 +245,7 @@ class ServerMetrics:
         self,
         *,
         preemptions: Callable[[], float],
+        grouped_decode_steps: Callable[[], float],
         running_requests: Callable[[], float],
         waiting_requests: Callable[[], float],
         kv_blocks_used: Callable[[], float],
@@ -262,6 +263,14 @@ class ServerMetrics:
                 "llm_infer_preemptions_total",
                 "Running requests preempted (evicted by recompute) under KV pressure.",
                 preemptions,
+            )
+        )
+        self.registry.register(
+            SourceCounter(
+                "llm_infer_grouped_decode_steps_total",
+                "Decode window steps run by engine-owned grouped graphs (0 when disabled; "
+                "a grouped deployment stuck at 0 is silently falling back).",
+                grouped_decode_steps,
             )
         )
         gauges = (
