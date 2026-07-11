@@ -10,7 +10,7 @@ import torch
 from llm_infer.kv_cache.block_allocator import OutOfBlocksError
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.serving.request import Request
-from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row
+from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row, sample_rows
 
 if TYPE_CHECKING:
     from llm_infer.model.decode_plan import DecodeWindowPlan
@@ -345,37 +345,21 @@ class EngineDecodeMixin(EngineMixinHost):
         """Sample one token per row of ``(B, vocab)`` logits, each under its own request.
 
         An all-greedy batch — the benchmark and reference path — is one batched argmax, no
-        per-row Python at all. Otherwise greedy rows take a vectorized argmax over their subset
-        (no RNG) and the rest are sampled per row under that request's params, against its own
-        generated history, from its own seeded generator — so batchmates cannot consume its RNG
-        stream. Returns a ``(B,)`` long tensor on the logits' device.
+        per-row Python at all. Otherwise :func:`sample_rows` runs the filtering surface batched
+        on the logits' device and draws one token per sampled row from that request's own seeded
+        generator, so batchmates cannot consume its RNG stream. Generated history is
+        materialized (a host sync) only for rows that actually carry a penalty.
         """
-        if logits.ndim != 2:
-            raise ValueError(f"expected 2-D logits, got shape {tuple(logits.shape)}")
         params = [self._params_for(request) for request in requests]
-        if all(p.is_greedy for p in params):
-            return torch.argmax(logits, dim=-1)
-
-        tokens: list[torch.Tensor | None] = [None] * len(requests)
-        greedy_rows = [i for i, p in enumerate(params) if p.is_greedy]
-        if greedy_rows:
-            index = torch.tensor(greedy_rows, device=logits.device)
-            argmax = torch.argmax(logits.index_select(0, index), dim=-1)
-            for position, token in zip(greedy_rows, argmax, strict=True):
-                tokens[position] = token
-
-        for i, (request, p) in enumerate(zip(requests, params, strict=True)):
-            if p.is_greedy:
-                continue
-            tokens[i] = sample_row(
-                logits[i], p, request.generated, request.generator(logits.device)
-            )
-        filled: list[torch.Tensor] = []
-        for token in tokens:
-            if token is None:
-                raise RuntimeError("sampled fewer tokens than requests")
-            filled.append(token)
-        return torch.stack(filled)
+        generators = [
+            None if p.is_greedy else request.generator(logits.device)
+            for request, p in zip(requests, params, strict=True)
+        ]
+        histories = [
+            request.generated if p.presence_penalty != 0.0 or p.frequency_penalty != 0.0 else None
+            for request, p in zip(requests, params, strict=True)
+        ]
+        return sample_rows(logits, params, generators, histories)
 
     def _decode_budget(self, request: Request) -> int:
         """Worst-case tokens this request may append in one decode step — for room reservation.
