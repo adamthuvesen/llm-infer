@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 
@@ -18,6 +18,7 @@ from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
     BackendCapabilities,
     ModelRuntime,
+    TokenizerLike,
 )
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.pretrain_bundle_loader import read_json_object
@@ -55,7 +56,7 @@ class TokenizersJsonTokenizer:
         default_add_special_tokens: bool = True,
         chat_template: Mapping[str, object] | None = None,
     ) -> None:
-        from tokenizers import Tokenizer
+        from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
         self.path = tokenizer_path
         self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
@@ -158,6 +159,7 @@ def _load_qwen_runtime(
         attention_backend_name=attention_backend_name,
     )
     tokenizer = AutoTokenizer.from_pretrained(resolved_model_id, revision=resolved_revision)
+    typed_tokenizer = cast(TokenizerLike, tokenizer)
     model = QwenModel.load(
         dtype=dtype,
         backend=resolved_attention,
@@ -176,14 +178,14 @@ def _load_qwen_runtime(
     eos_token_ids = _generation_eos_ids(
         model_id=resolved_model_id,
         revision=resolved_revision,
-        tokenizer=tokenizer,
+        tokenizer=typed_tokenizer,
         generation_config_loader=GenerationConfig.from_pretrained,
     )
     return ModelRuntime(
         backend_id="qwen",
         model_id=resolved_model_id,
         model=model,
-        tokenizer=tokenizer,
+        tokenizer=typed_tokenizer,
         eos_token_ids=eos_token_ids,
         capabilities=capabilities,
         metadata={

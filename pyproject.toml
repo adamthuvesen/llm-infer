@@ -16,6 +16,7 @@ dev = [
     "ruff>=0.6",
     "httpx>=0.27",
     "modal==1.5.0",
+    "mypy>=1.19",
 ]
 serving = [
     "fastapi>=0.110",
@@ -38,6 +39,23 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["llm_infer"]
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = [
+    "^llm_infer/benchmarks/",
+    "^llm_infer/kernels/(flash_attn_paged|flashinfer_graph|flashinfer_paged)\\.py$",
+    "^llm_infer/model/grouped_decode_graph\\.py$",
+    "^llm_infer/serving/engine_(decode|prefill|preemption|trace)\\.py$",
+    "^llm_infer/serving/server/(app|async_engine|streaming)\\.py$",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

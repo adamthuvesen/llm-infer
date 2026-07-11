@@ -19,7 +19,8 @@ Two decode paths share one layer stack:
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
+from typing import Protocol, cast
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -43,6 +44,16 @@ from llm_infer.profiling import TimingProfiler
 _AttentionFn = Callable[[torch.Tensor, str, int], torch.Tensor]
 
 
+class _QwenConfig(Protocol):
+    num_hidden_layers: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    hidden_size: int
+    rms_norm_eps: float
+    rope_theta: float
+    tie_word_embeddings: bool
+
+
 class QwenModel:
     """Qwen2.5-Coder-3B forward pass over a single token sequence.
 
@@ -53,7 +64,7 @@ class QwenModel:
     def __init__(
         self,
         weights: dict[str, torch.Tensor],
-        config: object,
+        config: _QwenConfig,
         backend: AttentionBackend,
         dtype: torch.dtype,
     ) -> None:
@@ -96,7 +107,7 @@ class QwenModel:
         weights = {name: tensor.detach().to(device) for name, tensor in hf.state_dict().items()}
         return cls(
             weights=weights,
-            config=config,
+            config=cast(_QwenConfig, config),
             backend=backend or TorchNaiveAttention(),
             dtype=dtype,
         )
@@ -218,7 +229,8 @@ class QwenModel:
         the full history (including this token) is gathered and attended through the
         backend. Advances ``table.length`` by one.
         """
-        return self.decode_tokens(cache, table, token_id)[-1]
+        tokens = [token_id] if isinstance(token_id, int) else token_id
+        return self.decode_tokens(cache, table, tokens)[-1]
 
     @torch.no_grad()
     def decode_many(
@@ -455,8 +467,9 @@ class QwenModel:
             k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
 
         with self._profile("attention"):
+            cu_seqlens = cast(torch.Tensor, read_plan.cu_seqlens)
             attn = self.backend.forward_decode_batch_packed(
-                queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len
+                queries, k_exp, v_exp, cu_seqlens, read_plan.max_len
             )
         with self._profile("projections_mlp"):
             return self._output_proj(attn.transpose(0, 1).contiguous(), p)  # (B, hidden)
@@ -509,7 +522,7 @@ class QwenModel:
         """
         return linear_projection(self.w, x, name, self.dtype)
 
-    def _profile(self, name: str):
+    def _profile(self, name: str) -> AbstractContextManager[None]:
         if self.profiler is None:
             return nullcontext()
         return self.profiler.record(name)
@@ -540,7 +553,7 @@ class QwenModel:
         )
 
 
-def _rope_theta(config: object) -> float:
+def _rope_theta(config: _QwenConfig) -> float:
     """Read the RoPE base, tolerating the transformers 4.x flat attr and the 5.x nested dict.
 
     The pinned Qwen2.5-Coder config uses the ``default`` rope type (no scaling), so we

@@ -71,6 +71,9 @@ class PendingWindowFlush:
 
 
 class EngineDecodeMixin:
+    _decode_window: DecodeWindow | None
+    _pending_flush: PendingWindowFlush | None
+
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
         if self.preemption:
