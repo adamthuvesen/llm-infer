@@ -42,6 +42,9 @@ class DecodeWindow:
     # remaining token budget (minus tokens still staged in an unconsumed flush) so no
     # request can decode past its own max_new_tokens.
     budget: int
+    # Computed once at open: an all-greedy window's per-step selection stays the bare batched
+    # argmax, adding no per-step Python to the proven greedy path.
+    all_greedy: bool = True
     pending: list[torch.Tensor] = field(default_factory=list)
     # Preallocated model-side step buffers (planned_decode backends); None falls back to
     # per-step ``decode_many`` bookkeeping inside the same window.
@@ -206,6 +209,7 @@ class EngineDecodeMixin(EngineMixinHost):
                     self.decode_window_size,
                     min(request.remaining_tokens for request in requests) - staged_steps,
                 ),
+                all_greedy=all(self._params_for(request).is_greedy for request in requests),
             )
             if self.capabilities.planned_decode:
                 window.plan = self.model.open_decode_window(
@@ -242,7 +246,10 @@ class EngineDecodeMixin(EngineMixinHost):
                     last_tokens,
                 )
         with self._record_time("sampling"):
-            window.pending.append(self._sample_rows(logits, window.requests))
+            if window.all_greedy:
+                window.pending.append(torch.argmax(logits, dim=-1))
+            else:
+                window.pending.append(self._sample_rows(logits, window.requests))
         if len(window.pending) >= window.budget:
             self._flush_decode_window(result)
 
