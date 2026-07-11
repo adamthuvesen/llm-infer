@@ -11,8 +11,9 @@ grouped coverage:
   must never fire and outputs must still match;
 * prefix-cache sharing — grouped inherits the window path's private-blocks requirement:
   zero steps while siblings share blocks, real steps once the survivor's table is private;
-* sampled requests — sampling disables planned windows entirely; grouped must not change
-  that;
+* sampled requests — a penalty-free sampled batch runs planned windows, so grouped must
+  fire and outputs must match the plain engine; a penalty-carrying batch keeps windows
+  (and grouped) off;
 * speculative decode — drafts read generated ids per step, so windows (and grouped) stay
   off.
 """
@@ -125,8 +126,31 @@ def test_prefix_sharing_excludes_grouped_until_blocks_are_private(runtime) -> No
     assert shared_engine.grouped_decode_runners[3].steps_handled == 0
 
 
-def test_sampled_requests_keep_grouped_dispatch_off(runtime) -> None:
+def test_sampled_requests_take_grouped_dispatch(runtime) -> None:
+    """A penalty-free sampled batch decodes through grouped windows, tokens unchanged.
+
+    The grouped runner covers only the forward; every draw still comes from the row's own
+    seeded generator outside the captured region, so tokens match the plain engine exactly
+    on the tiny bundle.
+    """
     sampling = SamplingParams(temperature=1.0, top_p=1.0, seed=123)
+
+    def run(grouped: bool) -> tuple[dict[str, list[int]], InferenceEngine]:
+        engine = _engine(runtime, grouped=grouped, default_sampling=sampling)
+        _add_default_requests(engine)
+        return engine.run(), engine
+
+    runtime.model.decode_graphs = None
+    plain, _ = run(grouped=False)
+
+    grouped_outputs, grouped_engine = run(grouped=True)
+    assert grouped_outputs == plain
+    assert grouped_engine.grouped_decode_steps_total > 0
+
+
+def test_penalty_requests_keep_grouped_dispatch_off(runtime) -> None:
+    """A penalty-carrying batch reads history per step: windows and grouped stay off."""
+    sampling = SamplingParams(temperature=1.0, seed=123, frequency_penalty=0.5)
 
     def run(grouped: bool) -> tuple[dict[str, list[int]], InferenceEngine]:
         engine = _engine(runtime, grouped=grouped, default_sampling=sampling)

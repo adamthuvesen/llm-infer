@@ -5,8 +5,9 @@ EOS/stop state to the host once per window instead of once per step. These tests
 contract on the tiny bundle (CPU, deterministic): outputs are token-for-token identical to
 the classic per-step engine — including requests that hit EOS mid-window (overshoot tokens
 discarded) and requests that hit their length cap — while token *visibility* in step results
-is allowed to arrive in window-sized bursts. Ineligible batches (sampled rows) must fall
-back to the per-step path unchanged.
+is allowed to arrive in window-sized bursts. Penalty-free sampled rows run inside the window
+(seeded draws on device, batchmates' RNG independent); a penalty-carrying row makes the batch
+ineligible and must fall back to the per-step path unchanged.
 """
 
 from __future__ import annotations
@@ -125,9 +126,57 @@ def test_window_budget_respects_length_cap(runtime) -> None:
     assert all(len(ids) == max_new for ids in windowed.values())
 
 
-def test_mixed_sampling_batch_falls_back_to_per_step_path(runtime) -> None:
-    """A batch with a sampled row is window-ineligible and must match the per-step engine."""
-    sampling = {1: SamplingParams(temperature=0.8, seed=1234)}
+def test_penalty_free_sampled_batch_runs_in_window_and_matches_per_step(runtime) -> None:
+    """Penalty-free sampled rows decode inside the window, token-for-token the per-step path.
+
+    On the tiny fp32 bundle the window forward equals ``decode_many`` exactly, so equal
+    tokens here pin the window's sampling bookkeeping: each row draws from its own seeded
+    generator in the same order as the per-step engine.
+    """
+    sampling = {
+        1: SamplingParams(temperature=0.8, seed=1234),
+        2: SamplingParams(temperature=1.2, top_p=0.9, top_k=5, seed=7),
+    }
+    per_step = _run(runtime, window=1, max_new_tokens=8, eos=frozenset(), sampling=sampling)
+    windowed = _run(runtime, window=6, max_new_tokens=8, eos=frozenset(), sampling=sampling)
+    assert windowed == per_step
+
+
+def test_sampled_window_uses_planned_decode(runtime) -> None:
+    """A penalty-free sampled batch actually opens a planned window (no silent fallback)."""
+    sampling = {index: SamplingParams(temperature=0.8, seed=index) for index in range(4)}
+    engine = _engine(runtime, window=6)
+    for index, prompt in enumerate(_PROMPTS):
+        engine.add_request(
+            Request(f"r{index}", list(prompt), 8, frozenset(), sampling=sampling[index])
+        )
+
+    opened: list[int] = []
+    original_open = runtime.model.open_decode_window
+
+    def spy_open_decode_window(cache, tables, budget):
+        opened.append(len(tables))
+        return original_open(cache, tables, budget)
+
+    runtime.model.open_decode_window = spy_open_decode_window
+    try:
+        engine.run()
+    finally:
+        runtime.model.open_decode_window = original_open
+    assert opened, "sampled batch never opened a decode window"
+
+
+def test_sampled_window_replay_is_reproducible(runtime) -> None:
+    """The same seeded sampled workload through windows twice produces identical tokens."""
+    sampling = {index: SamplingParams(temperature=0.9, top_p=0.95, seed=17) for index in range(4)}
+    first = _run(runtime, window=5, max_new_tokens=10, eos=frozenset(), sampling=sampling)
+    second = _run(runtime, window=5, max_new_tokens=10, eos=frozenset(), sampling=sampling)
+    assert first == second
+
+
+def test_penalty_batch_falls_back_to_per_step_path(runtime) -> None:
+    """A penalty-carrying row is window-ineligible and must match the per-step engine."""
+    sampling = {1: SamplingParams(temperature=0.8, seed=1234, presence_penalty=0.5)}
     per_step = _run(runtime, window=1, max_new_tokens=8, eos=frozenset(), sampling=sampling)
     windowed = _run(runtime, window=6, max_new_tokens=8, eos=frozenset(), sampling=sampling)
     assert windowed == per_step

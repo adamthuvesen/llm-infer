@@ -22,7 +22,7 @@ else:
 
 @dataclass
 class DecodeWindow:
-    """Deferred-decode state for one stable all-greedy batch.
+    """Deferred-decode state for one stable batch of greedy or penalty-free sampled rows.
 
     While a window is open, each decode step's sampled tokens stay on device in ``pending``
     (one ``(B,)`` long tensor per step) and no EOS/stop host sync happens. The flush *stages*
@@ -31,7 +31,9 @@ class DecodeWindow:
     A request that hit EOS mid-window therefore decodes throwaway tokens — bounded by the
     current window's remainder plus one whole follow-up window — which are discarded at
     consume time, never emitted. That is waste, not a correctness change: recorded tokens
-    stay identical to the per-step engine.
+    stay identical to the per-step engine. A sampled row's overshoot steps also consume
+    draws from its own generator; those draws die with the discarded tokens and no other
+    request shares that generator, so replay of the recorded tokens is unaffected.
     """
 
     request_ids: tuple[str, ...]
@@ -78,8 +80,9 @@ class EngineDecodeMixin(EngineMixinHost):
         if self._window_eligible(requests):
             self._decode_window_step(requests, result)
             return
-        # Leaving the deferred path (e.g. a sampled request joined the batch): drain the open
-        # window first so every request's recorded state is current, then decode the survivors.
+        # Leaving the deferred path (e.g. a penalty-carrying request joined the batch): drain
+        # the open window first so every request's recorded state is current, then decode the
+        # survivors.
         self._drain_decode_window(result)
         requests = [request for request in requests if not request.finished]
         if not requests:
@@ -123,11 +126,12 @@ class EngineDecodeMixin(EngineMixinHost):
         """Whether this decode batch may run in a deferred window (device-side stop tracking).
 
         The window trades per-step host syncs for one sync per ``budget`` steps, which is only
-        safe when nothing per step needs host data: every row greedy (no RNG, no penalty
-        history), no speculation (drafts read generated ids), no preemption (victim selection
-        inspects live state), and no tracing (events are per-token). Prefix-group rows may
-        re-enter once their block table is private, so a finisher cannot leave shared blocks
-        referenced past its recorded EOS.
+        safe when nothing per step needs host data: every row greedy or penalty-free sampled
+        (a penalty reads the row's generated history each step; a penalty-free draw needs only
+        its device-resident generator), no speculation (drafts read generated ids), no
+        preemption (victim selection inspects live state), and no tracing (events are
+        per-token). Prefix-group rows may re-enter once their block table is private, so a
+        finisher cannot leave shared blocks referenced past its recorded EOS.
         """
         return (
             self.decode_window_size > 1
@@ -135,7 +139,14 @@ class EngineDecodeMixin(EngineMixinHost):
             and not self.preemption
             and self.trace is None
             and self._window_blocks_are_private(requests)
-            and all(self._params_for(request).is_greedy for request in requests)
+            and all(self._window_row_eligible(request) for request in requests)
+        )
+
+    def _window_row_eligible(self, request: Request) -> bool:
+        """Greedy rows and penalty-free sampled rows can decode without per-step host data."""
+        params = self._params_for(request)
+        return params.is_greedy or (
+            params.presence_penalty == 0.0 and params.frequency_penalty == 0.0
         )
 
     def _window_blocks_are_private(self, requests: list[Request]) -> bool:
@@ -151,7 +162,7 @@ class EngineDecodeMixin(EngineMixinHost):
         return True
 
     def _decode_window_step(self, requests: list[Request], result: StepResult) -> None:
-        """One deferred decode step: batched forward + on-device argmax, no host sync.
+        """One deferred decode step: batched forward + on-device sampling, no host sync.
 
         The previous step's token tensor feeds the next forward directly, so within a window
         the loop never materializes tokens on the host. The window flushes when its budget is
@@ -229,7 +240,7 @@ class EngineDecodeMixin(EngineMixinHost):
                     last_tokens,
                 )
         with self._record_time("sampling"):
-            window.pending.append(torch.argmax(logits, dim=-1))
+            window.pending.append(self._sample_rows(logits, window.requests))
         if len(window.pending) >= window.budget:
             self._flush_decode_window(result)
 
