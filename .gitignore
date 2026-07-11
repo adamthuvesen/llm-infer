@@ -53,3 +53,6 @@ model-weights/
 # OS
 .DS_Store
 .claude/
+
+# maintainer-local engineering notes (roadmap, phase journals, lab evidence)
+docs/internal/
