@@ -330,7 +330,7 @@ class QwenModel:
         residual = hidden
         x = rms_norm(hidden, self.w[p + "post_attention_layernorm.weight"], self.rms_eps)
         with self._profile("projections_mlp"):
-            return residual + self._mlp(x, p)
+            return residual + swiglu_mlp(self.w, x, p, self.dtype)
 
     def _attention(
         self, x: torch.Tensor, p: str, cos: torch.Tensor, sin: torch.Tensor
@@ -500,9 +500,6 @@ class QwenModel:
         """Merge heads ``(heads, seq, head_dim)`` -> ``(seq, hidden)`` and apply o_proj."""
         merged = merge_attention_heads(attn, num_heads=self.num_heads, head_dim=self.head_dim)
         return self._linear(merged, p + "self_attn.o_proj")
-
-    def _mlp(self, x: torch.Tensor, p: str) -> torch.Tensor:
-        return swiglu_mlp(self.w, x, p, self.dtype)
 
     def _linear(self, x: torch.Tensor, name: str) -> torch.Tensor:
         """``x @ Wᵀ (+ b)`` for the weight (and optional bias) stored under ``name``.

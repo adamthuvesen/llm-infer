@@ -146,4 +146,4 @@ def test_vertical_slice_admits_third_after_one_finishes(model: QwenModel) -> Non
     assert r3.generated == r3_case["continuation_ids"][:4]
 
     # The pool was fully reclaimed once everything finished.
-    assert engine.cache.allocator.num_free == engine.cache.num_blocks
+    assert engine.cache.allocator.num_free == engine.cache.allocator.num_blocks

@@ -6,13 +6,12 @@ Qwen-only). To validate flash for Esme, compare the **flash kernel against torch
 dtype** — both bf16, through the same engine paged path. That isolates the kernel: any difference
 is the flash kernel alone, not dtype.
 
-This is the corrected contract. An earlier version compared bf16 flash against the **fp32** oracle,
-which conflated the kernel with whole-model bf16 rounding — on Esme's thin-margin QK-norm logits
-that flips genuine near-ties (esme-001 step 22: fp32 gap 0.0119), so it could never pass and told us
-nothing about the kernel. The divergence probe (``scripts/modal_esme_flash_divergence_probe.py``)
-showed bf16 flash == bf16 torch_naive **exactly** (gap 0.0000); the only divergence was bf16-vs-fp32
-dtype. So this gate is **exact** (token-for-token) at equal dtype — strict, and the honest kernel
-comparison — and should PASS. A divergence here would be a real flash-kernel bug.
+The corrected contract compares bf16 flash against bf16 ``torch_naive``. An earlier version used
+the **fp32** oracle, so kernel behavior and whole-model bf16 rounding were mixed. Genuine near-ties
+were flipped on Esme's thin-margin QK-norm logits (esme-001 step 22: fp32 gap 0.0119), which made
+that comparison unsuitable for checking the kernel. The recorded step-22 investigation found
+exact agreement between bf16 flash and bf16 ``torch_naive`` (gap 0.0000). Exact token parity is
+therefore required at equal dtype. A divergence is treated as a flash-kernel bug.
 
 This mirrors the Qwen flash gate (``tests/correctness/test_flash_attn_paged.py``), which compares
 bf16 flash to a bf16 golden, and ``scripts/modal_esme_reference_check.py`` (the Esme torch_naive
@@ -60,10 +59,10 @@ def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
 
     Loads Esme twice in **bf16**, both through the same engine paged path: once on
     ``FlashAttnPagedAttention`` (the kernel under test) and once on the default ``torch_naive``
-    (the equal-dtype reference). Same dtype on both sides isolates the kernel — any token-id
-    difference is the flash kernel, not whole-model bf16 rounding. The contract is **exact**
-    token-for-token; per the divergence probe, bf16 flash == bf16 torch_naive (gap 0.0000), so this
-    should PASS. A mismatch is a real flash-kernel bug for Esme (stop and report).
+    (the equal-dtype reference). The kernel is isolated by using the same dtype on both sides.
+    Exact token parity is required. The recorded step-22 investigation found a gap of 0.0000
+    between bf16 flash and bf16 ``torch_naive``. A mismatch is treated as an Esme flash-kernel
+    bug and must be reported.
     """
     import torch
 

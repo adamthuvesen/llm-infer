@@ -47,11 +47,11 @@ llm_infer/
   kv_cache/          # block allocator, block tables, paged page store
   scheduler/         # prefill/decode admission, continuous batching, optional preemption
   serving/           # InferenceEngine step loop, sampler, OpenAI HTTP server, metrics
-  benchmarks/        # shared workload + runners (Modal harnesses in scripts/)
+  benchmarks/        # Esme workloads, reference policy, timing, and report helpers
 tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
 docs/                # scoping.md, architecture.md, benchmark.md, serving-eval.md, fixture-format.md
 scripts/             # generate_goldens, Qwen reference check, Esme Modal harnesses,
-                     # serving/loadgen tools, benchmark evidence checks, kv trace fixtures
+                     # serving/loadgen tools, benchmark evidence checks, real KV trace generator
 visualizer/          # schema-v3 KV trace replay UI
 ```
 

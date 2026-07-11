@@ -15,9 +15,6 @@ from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row, sample
 if TYPE_CHECKING:
     from llm_infer.model.decode_plan import DecodeWindowPlan
     from llm_infer.serving.engine import StepResult
-    from llm_infer.serving.engine_contract import EngineMixinHost
-else:
-    EngineMixinHost = object
 
 
 @dataclass
@@ -73,7 +70,7 @@ class PendingWindowFlush:
     event: torch.cuda.Event | None  # None on CPU, where the copy is already synchronous
 
 
-class EngineDecodeMixin(EngineMixinHost):
+class EngineDecodeMixin:
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
         if self.preemption:

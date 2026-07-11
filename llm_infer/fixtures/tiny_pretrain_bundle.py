@@ -1,4 +1,4 @@
-"""Tiny DenseBackbone export bundle writer for tests and trace fixtures."""
+"""Tiny DenseBackbone export bundle writer for tests and the real-engine trace fixture."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def write_tiny_pretrain_bundle(
                 "layers": NUM_LAYERS,
                 "heads": NUM_HEADS,
                 "kv_heads": NUM_KV_HEADS,
-                "norm_eps": 1e-5,
+                "rms_norm_eps": 1e-5,
                 "rope_theta": 10_000.0,
                 "tie_embeddings": True,
                 "qk_norm": qk_norm,

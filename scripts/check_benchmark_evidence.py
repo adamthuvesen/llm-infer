@@ -19,16 +19,9 @@ PLOTTED_SYSTEMS = ("llm_infer", "hf_sequential")
 QUALIFIED_REFERENCE_STATUSES = frozenset({"exact", "accepted_numerical"})
 
 
-def _record_rows(record: dict[str, object]) -> object:
-    rows = record.get("rows")
-    if rows is None and isinstance(record.get("result"), dict):
-        rows = record["result"].get("rows")
-    return rows
-
-
 def _failures() -> list[str]:
     record = json.loads(CURVE_RECORD.read_text(encoding="utf-8"))
-    rows = _record_rows(record)
+    rows = record.get("rows")
     if not isinstance(rows, list):
         return [f"{CURVE_RECORD}: expected top-level rows list"]
 

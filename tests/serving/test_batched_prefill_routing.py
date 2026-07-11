@@ -163,7 +163,7 @@ def test_enabled_batched_prefill_routes_once_and_preserves_step_semantics() -> N
     assert result.prefill_chunks == {"a": (0, 2), "b": (0, 3)}
     assert result.finished_outputs == {"a": [3], "b": [12]}
     assert model.release_calls == 2
-    assert engine.cache.allocator.num_free == engine.cache.num_blocks
+    assert engine.cache.allocator.num_free == engine.cache.allocator.num_blocks
 
     started = [event for event in recorder.events if event.event == "prefill_chunk_started"]
     progressed = [event for event in recorder.events if event.event == "prefill_chunk_progress"]

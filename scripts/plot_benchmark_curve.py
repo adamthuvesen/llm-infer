@@ -47,10 +47,8 @@ CARD_HEIGHT = 560
 
 
 def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
-    """Read the legacy flat rows or the policy-v2 result envelope."""
+    """Read the policy-v2 benchmark rows."""
     rows = record.get("rows")
-    if rows is None and isinstance(record.get("result"), dict):
-        rows = record["result"].get("rows")
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError(f"{path}: expected a rows list")
     return rows

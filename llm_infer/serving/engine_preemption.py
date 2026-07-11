@@ -10,12 +10,9 @@ from llm_infer.serving.request import Request
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
-    from llm_infer.serving.engine_contract import EngineMixinHost
-else:
-    EngineMixinHost = object
 
 
-class EnginePreemptionMixin(EngineMixinHost):
+class EnginePreemptionMixin:
     # --- preemption (recompute) ---------------------------------------------------------
     #
     # Trigger points: the two places a running request needs the allocator to hand out a
@@ -61,7 +58,7 @@ class EnginePreemptionMixin(EngineMixinHost):
     def _preempt(self, victim: Request) -> None:
         """Evict ``victim`` by recompute: free its KV clearly, keep its tokens, requeue it."""
         self.preemption_count += 1
-        freed_blocks = victim.block_table.num_blocks if victim.block_table is not None else 0
+        freed_blocks = len(victim.block_table.blocks) if victim.block_table is not None else 0
         if victim.block_table is not None:
             # Fires clear block_freed at the allocator boundary.
             self._free_block_table(victim.block_table)

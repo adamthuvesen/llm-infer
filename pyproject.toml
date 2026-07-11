@@ -8,7 +8,6 @@ license = "MIT"
 dependencies = [
     "torch>=2.2",
     "transformers>=4.43",
-    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

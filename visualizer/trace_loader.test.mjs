@@ -7,7 +7,7 @@ import { theaterGeometry } from "./theater_layout.js";
 import { buildTraceModel, parseJsonlTrace } from "./trace_loader.js";
 
 test("loads the committed schema-v3 fixture into a renderable model", async () => {
-  const text = await readFile(new URL("../docs/assets/kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
   const events = parseJsonlTrace(text);
   const model = buildTraceModel(events);
 
@@ -16,8 +16,7 @@ test("loads the committed schema-v3 fixture into a renderable model", async () =
     events.map((event) => event.sequence),
     Array.from({ length: events.length }, (_, index) => index + 1),
   );
-  assert.equal(model.requestList.length, 6);
-  assert.ok(model.requestList.some((request) => request.chunks.length >= 3));
+  assert.equal(model.requestList.length, 3);
   for (const request of model.requestList) {
     assert.deepEqual(
       request.decodes.flatMap((decode) => decode.tokenIds),
@@ -38,7 +37,7 @@ test("loads the committed schema-v3 fixture into a renderable model", async () =
 });
 
 test("models block lifecycle without free-before-alloc and keeps the pool valid", async () => {
-  const text = await readFile(new URL("../docs/assets/kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
   const events = parseJsonlTrace(text);
 
   const live = new Set();
@@ -64,7 +63,7 @@ test("models block lifecycle without free-before-alloc and keeps the pool valid"
 });
 
 test("models preemption and resume on the affected request's lane", async () => {
-  const text = await readFile(new URL("../docs/assets/kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
   const events = parseJsonlTrace(text);
   const model = buildTraceModel(events);
 

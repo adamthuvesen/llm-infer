@@ -1,11 +1,9 @@
 """Generate a committed schema-v3 KV trace from a real **Esme** engine run.
 
-Unlike ``generate_kv_trace_fixture.py`` (a standalone synthetic simulation), this drives the
-actual ``InferenceEngine`` over the tiny ``llm_pretrain_dense_v1`` Esme bundle with preemption
-on, so every event is emitted by the real engine/scheduler/allocator on the Esme backend — a
-genuine Esme run the KV-trace visualizer can replay. The tiny bundle keeps it CPU-only and
-deterministic; a fixed step clock makes the throughput samples reproducible so the artifact is
-byte-stable and can be regression-checked.
+The actual ``InferenceEngine`` is run over the tiny ``llm_pretrain_dense_v1`` Esme bundle with
+preemption enabled. Every event is emitted by the real engine, scheduler, and allocator on the
+Esme backend. The tiny bundle is CPU-only and deterministic. A fixed step clock is used so the
+artifact stays byte-stable and can be checked for regressions.
 
     uv run python scripts/generate_esme_kv_trace.py            # print to stdout
     uv run python scripts/generate_esme_kv_trace.py --write    # rewrite the committed artifact
@@ -24,7 +22,7 @@ from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.request import Request
 from llm_infer.tracing import TraceRecorder
 
-# Committed beside the synthetic fixture so the visualizer ships an Esme trace too.
+# The visualizer's committed sample is recorded from the real engine.
 FIXTURE_PATH = Path("docs/assets/esme_kv_trace_schema_v3.jsonl")
 
 BLOCK_SIZE = 4

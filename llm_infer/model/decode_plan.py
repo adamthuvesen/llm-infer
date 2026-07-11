@@ -180,7 +180,7 @@ def build_decode_window_plan(
         if any(cache.allocator.refcount(block) > 1 for block in table.blocks):
             return None
 
-    device = cache.key.device
+    device = cache.kv.device
     lengths = [table.length for table in tables]
     width = max(lengths) + budget
     write_rows: list[list[int]] = []

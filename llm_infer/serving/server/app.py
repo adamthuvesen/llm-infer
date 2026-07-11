@@ -239,20 +239,18 @@ def _start_generation(
     arrival = time.perf_counter()
     request_id = async_engine.next_request_id()
     created = int(time.time())
-    stream_kwargs = {
-        "request_id": request_id,
-        "prompt_ids": prompt_ids,
-        "max_new_tokens": max_new_tokens,
-        "eos_token_ids": eos_token_ids,
-        "sampling": sampling,
-    }
-    if prefix_group_id is not None:
-        stream_kwargs["prefix_group_id"] = prefix_group_id
     return _StartedGeneration(
         request_id=request_id,
         created=created,
         arrival=arrival,
-        token_stream=async_engine.stream(**stream_kwargs),
+        token_stream=async_engine.stream(
+            request_id=request_id,
+            prompt_ids=prompt_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_ids=eos_token_ids,
+            sampling=sampling,
+            prefix_group_id=prefix_group_id,
+        ),
         detok=StopSequenceDetokenizer(tokenizer, stop),
     )
 

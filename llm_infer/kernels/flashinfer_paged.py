@@ -125,20 +125,22 @@ class FlashInferPagedAttention:
         return out.to(out_dtype)
 
     def _ensure_wrapper(self, device: torch.device) -> object:
-        if self._workspace is not None and self._workspace.device == device:
-            if self._wrapper is None:
-                raise RuntimeError("FlashInfer workspace exists without a wrapper")
-            return self._wrapper
+        workspace = self._workspace
+        wrapper = self._wrapper
+        if workspace is not None and workspace.device == device and wrapper is not None:
+            return wrapper
 
-        self._workspace = torch.zeros(self.workspace_bytes, dtype=torch.uint8, device=device)
+        workspace = torch.zeros(self.workspace_bytes, dtype=torch.uint8, device=device)
         wrapper_cls = self._decode_wrapper_class(self._flashinfer)
-        self._wrapper = wrapper_cls(
-            self._workspace,
+        wrapper = wrapper_cls(
+            workspace,
             "NHD",
             use_tensor_cores=self.use_tensor_cores,
             backend=self.backend,
         )
-        return self._wrapper
+        self._workspace = workspace
+        self._wrapper = wrapper
+        return wrapper
 
     @staticmethod
     def _import_flashinfer() -> ModuleType:

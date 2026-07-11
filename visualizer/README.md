@@ -17,22 +17,11 @@ python -m http.server 8765
 
 Then open `http://localhost:8765/visualizer/`.
 
-The viewer loads the committed fixture at `docs/assets/kv_trace_schema_v3.jsonl` when served
-over HTTP. Use `Load JSONL` to inspect another schema-v3 trace.
+The viewer loads the committed real-engine trace at
+`docs/assets/esme_kv_trace_schema_v3.jsonl` when served over HTTP. Use `Load JSONL` to inspect
+another schema-v3 trace.
 
 ## Regenerate The Fixture
-
-```bash
-uv run python scripts/generate_kv_trace_fixture.py
-```
-
-The generator is a standalone synthetic simulation (no engine/model/torch import) that emits the
-same schema-v3 event shapes `InferenceEngine(trace=...)` produces: admission, chunked prefill,
-prefix sharing, batched decode, clear block lifecycle, recompute preemption, and finish. The
-viewer ships on its own. The injected clock only makes throughput sample fields stable in git.
-The same viewer equally replays a real `InferenceEngine(trace=..., preemption=True)` trace.
-
-## Replay A Real Esme Run
 
 ```bash
 uv run python scripts/generate_esme_kv_trace.py --write
@@ -67,5 +56,5 @@ that request lane. The committed fixture is non-speculative.
 Preemption is rendered when present: a `request_preempted` puts a slashed "evicted" notch on the
 request's lane (and the KV wall shows its blocks freed at the same moment, via the matching
 `block_freed`), and a later `request_resumed` marks where it re-enters and recomputes its KV.
-Its replayed prefill chunks are the recompute. The committed fixture includes one such
-preempt + resume cycle (`chat-quick` under a tight pool).
+Its replayed prefill chunks are the recompute. The committed fixture includes real preempt +
+resume cycles under a tight pool.
