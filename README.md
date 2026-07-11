@@ -144,8 +144,8 @@ Methodology and the committed curve record are summarized in
 ## KV Trace Visualizer
 
 The static viewer in [visualizer/](visualizer/) replays schema-versioned JSONL traces emitted
-by `InferenceEngine(trace=...)`. It can use the committed fixture or a real engine trace. See
-[visualizer/README.md](visualizer/README.md).
+by `InferenceEngine(trace=...)`. The committed real-engine fixture or another trace can be loaded.
+See [visualizer/README.md](visualizer/README.md).
 
 ## Where To Look
 
@@ -154,7 +154,7 @@ by `InferenceEngine(trace=...)`. It can use the committed fixture or a real engi
 - [docs/benchmark.md](docs/benchmark.md) - benchmark setup and current result record.
 - [llm_infer/](llm_infer/) - engine code.
 - [tests/correctness/](tests/correctness/) - reference and equivalence checks.
-- [scripts/](scripts/) - goldens, loadgen, trace fixtures, and the figure generator.
+- [scripts/](scripts/) - goldens, loadgen, the real-engine trace generator, and the figure generator.
 - [assets/](assets/) - the committed curve record and rendered README figure.
 - [visualizer/](visualizer/) - static trace replay UI.
 

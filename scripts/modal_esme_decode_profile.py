@@ -21,9 +21,8 @@ bf16 CUDA Esme attention path, greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command serve-smoke
 
 ``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
-probe, launch counts, and the oracle-gated same-GPU ablation across the eager window, the
-manual piecewise CUDA-graph runner, and the torch.compile runner (opaque paged-attention
-custom op, ``mode='reduce-overhead'``), plus a recompile audit over the compiled rows.
+probe, launch counts, and the oracle-gated same-GPU ablation across the eager window and
+the manual piecewise CUDA-graph runner.
 """
 
 from __future__ import annotations
@@ -609,14 +608,13 @@ def bench_decode(batch_sizes: list[int]) -> str:
 
 # Same-GPU ablation configs: one container measures all of them back to back, so the
 # comparison is free of Modal's machine-to-machine variance (GPU SKU, clocks, host CPU).
-# ``decode_graphs``/``decode_compile`` are model-level toggles (each runner is built once
-# and reused), applied by the harness around each row rather than by ``_build_engine``.
+# ``decode_graphs`` is a model-level toggle (the runner is built once and reused), applied
+# by the harness around each row rather than by ``_build_engine``.
 ABLATION_CONFIGS: dict[str, dict] = {
     "per-step (window=1)": {"decode_window_size": 1},
     "window, classic decode_many": {"planned_decode": False},
     "window + planned buffers (default)": {},
     "window + planned + cuda graphs": {"decode_graphs": True},
-    "window + planned + torch.compile": {"decode_compile": True},
 }
 
 
@@ -629,42 +627,8 @@ def _graph_runner(flash_runtime):
     return runner
 
 
-def _compile_runner(flash_runtime):
-    """Compile+warm the torch.compile runner once; returns (runner, startup metadata).
-
-    Tries ``mode='reduce-overhead'`` (compiler-managed CUDA graphs) first. The runner's
-    enable-time parity check raises when the torch build CUDA-graph-captures through the
-    opaque attention op; the fallback then recompiles without compiler-managed graphs so
-    the row still measures honest Inductor fusion instead of decoding garbage.
-    """
-    import torch._dynamo
-
-    torch._logging.set_logs(recompiles=True)  # any mid-bench recompile shows in the log
-    start = time.perf_counter()
-    try:
-        runner = flash_runtime.model.enable_decode_compile(CAPTURE_SIZES)
-        mode = "reduce-overhead"
-    except RuntimeError as exc:
-        print(f"[compile] reduce-overhead failed the enable-time parity check: {exc}")
-        print("[compile] falling back to mode=None (Inductor fusion, no cudagraphs)")
-        torch._dynamo.reset()
-        runner = flash_runtime.model.enable_decode_compile(CAPTURE_SIZES, mode=None)
-        mode = "none (fallback)"
-    flash_runtime.model.decode_graphs = None  # rows opt in explicitly
-    elapsed = time.perf_counter() - start
-    print(
-        f"[compile] compiled+warmed buckets {CAPTURE_SIZES} in {elapsed:.1f} s "
-        f"(mode={mode}, warmup_s={runner.warmup_s:.1f})"
-    )
-    return runner, {"mode": mode, "compile_and_warmup_s": elapsed}
-
-
-def _runner_for(config: dict, graph_runner, compile_runner):
-    if config.get("decode_graphs"):
-        return graph_runner
-    if config.get("decode_compile"):
-        return compile_runner
-    return None
+def _runner_for(config: dict, graph_runner):
+    return graph_runner if config.get("decode_graphs") else None
 
 
 @app.function(
@@ -691,11 +655,10 @@ def ablate_decode(batch_sizes: list[int]) -> str:
         device="cuda",
     )
     graph_runner = _graph_runner(flash_runtime)
-    compile_runner, compile_meta = _compile_runner(flash_runtime)
     rows = []
     for size in batch_sizes:
         for label, config in ABLATION_CONFIGS.items():
-            flash_runtime.model.decode_graphs = _runner_for(config, graph_runner, compile_runner)
+            flash_runtime.model.decode_graphs = _runner_for(config, graph_runner)
             row = _bench_batch(oracle_runtime, flash_runtime, size, config)
             flash_runtime.model.decode_graphs = None
             row["config_label"] = label
@@ -710,7 +673,6 @@ def ablate_decode(batch_sizes: list[int]) -> str:
         {
             "rows": rows,
             "attention_backend": type(flash_runtime.model.backend).__name__,
-            "compile": compile_meta,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
         }
@@ -1790,7 +1752,6 @@ def capture_report(batch_sizes: list[int]) -> str:
     )
     model = flash_runtime.model
     graph_runner = _graph_runner(flash_runtime)
-    compile_runner, compile_meta = _compile_runner(flash_runtime)
     flashinfer_meta: dict[str, object] = {"available": False}
     flashinfer_runtime = None
     flashinfer_graph_runner = None
@@ -1817,7 +1778,6 @@ def capture_report(batch_sizes: list[int]) -> str:
     launch_configs = [
         ("eager-window", flash_runtime, None),
         ("cuda-graphs", flash_runtime, graph_runner),
-        ("torch-compile", flash_runtime, compile_runner),
     ]
     if flashinfer_runtime is not None and flashinfer_graph_runner is not None:
         launch_configs.append(
@@ -1837,16 +1797,10 @@ def capture_report(batch_sizes: list[int]) -> str:
                 f"gpu busy/pass {profile['gpu_busy_ms_per_step']:.2f} ms"
             )
 
-    # Recompile audit: from here to the end of the bench rows, the compiled path must not
-    # build a single new Dynamo graph — recompiles in steady state are the failure mode the
-    # tensors-not-ints design exists to prevent (reasons would show via TORCH_LOGS).
-    from llm_infer.model.decode_compile import dynamo_counters_snapshot
-
-    counters_before = dynamo_counters_snapshot()
     bench_rows = []
     for size in batch_sizes:
         for label, config in ABLATION_CONFIGS.items():
-            model.decode_graphs = _runner_for(config, graph_runner, compile_runner)
+            model.decode_graphs = _runner_for(config, graph_runner)
             row = _bench_batch(oracle_runtime, flash_runtime, size, config)
             model.decode_graphs = None
             row["config_label"] = label
@@ -1868,22 +1822,12 @@ def capture_report(batch_sizes: list[int]) -> str:
                 f"median {row['median_seconds']:.3f} s, "
                 f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
             )
-    counters_after = dynamo_counters_snapshot()
-    recompile_audit = {
-        "before_bench": counters_before,
-        "after_bench": counters_after,
-        "new_graphs_during_bench": counters_after["unique_graphs"]
-        - counters_before["unique_graphs"],
-    }
-    print(f"[compile] recompile audit: {recompile_audit}")
-
     return json.dumps(
         {
             "sync_probe": sync,
             "launches": launches,
             "rows": bench_rows,
             "capture_sizes": list(CAPTURE_SIZES),
-            "compile": {**compile_meta, "recompile_audit": recompile_audit},
             "flashinfer": flashinfer_meta,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),

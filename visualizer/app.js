@@ -2,7 +2,7 @@ import { appendEventRowContent } from "./event_row.js";
 import { theaterGeometry } from "./theater_layout.js";
 import { buildTraceModel, eventLabel, parseJsonlTrace } from "./trace_loader.js";
 
-const SAMPLE_TRACE_PATH = "../docs/assets/kv_trace_schema_v3.jsonl";
+const SAMPLE_TRACE_PATH = "../docs/assets/esme_kv_trace_schema_v3.jsonl";
 const NS = "http://www.w3.org/2000/svg";
 const REDUCE = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
@@ -118,8 +118,8 @@ async function loadTraceText(text, sourceName, isSample = false) {
   els.scrubber.max = state.model.maxSequence;
   els.scrubber.value = state.cursor;
   els.seqTotal.textContent = pad(state.model.maxSequence);
-  els.traceMeta.textContent = `${baseName(sourceName)} · ${events.length} events · ${state.model.requestList.length} requests · ${state.model.maxStep + 1} steps${isSample ? " · synthetic sample" : ""}`;
-  els.tpsNote.textContent = isSample ? "simulated step clock" : "";
+  els.traceMeta.textContent = `${baseName(sourceName)} · ${events.length} events · ${state.model.requestList.length} requests · ${state.model.maxStep + 1} steps${isSample ? " · bundled engine trace" : ""}`;
+  els.tpsNote.textContent = isSample ? "fixed replay clock" : "";
 
   buildKvWall();
   setStatus("trace loaded", false);

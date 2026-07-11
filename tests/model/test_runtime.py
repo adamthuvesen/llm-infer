@@ -413,7 +413,6 @@ def test_generic_modules_do_not_import_qwen_directly() -> None:
     generic_paths = [
         root / "llm_infer" / "model" / "decode.py",
         root / "llm_infer" / "serving" / "engine.py",
-        root / "llm_infer" / "benchmarks" / "runners.py",
         root / "llm_infer" / "serve.py",
     ]
     for path in generic_paths:

@@ -12,12 +12,9 @@ from llm_infer.serving.request import Request
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
-    from llm_infer.serving.engine_contract import EngineMixinHost
-else:
-    EngineMixinHost = object
 
 
-class EnginePrefillMixin(EngineMixinHost):
+class EnginePrefillMixin:
     def _reserved_blocks(self, request: Request) -> int:
         """Blocks the admit event reports reserved — footprint under preemption, else worst case."""
         if self.preemption:

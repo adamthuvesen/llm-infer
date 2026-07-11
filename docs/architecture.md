@@ -72,7 +72,7 @@ flowchart TB
 | [`kv_cache/`](../llm_infer/kv_cache/) | physical K/V tensor pool, block ids, scatter/gather | attention math, admission policy |
 | [`scheduler/`](../llm_infer/scheduler/) | waiting queue, running set, block budget reservation | physical block allocation |
 | [`serving/`](../llm_infer/serving/) | request lifecycle, engine step loop, sampler, server integration | model weights, backend choice |
-| [`tracing.py`](../llm_infer/tracing.py) | schema-versioned engine events for JSONL replay | synthetic visualization state |
+| [`tracing.py`](../llm_infer/tracing.py) | schema-versioned engine events for JSONL replay | visualizer rendering state |
 | [`benchmarks/`](../llm_infer/benchmarks/) | Esme and Qwen reference timing wrappers | reference correctness itself |
 
 Dependency direction stays simple:

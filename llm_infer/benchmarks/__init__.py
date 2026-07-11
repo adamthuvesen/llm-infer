@@ -1,9 +1,4 @@
-"""Benchmark helpers for Esme speed records.
-
-The workload and report helpers are pure and CPU-importable; the per-system runners pull in
-torch/transformers or vLLM inside the harnesses that need them. See ``docs/benchmark.md`` for
-methodology.
-"""
+"""Report helpers for Esme speed records. See ``docs/benchmark.md`` for methodology."""
 
 from __future__ import annotations
 
@@ -13,10 +8,7 @@ from llm_infer.benchmarks.report import (
     normalize_at_eos,
     total_output_tokens,
 )
-from llm_infer.benchmarks.workload import (
-    BenchRequest,
-    Workload,
-)
+from llm_infer.benchmarks.workload import BenchRequest, Workload
 
 __all__ = [
     "BenchRequest",

@@ -85,7 +85,7 @@ llm_infer/
 tests/correctness/ # reference and equivalence checks
 docs/             # public docs
 docs/internal/    # maintainer-local lab notes (untracked)
-scripts/          # goldens, benchmarks, loadgen, trace fixtures
+scripts/          # goldens, benchmarks, loadgen, real-engine trace generator
 visualizer/       # schema-v3 KV trace replay UI
 ```
 

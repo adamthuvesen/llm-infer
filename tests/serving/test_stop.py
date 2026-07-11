@@ -164,6 +164,7 @@ class ScriptedAsyncEngine:
         max_new_tokens: int,
         eos_token_ids,
         sampling=None,
+        prefix_group_id: str | None = None,
     ) -> AsyncIterator[TokenStreamItem]:
         try:
             for index, token_id in enumerate(self._token_ids[:max_new_tokens]):

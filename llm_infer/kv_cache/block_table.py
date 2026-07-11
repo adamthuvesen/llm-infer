@@ -47,12 +47,7 @@ class BlockTable:
             )
 
     def fork_shared(self) -> BlockTable:
-        """Create another table pointing at the same physical blocks.
-
-        Used after one sibling request has prefetched a prompt. The fork starts at the same
-        logical length and shares every current block by refcount; generated-token writes make
-        the last partial block private before mutation.
-        """
+        """Create another table sharing the same physical blocks by refcount."""
         fork = BlockTable(self.allocator, self.block_size)
         fork.blocks = list(self.blocks)
         fork.length = self.length

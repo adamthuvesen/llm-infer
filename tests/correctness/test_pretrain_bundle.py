@@ -195,15 +195,8 @@ def test_qk_norm_requires_exported_norm_weights(tmp_path: Path) -> None:
         PretrainBundleModel.load(bundle)
 
 
-def test_allows_disabled_logit_soft_cap_alias(tmp_path: Path) -> None:
-    bundle = _write_tiny_bundle(tmp_path)
-    config = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
-    del config["logit_soft_cap"]
-    config["final_logit_softcapping"] = 0.0
-    (bundle / "config.json").write_text(json.dumps(config), encoding="utf-8")
-
-    model = PretrainBundleModel.load(bundle)
-
+def test_allows_disabled_logit_soft_cap(tmp_path: Path) -> None:
+    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path, logit_soft_cap=0.0))
     assert model.config.logit_soft_cap == 0.0
 
 

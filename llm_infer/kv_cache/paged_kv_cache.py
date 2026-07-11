@@ -4,9 +4,8 @@ Layout is one unified page tensor shaped
 ``(num_layers, num_blocks, 2, block_size, num_kv_heads, head_dim)``. K/V are stored
 *after* RoPE but *before* GQA expansion (one row per KV head, not per query head) —
 each token's rotation is fixed by its absolute position, so it is computed once at
-write time and never re-rotated. The K and V views keep the old API, while the unified
-layout lets native paged-attention kernels read ``(page, k_or_v, offset, head, dim)``
-directly.
+write time and never re-rotated. The K and V views preserve the public API, while native
+paged-attention kernels read the unified layout directly.
 """
 
 from __future__ import annotations
@@ -201,7 +200,7 @@ class PagedKVCache:
     def read(self, table: BlockTable, layer: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather K/V for positions ``0 .. length-1`` as ``(length, num_kv_heads, head_dim)``."""
         idx = torch.as_tensor(
-            table.physical_slots(0, length), dtype=torch.long, device=self.key.device
+            table.physical_slots(0, length), dtype=torch.long, device=self.kv.device
         )
         return self._read_slots(layer, idx)
 
@@ -228,13 +227,13 @@ class PagedKVCache:
             slots: list[int] = []
             for table, length in zip(tables, lengths, strict=True):
                 slots.extend(table.physical_slots(0, length))
-            idx = torch.as_tensor(slots, dtype=torch.long, device=self.key.device)
+            idx = torch.as_tensor(slots, dtype=torch.long, device=self.kv.device)
 
         cu_seqlens: torch.Tensor | None = None
         if include_packed:
-            cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.key.device)
+            cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.kv.device)
             cu_seqlens[1:] = torch.as_tensor(
-                lengths, dtype=torch.int32, device=self.key.device
+                lengths, dtype=torch.int32, device=self.kv.device
             ).cumsum(0)
         return KVReadPlan(
             idx=idx,
@@ -266,7 +265,7 @@ class PagedKVCache:
             indptr_host.append(indptr_host[-1] + page_count)
             last_page_len_host.append(((length - 1) % self.block_size) + 1)
 
-        device = self.key.device
+        device = self.kv.device
         return KVPagePlan(
             indptr=torch.tensor(indptr_host, dtype=torch.int32, device=device),
             indices=torch.tensor(indices_host, dtype=torch.int32, device=device),
@@ -292,7 +291,7 @@ class PagedKVCache:
 
     def _read_slots(self, layer: int, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         blocks, offsets = self._slot_parts(slots)
-        return self.key[layer, blocks, offsets], self.value[layer, blocks, offsets]
+        return self.kv[layer, blocks, 0, offsets], self.kv[layer, blocks, 1, offsets]
 
     def _write_slots(
         self,
@@ -302,5 +301,5 @@ class PagedKVCache:
         value: torch.Tensor,
     ) -> None:
         blocks, offsets = self._slot_parts(slots)
-        self.key[layer, blocks, offsets] = key
-        self.value[layer, blocks, offsets] = value
+        self.kv[layer, blocks, 0, offsets] = key
+        self.kv[layer, blocks, 1, offsets] = value

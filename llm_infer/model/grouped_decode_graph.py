@@ -212,7 +212,9 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._state.positions.copy_(capture_plan.positions)
         fixed_metadata = FlashInferPageMetadata(
             indptr=torch.empty(self.batch_size + 1, dtype=torch.int32, device=self.model.device),
-            indices=torch.empty(self.cache.num_blocks, dtype=torch.int32, device=self.model.device),
+            indices=torch.empty(
+                self.cache.allocator.num_blocks, dtype=torch.int32, device=self.model.device
+            ),
             last_page_len=torch.empty(self.batch_size, dtype=torch.int32, device=self.model.device),
         )
         # FlashInfer requires a zeroed workspace before a wrapper's first use. A caller may

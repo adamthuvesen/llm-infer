@@ -13,12 +13,9 @@ from llm_infer.tracing import FinishReason, TokenSource, TraceEvent, TraceEventN
 
 if TYPE_CHECKING:
     from llm_infer.serving.engine import StepResult
-    from llm_infer.serving.engine_contract import EngineMixinHost
-else:
-    EngineMixinHost = object
 
 
-class EngineTraceMixin(EngineMixinHost):
+class EngineTraceMixin:
     def _trace_decode_step(
         self,
         requests: list[Request],
