@@ -23,7 +23,7 @@ Esme has two model details that the paged path must respect:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from itertools import accumulate
 from pathlib import Path
 
@@ -364,7 +364,8 @@ class PretrainBundleModel:
         Its K/V is appended to the paged store, then the full history (including this token) is
         gathered and attended through the backend. Advances ``table.length`` by one.
         """
-        return self.decode_tokens(cache, table, token_id)[-1]
+        tokens = [token_id] if isinstance(token_id, int) else token_id
+        return self.decode_tokens(cache, table, tokens)[-1]
 
     @torch.no_grad()
     def decode_many(
@@ -842,7 +843,7 @@ class PretrainBundleModel:
     def _linear(self, x: torch.Tensor, name: str) -> torch.Tensor:
         return linear_projection(self.w, x, name, self.dtype)
 
-    def _profile(self, name: str):
+    def _profile(self, name: str) -> AbstractContextManager[None]:
         if self.profiler is None:
             return nullcontext()
         return self.profiler.record(name)

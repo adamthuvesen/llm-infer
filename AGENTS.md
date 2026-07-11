@@ -76,8 +76,9 @@ Managed with [`uv`](https://docs.astral.sh/uv/). Python 3.11+.
 ```bash
 uv sync --extra dev --extra serving   # dev tests + HTTP server deps
 uv run ruff check                     # lint (must be clean)
+uv run mypy llm_infer                 # package type check
 uv run pytest tests/correctness -q    # fast CPU reference check (slow 3B reference checks deselected)
-uv run pytest -q                      # full fast suite before merge
+make check                            # lint, format, types, and full fast suite before merge
 uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU reference check
 ```
 

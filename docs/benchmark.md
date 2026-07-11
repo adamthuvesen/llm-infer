@@ -94,7 +94,6 @@ These commands do not rerun GPU benchmarks; they check the local code, committed
 and figure-generation path:
 
 ```bash
-uv run ruff check
-uv run pytest -q
+make check
 uv run scripts/check_benchmark_evidence.py
 ```

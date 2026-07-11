@@ -75,9 +75,9 @@ Python 3.11+ is required. Dependencies are managed with `uv`.
 
 ```bash
 uv sync --extra dev --extra serving
-uv run ruff check
+uv run mypy llm_infer
 uv run pytest tests/correctness -q
-uv run pytest -q
+make check
 ```
 
 The default checks are CPU-runnable. The slow 3B Qwen reference checks are opt-in:

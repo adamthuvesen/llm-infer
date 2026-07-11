@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
+from fastapi import FastAPI
 
 from llm_infer.kernels.base import PagedDecodeAttentionBackend
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
@@ -57,7 +58,7 @@ def build_app_from_runtime(
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
     grouped_decode_graphs: bool | None = None,
-):
+) -> FastAPI:
     """Wire a loaded model runtime into the HTTP app.
 
     Decode graphs are on by default: on a CUDA bundle model the piecewise decode-window
