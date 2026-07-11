@@ -188,3 +188,64 @@ def test_phase0_http_workloads_pair_identical_greedy_and_sampled_shapes() -> Non
     assert {request.prompt for request in greedy.requests} == {
         request.prompt for request in sampled.requests
     }
+
+
+def _sampled_record(runtime, request_id: str, token_ids: list[int]):
+    from llm_infer.serving.sampler import SamplingParams
+    from scripts.esme_serving_eval import ObservedEngineRequest, RequestSignature
+
+    sampling = SamplingParams(temperature=0.8, top_p=0.95, seed=17)
+    prompt_ids = runtime.tokenizer.encode("replay gate prompt")
+    record = ObservedEngineRequest(
+        request_id=request_id,
+        signature=RequestSignature.from_parts(prompt_ids, 4, sampling),
+        sampling=sampling,
+        arrival_s=0.0,
+    )
+    record.token_ids = list(token_ids)
+    return record
+
+
+def test_sampled_replay_consistent_but_anchor_divergent_is_accepted(tmp_path: Path) -> None:
+    """Identical sampled records that differ from the single-request anchor still pass.
+
+    This is the batched-sampled case: bf16 batch-shape numerics fork a seeded continuation,
+    so the gate is replay consistency; the anchor divergence is recorded as evidence.
+    """
+    from scripts.esme_serving_eval import _reference_summary
+
+    runtime = _runtime(tmp_path)
+    stream = [5, 9, 2, 4]  # deliberately not what the anchor engine produces
+    records = [_sampled_record(runtime, f"req-{index}", stream) for index in range(3)]
+
+    summary = _reference_summary(runtime, records, block_size=8)
+
+    assert summary["status"] == "pass"
+    assert summary["passed"] == 3
+    assert summary["sampled_replay_divergent_groups"] == 0
+    statuses = {detail.get("status") for detail in summary["details"]}
+    assert "pass_replay" in statuses
+    assert "replay_anchor_note" in statuses
+
+
+def test_sampled_replay_divergence_sends_row_to_review(tmp_path: Path) -> None:
+    """Sampled records of one signature that disagree with each other need review."""
+    from scripts.esme_serving_eval import _reference_summary, _speed_status
+
+    runtime = _runtime(tmp_path)
+    records = [
+        _sampled_record(runtime, "req-0", [5, 9, 2, 4]),
+        _sampled_record(runtime, "req-1", [5, 9, 2, 4]),
+        _sampled_record(runtime, "req-2", [5, 9, 7, 1]),
+    ]
+
+    summary = _reference_summary(runtime, records, block_size=8)
+
+    assert summary["status"] == "review"
+    assert summary["sampled_replay_divergent_groups"] == 1
+    divergent = next(d for d in summary["details"] if d.get("status") == "replay_divergent")
+    assert divergent["distinct_streams"] == 2
+    assert (
+        _speed_status(summary["status"], requests_total=3, requests_completed=3, observed_count=3)
+        == "not_reported_reference_review_required"
+    )
