@@ -117,7 +117,7 @@ server enables it by default on CUDA bundle models (measured +18% single-request
 `--no-grouped-decode-graphs` skips its startup capture), while the raw engine keeps it
 explicit — the win depends on the batch holding its captured size, which serving admission
 provides and ragged EOS-terminating benchmark drains do not (see
-`docs/internal/performance-roadmap.md`). The runner counts its own hits
+the maintainer performance notes). The runner counts its own hits
 (`llm_infer_grouped_decode_steps_total` on `/metrics`) so a silent fall-through is visible.
 
 ## Paged KV Cache

@@ -84,7 +84,7 @@ llm_infer/
   benchmarks/     # Esme benchmark helpers and shared report utilities
 tests/correctness/ # reference and equivalence checks
 docs/             # public docs
-docs/internal/    # benchmark evidence and implementation notes
+docs/internal/    # maintainer-local lab notes (untracked)
 scripts/          # goldens, benchmarks, loadgen, trace fixtures
 visualizer/       # schema-v3 KV trace replay UI
 ```

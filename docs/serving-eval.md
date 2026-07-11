@@ -1,7 +1,7 @@
 # Esme Serving Evaluation
 
 This harness shows how the Esme serving path behaves when scheduler features interact under
-load. It is not a replacement for the A100 benchmark in [../benchmark.md](../benchmark.md). Any
+load. It is not a replacement for the A100 benchmark in [../benchmark.md](benchmark.md). Any
 `tok/s` field is reported only when the workload passes the local reference gate.
 
 ## Run Locally
@@ -139,7 +139,7 @@ window became the engine default, so absolute latencies from that run are not cu
 the public serving path can force and count real preemptions, preserve reference
 agreement, expose prefix caching, distinguish reference-gated rows from sampled rows, and
 report queue time, stream token counts, and KV utilization. The published per-technique
-GPU numbers live in [../benchmark.md](../benchmark.md)'s technique gallery; this harness is
+GPU numbers live in [../benchmark.md](benchmark.md)'s technique gallery; this harness is
 the local, no-spend way to observe the same techniques interacting.
 
 ## Machine-Readable Output
@@ -149,4 +149,4 @@ The JSON summary contains one object per workload under `workloads[]`, with `met
 record per line with its workload and surface.
 
 Raw outputs should stay under `bench-results/`, which is git-ignored. Curated findings belong
-in this document or [../benchmark.md](../benchmark.md).
+in this document or [../benchmark.md](benchmark.md).

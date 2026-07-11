@@ -49,7 +49,7 @@ llm_infer/
   serving/           # InferenceEngine step loop, sampler, OpenAI HTTP server, metrics
   benchmarks/        # shared workload + runners (Modal harnesses in scripts/)
 tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
-docs/                # scoping.md, architecture.md, benchmark.md; internal notes in docs/internal/
+docs/                # scoping.md, architecture.md, benchmark.md, serving-eval.md, fixture-format.md
 scripts/             # generate_goldens, Qwen reference check, Esme Modal harnesses,
                      # serving/loadgen tools, benchmark evidence checks, kv trace fixtures
 visualizer/          # schema-v3 KV trace replay UI
@@ -67,7 +67,7 @@ The 0.1-logit bf16 boundary is automatic acceptance, not a measured error distri
 numerical differences need a durable review. Missing/extra output and confirmed bugs fail. Keep raw
 timing in all measured rows, gate public tok/s with `headline_eligible`, and do not turn historical
 benchmark migration into a reason to rerun otherwise settled experiments. See
-`docs/internal/reference-policy-retro-audit.md`.
+`docs/internal/reference-policy-retro-audit.md` (maintainer-local notes, untracked).
 
 ## Development
 
