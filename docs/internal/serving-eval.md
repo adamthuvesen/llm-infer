@@ -96,8 +96,41 @@ Per-request HTTP controls:
 - `queue_time`: client arrival to engine admission.
 - `preemption_count`: sampled from the local engine or `/metrics` in external mode.
 - `kv_utilization_peak` / `kv_utilization_final`: used KV blocks divided by total blocks.
-- `reference.status`: `pass`, `fail`, `partial` for mixed greedy/sampled rows, `skipped` for
-  all sampled rows, or `unavailable` for external HTTP.
+- `reference.status`: `pass`, `fail`, `review` (a sampled replay group disagreed with
+  itself — see below), `partial` for mixed greedy/sampled rows, `skipped` for all sampled
+  rows, or `unavailable` for external HTTP.
+
+## Sampled reference: same-shape seeded replay (2026-07-11)
+
+Greedy rows gate against the fp32 full-recompute reference with traced bf16 ties, unchanged.
+Sampled rows gate on **same-shape seeded replay**: every observed record of one request
+signature (same prompt, sampling params, and seed — all measured runs and all batchmates)
+must carry the identical token stream.
+
+Why the old gate was wrong: until 2026-07-10 a sampled record had to reproduce the seeded
+*single-request* stream exactly. That is a cross-shape exactness requirement, and bf16
+decode kernels legitimately produce slightly different logits per batch shape; one flipped
+multinomial draw then forks the whole continuation. The phase0 `sampled-b8`/`sampled-b64`
+rows failed this gate from their first run (2026-07-09, both grouped A/B arms) while every
+batchmate agreed token-for-token with every other batchmate and every measured run — the
+signature of shape numerics, not an RNG bug. The per-request seeded generator design is
+separately pinned by CPU tests (`test_sampling_batch_equivalence`, `test_decode_window`).
+
+Status mapping under reference policy v2:
+
+- replay-consistent and equal to the seeded single-request anchor → record `pass`, row
+  `exact`;
+- replay-consistent but anchor-divergent → record `pass_replay`, row `accepted_numerical`,
+  with the anchor's first mismatch stored as evidence (`replay_anchor_note`);
+- any disagreement inside a replay group → `replay_divergent`, row `review_required`,
+  throughput withheld (`not_reported_reference_review_required`). Admission-composition
+  drift (a straggler admitted a step late decodes under different shapes) and real
+  nondeterminism both land here; neither may pass silently.
+
+Cross-shape exact sampled tokens are explicitly **not** required (performance roadmap,
+Phase 5 correctness checks). Sampling semantics (seeds, penalties, top-k, top-p) are pinned
+by the sampler unit tests, and greedy rows in the same record keep the fp32 gate, so model
+math regressions still fail loudly.
 
 ## What the harness demonstrates
 

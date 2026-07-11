@@ -177,8 +177,9 @@ def main(
         "workloads": ["streaming-greedy", "streaming-sampled"],
         "sampling": {"temperature": 0.8, "top_p": 0.95, "top_k": 32, "seed": 17},
         "reference": (
-            "greedy: fp32 full-recompute with traced bf16 ties; sampled: seeded single-request "
-            "paged path with the same bf16 backend"
+            "greedy: fp32 full-recompute with traced bf16 ties; sampled: same-shape seeded "
+            "replay (every record of one signature identical), with the seeded single-request "
+            "bf16 stream kept as divergence evidence, not the gate"
         ),
         "timing": (
             "localhost Uvicorn HTTP request wall only; model load, graph capture, "

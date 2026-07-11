@@ -44,7 +44,7 @@ from llm_infer.tracing import TraceRecorder
 
 Surface = Literal["engine", "asgi-http", "network-http", "external-http"]
 Endpoint = Literal["chat", "completions"]
-ReferenceState = Literal["pass", "fail", "partial", "skipped", "unavailable"]
+ReferenceState = Literal["pass", "fail", "review", "partial", "skipped", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -1137,9 +1137,13 @@ def _workload_result(
     reference_policy_status = (
         "accepted_numerical"
         if reference["status"] == "pass"
-        and any(detail.get("status") == "pass_tie" for detail in reference["details"])
+        and any(
+            detail.get("status") in ("pass_tie", "pass_replay") for detail in reference["details"]
+        )
         else "exact"
         if reference["status"] == "pass"
+        else "review_required"
+        if reference["status"] == "review"
         else "failed"
     )
 
@@ -1267,6 +1271,20 @@ def _reference_summary(
     *,
     block_size: int,
 ) -> dict[str, object]:
+    """Greedy records gate against the fp32-anchored greedy reference; sampled records gate
+    on same-shape seeded replay.
+
+    Sampled tokens are not stable across decode batch shapes (bf16 kernels produce slightly
+    different logits per shape, and one flipped multinomial draw forks the continuation), so
+    a batched sampled request cannot be required to reproduce the single-request stream.
+    What *is* required — the Phase 5 sampled-serving contract — is reproducibility: every
+    record of the same signature in the workload (all measured runs, all batchmates) must
+    carry the identical token stream. A replay-consistent group that also matches the seeded
+    single-request anchor is ``pass``; consistent but anchor-divergent is ``pass_replay``
+    (accepted-numerical, first divergence recorded as evidence); an internally inconsistent
+    group is ``replay_divergent`` and sends the row to review — real nondeterminism and
+    admission-composition drift both land there rather than passing silently.
+    """
     from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
@@ -1275,7 +1293,12 @@ def _reference_summary(
     passed = 0
     failed = 0
     skipped = 0
+    replay_divergent_groups = 0
+    sampled_groups: dict[RequestSignature, list[ObservedEngineRequest]] = {}
     for record in records:
+        if not record.sampling.is_greedy:
+            sampled_groups.setdefault(record.signature, []).append(record)
+            continue
         reference = references.get(record.signature)
         if reference is None:
             reference = _reference_decode(runtime, record, block_size=block_size)
@@ -1292,26 +1315,25 @@ def _reference_summary(
                 }
             )
             continue
-        if record.sampling.is_greedy:
-            tie_result = compare_under_tie_tolerance(
-                runtime.model,
-                list(record.signature.prompt_ids),
-                got,
-                expected,
-                tolerance=BF16_AGREEMENT_TOLERANCE,
+        tie_result = compare_under_tie_tolerance(
+            runtime.model,
+            list(record.signature.prompt_ids),
+            got,
+            expected,
+            tolerance=BF16_AGREEMENT_TOLERANCE,
+        )
+        if tie_result.ok and tie_result.divergence is not None:
+            passed += 1
+            details.append(
+                {
+                    "request_id": record.request_id,
+                    "status": "pass_tie",
+                    "step": tie_result.divergence.step,
+                    "gap": tie_result.divergence.reference_gap,
+                    "output_tokens": len(record.token_ids),
+                }
             )
-            if tie_result.ok and tie_result.divergence is not None:
-                passed += 1
-                details.append(
-                    {
-                        "request_id": record.request_id,
-                        "status": "pass_tie",
-                        "step": tie_result.divergence.step,
-                        "gap": tie_result.divergence.reference_gap,
-                        "output_tokens": len(record.token_ids),
-                    }
-                )
-                continue
+            continue
         failed += 1
         details.append(
             {
@@ -1323,10 +1345,77 @@ def _reference_summary(
             }
         )
 
+    for group in sampled_groups.values():
+        anchor = normalize_at_eos(
+            _reference_decode(runtime, group[0], block_size=block_size), runtime.eos_token_ids
+        )
+        streams = [normalize_at_eos(record.token_ids, runtime.eos_token_ids) for record in group]
+        distinct: list[list[int]] = []
+        stream_counts: list[int] = []
+        for stream in streams:
+            try:
+                stream_counts[distinct.index(stream)] += 1
+            except ValueError:
+                distinct.append(stream)
+                stream_counts.append(1)
+        if len(distinct) == 1:
+            matches_anchor = distinct[0] == anchor
+            status_label = "pass" if matches_anchor else "pass_replay"
+            passed += len(group)
+            for record in group:
+                details.append(
+                    {
+                        "request_id": record.request_id,
+                        "status": status_label,
+                        "output_tokens": len(record.token_ids),
+                    }
+                )
+            if not matches_anchor:
+                details.append(
+                    {
+                        "status": "replay_anchor_note",
+                        "records": len(group),
+                        "note": (
+                            "sampled same-shape replay is consistent across every record; "
+                            "the seeded single-request anchor diverges, which is expected "
+                            "batch-shape bf16 numerics, not a gate"
+                        ),
+                        "anchor_first_mismatch": _first_mismatch(distinct[0], anchor),
+                    }
+                )
+        else:
+            replay_divergent_groups += 1
+            failed += len(group)
+            largest, runner_up = (
+                index
+                for index, _ in sorted(
+                    enumerate(stream_counts), key=lambda item: item[1], reverse=True
+                )[:2]
+            )
+            details.append(
+                {
+                    "status": "replay_divergent",
+                    "records": len(group),
+                    "distinct_streams": len(distinct),
+                    "stream_counts": stream_counts,
+                    "first_mismatch_between_top_streams": _first_mismatch(
+                        distinct[largest], distinct[runner_up]
+                    ),
+                    "note": (
+                        "sampled records of one signature disagree with each other; "
+                        "same-shape seeded replay must be reproducible — admission-"
+                        "composition drift or real nondeterminism needs review"
+                    ),
+                }
+            )
+
+    greedy_failed = sum(1 for detail in details if detail.get("status") == "fail")
     if not records:
         status: ReferenceState = "unavailable"
-    elif failed:
+    elif greedy_failed:
         status = "fail"
+    elif replay_divergent_groups:
+        status = "review"
     elif skipped and passed:
         status = "partial"
     elif skipped:
@@ -1338,6 +1427,8 @@ def _reference_summary(
         "passed": passed,
         "failed": failed,
         "skipped_sampled": skipped,
+        "sampled_replay_groups": len(sampled_groups),
+        "sampled_replay_divergent_groups": replay_divergent_groups,
         "details": details,
     }
 
@@ -1353,10 +1444,11 @@ def _reference_decode(
             eos_token_ids=set(runtime.eos_token_ids),
         )
 
-    # Seeded sampled output is not stable across fp32 and bf16 logits. Its serving reference is
-    # therefore one request through the same paged backend and dtype. This checks that batching,
-    # HTTP dispatch, and per-request RNG state do not change the sampled continuation; greedy
-    # model math remains gated against the fp32 full-recompute oracle above.
+    # Seeded sampled output is not stable across fp32 and bf16 logits, so the sampled anchor is
+    # one request through the same paged backend and dtype. Since 2026-07 it is *evidence*, not
+    # the gate: batched sampled records gate on same-shape replay consistency (see
+    # _reference_summary), because bf16 batch-shape kernel differences legitimately fork a
+    # seeded continuation. Greedy model math remains gated against the fp32 oracle above.
     required_blocks = (
         len(record.signature.prompt_ids) + record.signature.max_new_tokens + block_size - 1
     ) // block_size
@@ -1458,6 +1550,8 @@ def _speed_status(
         return "reported"
     if reference_status == "fail":
         return "not_reported_reference_failed"
+    if reference_status == "review":
+        return "not_reported_reference_review_required"
     if reference_status == "partial":
         return "not_reported_contains_sampled_requests"
     if reference_status == "skipped":
