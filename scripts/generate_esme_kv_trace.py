@@ -1,9 +1,9 @@
 """Generate a committed schema-v3 KV trace from a real **Esme** engine run.
 
 The actual ``InferenceEngine`` is run over the tiny ``llm_pretrain_dense_v1`` Esme bundle with
-preemption enabled. Every event is emitted by the real engine, scheduler, and allocator on the
-Esme backend. The tiny bundle is CPU-only and deterministic. A fixed step clock is used so the
-artifact stays byte-stable and can be checked for regressions.
+prefix sharing and preemption enabled. Every event is emitted by the real engine, scheduler, and
+allocator on the Esme backend. The tiny bundle is CPU-only and deterministic. A fixed step clock
+keeps the artifact byte-stable for regression checks.
 
     uv run python scripts/generate_esme_kv_trace.py            # print to stdout
     uv run python scripts/generate_esme_kv_trace.py --write    # rewrite the committed artifact
@@ -26,11 +26,16 @@ from llm_infer.tracing import TraceRecorder
 FIXTURE_PATH = Path("docs/assets/esme_kv_trace_schema_v3.jsonl")
 
 BLOCK_SIZE = 4
-# Three short prompts of footprint 1 block each are all admitted into a 3-block pool, then evict
-# as they decode — a real recompute preemption, exactly the shape the visualizer is built to show.
-NUM_BLOCKS = 3
+# Four requests share a tight pool. The first pair has an identical prompt and prefix group, so
+# its prompt block has two real owners; the remaining requests force recompute preemption.
+NUM_BLOCKS = 4
 MAX_NEW_TOKENS = 6
-PROMPTS = (("esme-a", [1, 4, 7]), ("esme-b", [2, 5, 8]), ("esme-c", [3, 6, 9]))
+REQUESTS = (
+    ("esme-a", [4, 5, 6], "esme-shared"),
+    ("esme-b", [4, 5, 6], "esme-shared"),
+    ("esme-c", [7, 8, 9], None),
+    ("esme-d", [10, 4, 7], None),
+)
 # Deterministic 6 ms-per-tick clock: stands in for a plausible step latency without reading the
 # wall clock, so the emitted throughput samples are byte-identical across machines and runs.
 STEP_SECONDS = 0.006
@@ -59,9 +64,15 @@ def build_trace_jsonl() -> str:
             trace=recorder,
             trace_clock=_deterministic_clock(),
         )
-        for request_id, prompt in PROMPTS:
+        for request_id, prompt, prefix_group_id in REQUESTS:
             engine.add_request(
-                Request(request_id, list(prompt), MAX_NEW_TOKENS, runtime.eos_token_ids)
+                Request(
+                    request_id,
+                    list(prompt),
+                    MAX_NEW_TOKENS,
+                    runtime.eos_token_ids,
+                    prefix_group_id=prefix_group_id,
+                )
             )
         engine.run()
         return recorder.to_jsonl() + "\n"

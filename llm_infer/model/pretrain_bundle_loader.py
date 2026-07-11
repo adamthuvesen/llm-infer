@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping
@@ -48,7 +49,10 @@ class PretrainDenseConfig:
         intermediate_size = _positive_int(raw, "feedforward_dim")
         num_hidden_layers = _positive_int(raw, "layers")
         num_attention_heads = _positive_int(raw, "heads")
-        num_key_value_heads = _positive_int(raw, "kv_heads")
+        raw_kv_heads = raw.get("kv_heads")
+        num_key_value_heads = (
+            num_attention_heads if raw_kv_heads is None else _positive_int(raw, "kv_heads")
+        )
         rms_norm_eps = _positive_float(raw, "rms_norm_eps")
         rope_theta = _positive_float(raw, "rope_theta")
         tie_word_embeddings = _bool_field(raw, "tie_embeddings")
@@ -140,21 +144,72 @@ def require_supported_weights_version(metadata: Mapping[str, object], path: Path
         )
 
 
-def resolve_tokenizer_path(root: Path, manifest: Mapping[str, object]) -> Path:
+def resolve_bundle_file(root: Path, manifest: Mapping[str, object], name: str) -> Path:
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise PretrainBundleError("manifest.json files must be an object")
+    entry = files.get(name)
+    if not isinstance(entry, dict):
+        raise PretrainBundleError(f"manifest.json files.{name} must be an object")
+    declared_path = entry.get("path")
+    if not isinstance(declared_path, str) or not declared_path:
+        raise PretrainBundleError(f"manifest.json files.{name}.path must be a non-empty string")
+    expected_hash = entry.get("sha256")
+    if (
+        not isinstance(expected_hash, str)
+        or len(expected_hash) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in expected_hash)
+    ):
+        raise PretrainBundleError(f"manifest.json files.{name}.sha256 must be a SHA-256 hex digest")
+
+    relative_path = Path(declared_path)
+    root_path = root.resolve()
+    path = (root / relative_path).resolve()
+    if relative_path.is_absolute() or not path.is_relative_to(root_path):
+        raise PretrainBundleError(f"{name} path must stay inside the bundle: {relative_path}")
+    if not path.is_file():
+        raise PretrainBundleError(f"bundle file is missing: {relative_path}")
+
+    actual_hash = _file_sha256(path)
+    if actual_hash != expected_hash.lower():
+        raise PretrainBundleError(
+            f"hash mismatch for {relative_path}: expected {expected_hash}, got {actual_hash}"
+        )
+    return path
+
+
+def resolve_tokenizer_path(
+    root: Path, manifest: Mapping[str, object], resolved_tokenizer_path: Path
+) -> Path:
     tokenizer_entry = manifest.get("tokenizer")
     if not isinstance(tokenizer_entry, dict):
         raise PretrainBundleError("manifest.json tokenizer must be an object")
-    tokenizer_path = tokenizer_entry.get("path")
-    if not isinstance(tokenizer_path, str) or not tokenizer_path:
+    declared_path = tokenizer_entry.get("path")
+    if not isinstance(declared_path, str) or not declared_path:
         raise PretrainBundleError("manifest.json tokenizer.path must be a non-empty string")
 
-    rel = Path(tokenizer_path)
-    if rel.is_absolute() or ".." in rel.parts:
-        raise PretrainBundleError(f"tokenizer path must stay inside the bundle: {rel}")
-    path = root / rel
-    if not path.is_file():
-        raise PretrainBundleError(f"tokenizer file is missing: {rel}")
-    return path
+    declared = Path(declared_path)
+    resolved_declared = (root / declared).resolve()
+    if declared.is_absolute() or resolved_declared != resolved_tokenizer_path:
+        raise PretrainBundleError("manifest.json tokenizer.path must match files.tokenizer.path")
+    return resolved_tokenizer_path
+
+
+def require_matching_model_config(
+    declared: object, config: Mapping[str, object], source: str
+) -> None:
+    if not isinstance(declared, dict):
+        raise PretrainBundleError(f"{source} model_config must be an object")
+    if declared != config:
+        raise PretrainBundleError(f"{source} model_config does not match config.json")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_weights(
@@ -178,7 +233,7 @@ def read_weights(
         raise PretrainBundleError("weights.pt metadata must be an object")
     if isinstance(nested, dict):
         metadata.update({str(key): value for key, value in nested.items()})
-    for key in ("format_version", "key_format"):
+    for key in ("format_version", "key_format", "model_config"):
         if key in payload:
             metadata[key] = payload[key]
     return {str(name): tensor for name, tensor in state_dict.items()}, metadata

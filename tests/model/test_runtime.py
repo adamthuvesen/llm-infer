@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -216,8 +217,8 @@ def test_dense_runtime_loads_bundle_metadata_and_tokenizer(tmp_path: Path) -> No
     assert runtime.model_id == "tiny-dense"
     assert runtime.bundle_path == bundle
     assert runtime.metadata["format"] == "llm_pretrain_dense_v1"
-    assert runtime.tokenizer.encode("tok_1") == [1]
-    assert runtime.tokenizer.decode([1]) == "tok_1"
+    assert runtime.tokenizer.encode("tok_4") == [4]
+    assert runtime.tokenizer.decode([4]) == "tok_4"
 
 
 def test_esme_runtime_loads_bundle_metadata_and_tokenizer(tmp_path: Path) -> None:
@@ -229,8 +230,8 @@ def test_esme_runtime_loads_bundle_metadata_and_tokenizer(tmp_path: Path) -> Non
     assert runtime.model_id == "tiny-dense"
     assert runtime.bundle_path == bundle
     assert runtime.metadata["format"] == "llm_pretrain_dense_v1"
-    assert runtime.tokenizer.encode("tok_1") == [1]
-    assert runtime.tokenizer.decode([1]) == "tok_1"
+    assert runtime.tokenizer.encode("tok_4") == [4]
+    assert runtime.tokenizer.decode([4]) == "tok_4"
 
 
 def test_esme_runtime_honors_bundle_chat_template_and_special_token_policy(
@@ -239,6 +240,9 @@ def test_esme_runtime_honors_bundle_chat_template_and_special_token_policy(
     bundle = _write_tiny_bundle(tmp_path)
     _write_chat_tokenizer(bundle / "tokenizer.json")
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    manifest["files"]["tokenizer"]["sha256"] = hashlib.sha256(
+        (bundle / "tokenizer.json").read_bytes()
+    ).hexdigest()
     manifest["model"] = {"id": "esme-214m-chat"}
     manifest["eos_token_ids"] = [9]
     manifest["tokenizer"] = {
@@ -290,7 +294,7 @@ def test_dense_runtime_drives_serving_path(tmp_path: Path) -> None:
 
             response = await client.post(
                 "/v1/completions",
-                json={"model": "tiny-dense", "prompt": "tok_1", "max_tokens": 2},
+                json={"model": "tiny-dense", "prompt": "tok_4", "max_tokens": 2},
             )
 
         assert response.status_code == 200
@@ -304,7 +308,7 @@ def test_dense_runtime_drives_serving_path(tmp_path: Path) -> None:
 def test_dense_runtime_eos_metadata_drives_serving_finish_reason(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
     probe_runtime = load_model_runtime("dense", bundle_path=bundle)
-    prompt_ids = probe_runtime.tokenizer.encode("tok_1")
+    prompt_ids = probe_runtime.tokenizer.encode("tok_4")
     first_token = greedy_decode(
         probe_runtime.model, prompt_ids, max_new_tokens=1, eos_token_ids=set()
     )[0]
@@ -318,7 +322,7 @@ def test_dense_runtime_eos_metadata_drives_serving_finish_reason(tmp_path: Path)
         async with app.router.lifespan_context(app), _client(app) as client:
             response = await client.post(
                 "/v1/completions",
-                json={"model": "tiny-dense", "prompt": "tok_1", "max_tokens": 5},
+                json={"model": "tiny-dense", "prompt": "tok_4", "max_tokens": 5},
             )
 
         assert response.status_code == 200

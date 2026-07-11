@@ -16,7 +16,7 @@ test("loads the committed schema-v3 fixture into a renderable model", async () =
     events.map((event) => event.sequence),
     Array.from({ length: events.length }, (_, index) => index + 1),
   );
-  assert.equal(model.requestList.length, 3);
+  assert.equal(model.requestList.length, 4);
   for (const request of model.requestList) {
     assert.deepEqual(
       request.decodes.flatMap((decode) => decode.tokenIds),
@@ -34,6 +34,39 @@ test("loads the committed schema-v3 fixture into a renderable model", async () =
   assert.ok(model.requestList.every((request) => request.blockEvents.length > 0));
   assert.ok(model.pressureSamples.some((sample) => sample.allocatedBlocks > 0));
   assert.ok(model.pressureSamples.some((sample) => sample.allocatedBlocks === 0));
+
+  const sharedAdmissions = events.filter((event) => event.prefix_group_id === "esme-shared");
+  assert.deepEqual(
+    new Set(sharedAdmissions.map((event) => event.request_id)),
+    new Set(["esme-a", "esme-b"]),
+  );
+});
+
+test("models one physical prompt block across both prefix-group owners", async () => {
+  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const events = parseJsonlTrace(text);
+  const allocations = events.filter((event) => event.event === "block_allocated");
+  const frees = events.filter((event) => event.event === "block_freed");
+  const sharedBlock = allocations.find((event) => event.request_id === "esme-a").block_ids[0];
+
+  const sharedFrees = frees.filter((event) => event.block_ids.includes(sharedBlock));
+  const firstSharedFree = sharedFrees[0];
+  assert.equal(firstSharedFree.request_id, "esme-b", "last owner must release the shared block");
+  assert.equal(
+    allocations.filter(
+      (event) => event.sequence < firstSharedFree.sequence && event.block_ids.includes(sharedBlock),
+    ).length,
+    1,
+    "retaining a shared block must not look like a second physical allocation",
+  );
+
+  const siblingFinishes = events
+    .filter(
+      (event) =>
+        event.event === "request_finished" && ["esme-a", "esme-b"].includes(event.request_id),
+    )
+    .map((event) => event.sequence);
+  assert.ok(firstSharedFree.sequence > Math.max(...siblingFinishes));
 });
 
 test("models block lifecycle without free-before-alloc and keeps the pool valid", async () => {
