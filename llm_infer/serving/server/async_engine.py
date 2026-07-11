@@ -39,10 +39,16 @@ class AsyncEngineRequestObserver(Protocol):
 
 @dataclass
 class _Stream:
-    """The loop's view of one in-flight request: where to push tokens and whether to stop."""
+    """The loop's view of one in-flight request: where to push tokens and whether to stop.
+
+    The queue carries token *bursts* — every token one engine step produced for this request
+    in one item — so the engine thread pays one cross-thread hop per request per step, not
+    per token. A deferred decode window can hand the dispatcher a whole window of tokens at
+    once; per-token hops there put ``call_soon_threadsafe`` on the step loop's critical path.
+    """
 
     request_id: str
-    queue: asyncio.Queue[TokenStreamItem | None]
+    queue: asyncio.Queue[list[TokenStreamItem] | None]
     loop: asyncio.AbstractEventLoop
     max_new_tokens: int
     submitted_s: float
@@ -158,7 +164,7 @@ class AsyncInferenceEngine:
         its KV — no orphaned work keeps running.
         """
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[TokenStreamItem | None] = asyncio.Queue()
+        queue: asyncio.Queue[list[TokenStreamItem] | None] = asyncio.Queue()
         submitted_s = time.perf_counter()
         stream = _Stream(
             request_id=request_id,
@@ -190,28 +196,31 @@ class AsyncInferenceEngine:
         previous_token_s: float | None = None
         try:
             while True:
-                item = await queue.get()
-                if item is None:  # loop signalled end-of-stream (or refused the submission)
+                burst = await queue.get()
+                if burst is None:  # loop signalled end-of-stream (or refused the submission)
                     if stream.error is not None:
                         raise stream.error
                     return
-                if self._metrics is not None:
-                    token_s = time.perf_counter()
-                    self._metrics.generated_tokens_total.inc()
-                    self._metrics.stream_tokens_total.inc()
-                    if not first_token_seen:
-                        first_token_seen = True
-                        self._metrics.ttft_seconds.observe(token_s - submitted_s)
-                    elif previous_token_s is not None:
-                        self._metrics.itl_seconds.observe(token_s - previous_token_s)
-                    previous_token_s = token_s
-                yield item
-                if item.finish_reason is not None:
-                    finished_s = time.perf_counter()
+                for item in burst:
                     if self._metrics is not None:
-                        self._metrics.request_latency_seconds.observe(finished_s - submitted_s)
-                        self._metrics.requests_completed_total.inc(finish_reason=item.finish_reason)
-                    return
+                        token_s = time.perf_counter()
+                        self._metrics.generated_tokens_total.inc()
+                        self._metrics.stream_tokens_total.inc()
+                        if not first_token_seen:
+                            first_token_seen = True
+                            self._metrics.ttft_seconds.observe(token_s - submitted_s)
+                        elif previous_token_s is not None:
+                            self._metrics.itl_seconds.observe(token_s - previous_token_s)
+                        previous_token_s = token_s
+                    yield item
+                    if item.finish_reason is not None:
+                        finished_s = time.perf_counter()
+                        if self._metrics is not None:
+                            self._metrics.request_latency_seconds.observe(finished_s - submitted_s)
+                            self._metrics.requests_completed_total.inc(
+                                finish_reason=item.finish_reason
+                            )
+                        return
         finally:
             stream.aborted = True
             self._wake.set()
@@ -303,11 +312,13 @@ class AsyncInferenceEngine:
                 continue
             finished = request_id in result.finished
             last_index = len(tokens) - 1
+            burst: list[TokenStreamItem] = []
             for index, token in enumerate(tokens):
                 token_id = _as_int(token)
                 is_last = finished and index == last_index
                 reason = self._finish_reason(stream, token_id) if is_last else None
-                self._enqueue(stream, TokenStreamItem(token_id=token_id, finish_reason=reason))
+                burst.append(TokenStreamItem(token_id=token_id, finish_reason=reason))
+            self._enqueue(stream, burst)
         for request_id in result.finished:
             if self._request_observer is not None:
                 self._request_observer.finished(
@@ -322,8 +333,8 @@ class AsyncInferenceEngine:
     def _finish_reason(self, stream: _Stream, token_id: int) -> str:
         return "stop" if token_id in stream.eos_token_ids else "length"
 
-    def _enqueue(self, stream: _Stream, item: TokenStreamItem | None) -> None:
-        """Hand one item (or the ``None`` end-of-stream sentinel) to the consumer's queue.
+    def _enqueue(self, stream: _Stream, item: list[TokenStreamItem] | None) -> None:
+        """Hand one token burst (or the ``None`` end-of-stream sentinel) to the consumer's queue.
 
         ``call_soon_threadsafe`` lands the put on the consumer's event-loop thread, which is the
         whole bridge: the engine thread never touches asyncio state directly.
