@@ -160,6 +160,7 @@ def test_decode_many_uses_page_plan_when_backend_supports_it(
     assert backend.paged_calls == paged.num_layers
     assert backend.packed_calls == 0
 
+
 def test_planned_window_uses_page_plan_when_backend_supports_it(bundle: Path) -> None:
     baseline = load_model_runtime("esme", bundle_path=bundle).model
     backend = PageTableReferenceAttention()
