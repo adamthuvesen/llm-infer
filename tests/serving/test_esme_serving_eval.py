@@ -249,3 +249,25 @@ def test_sampled_replay_divergence_sends_row_to_review(tmp_path: Path) -> None:
         _speed_status(summary["status"], requests_total=3, requests_completed=3, observed_count=3)
         == "not_reported_reference_review_required"
     )
+
+
+def test_admission_barrier_admits_whole_batch_and_keeps_reference(tmp_path: Path) -> None:
+    """With the barrier, a multi-request run completes and stays reference-gated."""
+    runtime = _runtime(tmp_path)
+    _, sampled = phase0_http_workloads(2, max_new_tokens=4, block_size=8, num_blocks=32)
+
+    result = asyncio.run(
+        run_network_http_workload(
+            runtime,
+            sampled,
+            device="cpu",
+            warmup_runs=1,
+            measured_runs=2,
+            admission_barrier=True,
+        )
+    )
+
+    assert result["timing_scope"]["admission_barrier"] is True
+    assert result["metrics"]["requests_completed"] == 4
+    assert result["reference"]["status"] == "pass"
+    assert result["reference"]["sampled_replay_divergent_groups"] == 0
