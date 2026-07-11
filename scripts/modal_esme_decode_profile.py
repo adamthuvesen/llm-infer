@@ -55,6 +55,9 @@ PROFILER_STEPS = 16
 # Batch-size buckets the decode-graph runner captures. Includes 256 so the largest bench
 # batch replays from graphs instead of silently falling back to the eager window.
 CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+# The serving eval's phase0 sampled workload settings, so the sampled profile attributes the
+# same configuration the HTTP measurement pays for.
+SAMPLED_SETTINGS = {"temperature": 0.8, "top_p": 0.95, "top_k": 32, "seed": 17}
 
 app = modal.App("llm-infer-esme-decode-profile")
 
@@ -72,7 +75,8 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
     """A fresh engine with the benchmark's block sizing and all requests queued (greedy).
 
     ``config`` overrides engine knobs for the same-GPU ablation: ``decode_window_size``
-    (int) and ``planned_decode`` (bool, masks the capability flag).
+    (int), ``planned_decode`` (bool, masks the capability flag), and ``sampling``
+    (a :class:`SamplingParams` applied to every request; None keeps greedy).
     """
     from dataclasses import replace
 
@@ -80,6 +84,7 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
     from llm_infer.serving import InferenceEngine, Request
 
     config = config or {}
+    sampling = config.get("sampling")
     capabilities = runtime.capabilities
     if config.get("planned_decode") is False:
         capabilities = replace(capabilities, planned_decode=False)
@@ -101,7 +106,13 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
     )
     for req in requests:
         engine.add_request(
-            Request(req.request_id, list(req.prompt_ids), MAX_NEW_TOKENS, runtime.eos_token_ids)
+            Request(
+                req.request_id,
+                list(req.prompt_ids),
+                MAX_NEW_TOKENS,
+                runtime.eos_token_ids,
+                **({"sampling": sampling} if sampling is not None else {}),
+            )
         )
     return engine, requests
 
@@ -111,11 +122,11 @@ def _run_prefill_step(engine) -> None:
     engine.step()
 
 
-def _decode_wall(runtime, num_requests: int) -> dict:
+def _decode_wall(runtime, num_requests: int, config: dict | None = None) -> dict:
     """Un-instrumented decode timing: wall per decode step after prefill, one synced run."""
     import torch
 
-    engine, _ = _build_engine(runtime, num_requests, "cuda")
+    engine, _ = _build_engine(runtime, num_requests, "cuda", config)
     _run_prefill_step(engine)
     torch.cuda.synchronize()
 
@@ -307,12 +318,12 @@ def _sync_probe(runtime, num_requests: int) -> dict:
     }
 
 
-def _python_profile(runtime, num_requests: int) -> dict:
+def _python_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
     """Function-level Python attribution of the decode loop via cProfile (diagnostic only)."""
     import cProfile
     import pstats
 
-    engine, _ = _build_engine(runtime, num_requests, "cuda")
+    engine, _ = _build_engine(runtime, num_requests, "cuda", config)
     _run_prefill_step(engine)
 
     profiler = cProfile.Profile()
@@ -340,14 +351,15 @@ def _python_profile(runtime, num_requests: int) -> dict:
     return {"profile_total_s": total_s, "top_functions_by_tottime": rows}
 
 
-def _phase_profile(runtime, num_requests: int) -> dict:
+def _phase_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
     """One diagnostic generation projected to the Phase 0 timing buckets."""
     import torch
 
     from llm_infer.profiling import TimingProfiler, attach_host_method_profile
 
     profiler = TimingProfiler("cuda")
-    engine, _ = _build_engine(runtime, num_requests, "cuda", {"profiler": profiler})
+    build_config = {**(config or {}), "profiler": profiler}
+    engine, _ = _build_engine(runtime, num_requests, "cuda", build_config)
     attach_host_method_profile(
         profiler,
         engine,
@@ -478,6 +490,73 @@ def profile_decode(batch_sizes: list[int]) -> str:
     return json.dumps(
         {
             "results": results,
+            "attention_backend": type(runtime.model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def profile_sampled_decode(batch_sizes: list[int]) -> str:
+    """Greedy-vs-sampled decode attribution per batch size, in one container.
+
+    Sampled requests run the serving eval's phase0 settings (temperature 0.8, top-p 0.95,
+    top-k 32, seed 17), which today disable the deferred decode window and take the per-row
+    Python sampler. The greedy wall row anchors the comparison on the same GPU, so the
+    sampled-minus-greedy delta is the engine-side cost Phase 5 has to remove. Diagnostic
+    only, never a speed claim.
+    """
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import SamplingParams
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    runtime = load_model_runtime(
+        "esme",
+        bundle_path=Path(REMOTE_BUNDLE_PATH),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    sampled_config = {"sampling": SamplingParams(**SAMPLED_SETTINGS)}
+    results = []
+    for size in batch_sizes:
+        # Throwaway generation at this shape first: kernel JIT and per-shape plan warmup must
+        # not land in the greedy wall, or the greedy-vs-sampled delta reads backwards.
+        _decode_wall(runtime, size)
+        greedy_wall = _decode_wall(runtime, size)
+        sampled_wall = _decode_wall(runtime, size, sampled_config)
+        kineto = _torch_profile(runtime, size, sampled_config)
+        python = _python_profile(runtime, size, sampled_config)
+        phases = _phase_profile(runtime, size, sampled_config)
+        results.append(
+            {
+                "batch_size": size,
+                "greedy_wall": greedy_wall,
+                "sampled_wall": sampled_wall,
+                "sampled_torch_profiler": kineto,
+                "sampled_phase_profile": phases,
+                **python,
+            }
+        )
+        print(
+            f"[sampled-profile] batch={size}: "
+            f"greedy wall/step {greedy_wall['wall_ms_per_step']:.2f} ms, "
+            f"sampled wall/step {sampled_wall['wall_ms_per_step']:.2f} ms, "
+            f"greedy tok/s {greedy_wall['decode_tokens_per_second']:.1f}, "
+            f"sampled tok/s {sampled_wall['decode_tokens_per_second']:.1f}"
+        )
+    return json.dumps(
+        {
+            "results": results,
+            "sampling": SAMPLED_SETTINGS,
             "attention_backend": type(runtime.model.backend).__name__,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
@@ -1817,6 +1896,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
     if command not in (
         "profile",
+        "sampled-profile",
         "bench",
         "ablate",
         "capture",
@@ -1829,8 +1909,8 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "bucket-policy",
     ):
         raise ValueError(
-            "command must be 'profile', 'bench', 'ablate', 'capture', 'sync', "
-            "'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
+            "command must be 'profile', 'sampled-profile', 'bench', 'ablate', 'capture', "
+            "'sync', 'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
             "'four-layer-group-ab', 'four-layer-parity', or 'bucket-policy', "
             f"got {command!r}"
         )
@@ -1860,6 +1940,12 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             f"bf16 default attention, prefix caching off"
         )
         record = json.loads(profile_decode.remote(sizes))
+    elif command == "sampled-profile":
+        print(
+            f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, "
+            f"greedy vs sampled {SAMPLED_SETTINGS}, bf16 default attention, prefix caching off"
+        )
+        record = json.loads(profile_sampled_decode.remote(sizes))
     elif command == "ablate":
         record = json.loads(ablate_decode.remote(sizes))
     elif command == "capture":
@@ -1920,6 +2006,8 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "reference": (
             "fresh ordinary FlashInfer wrapper planned for the exact page metadata"
             if command == "flashinfer-graph-probe"
+            else "none (diagnostic attribution only, never a speed claim)"
+            if command == "sampled-profile"
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"
         ),
         "repro_command": (
