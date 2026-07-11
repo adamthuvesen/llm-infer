@@ -1,7 +1,6 @@
 # llm-infer
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+![License](https://img.shields.io/github/license/adamthuvesen/llm-infer) ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 `llm-infer` is a small Python inference engine for learning, research, and measurement.
 It makes real serving techniques easy to inspect, checks outputs before making speed
