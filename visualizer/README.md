@@ -29,9 +29,10 @@ uv run python scripts/generate_esme_kv_trace.py --write
 
 This drives the **actual** `InferenceEngine` over the tiny `Esme-214M-Chat`-format bundle with
 preemption on and writes `docs/assets/esme_kv_trace_schema_v3.jsonl`. Every event is emitted by
-the real engine/scheduler/allocator on the Esme backend, including a forced recompute preemption.
-Load it with `Load JSONL` to watch a real Esme run. A fixed step clock keeps the artifact
-byte-stable so it can be regression-checked.
+the real engine/scheduler/allocator on the Esme backend. Four requests in a tight pool include
+two identical prefix-group siblings plus forced recompute preemption. Load it with `Load JSONL`
+to watch prefix ownership and eviction in one real Esme run. A fixed step clock keeps the
+artifact byte-stable so it can be regression-checked.
 
 ## What The Viewer Shows
 

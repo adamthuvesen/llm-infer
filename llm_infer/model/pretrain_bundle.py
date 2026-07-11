@@ -54,10 +54,12 @@ from llm_infer.model.pretrain_bundle_loader import (
     read_json_object,
     read_weights,
     require_manifest_format,
+    require_matching_model_config,
     require_supported_schema_version,
     require_supported_weights_version,
     require_weight_key_format,
     required_file,
+    resolve_bundle_file,
     resolve_tokenizer_path,
 )
 from llm_infer.model.rope_utils import apply_rope, rms_norm
@@ -138,19 +140,22 @@ class PretrainBundleModel:
             raise PretrainBundleError(f"bundle path must be a directory: {root}")
 
         manifest_path = required_file(root, "manifest.json")
-        config_path = required_file(root, "config.json")
-        weights_path = required_file(root, "weights.pt")
-
         manifest = read_json_object(manifest_path)
         require_manifest_format(manifest, manifest_path)
         require_supported_schema_version(manifest, manifest_path)
-        tokenizer_path = resolve_tokenizer_path(root, manifest)
+        config_path = resolve_bundle_file(root, manifest, "config")
+        tokenizer_file_path = resolve_bundle_file(root, manifest, "tokenizer")
+        weights_path = resolve_bundle_file(root, manifest, "weights")
+        tokenizer_path = resolve_tokenizer_path(root, manifest, tokenizer_file_path)
         read_json_object(tokenizer_path)
 
-        config = PretrainDenseConfig.from_json(read_json_object(config_path))
+        config_json = read_json_object(config_path)
+        require_matching_model_config(manifest.get("model_config"), config_json, "manifest.json")
+        config = PretrainDenseConfig.from_json(config_json)
         state_dict, metadata = read_weights(weights_path, device)
         require_weight_key_format(metadata, weights_path)
         require_supported_weights_version(metadata, weights_path)
+        require_matching_model_config(metadata.get("model_config"), config_json, "weights.pt")
         weights = normalize_state_dict(state_dict, config, dtype=dtype, device=device)
 
         return cls(

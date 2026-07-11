@@ -158,7 +158,7 @@ def test_loadgen_drives_esme_server(tmp_path: Path) -> None:
             results, wall_s = await run_load(
                 client,
                 model=model_id,
-                prompt="tok_1 tok_4 tok_7",
+                prompt="tok_4 tok_7 tok_10",
                 max_tokens=6,
                 concurrency=2,
                 num_requests=6,

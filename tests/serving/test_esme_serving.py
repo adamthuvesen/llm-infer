@@ -33,9 +33,9 @@ from llm_infer.serving.request import Request
 from llm_infer.serving.server import AsyncInferenceEngine
 from llm_infer.tracing import TraceRecorder
 
-# Prompts are bare token ids from the tiny WordLevel vocab (tok_0..tok_10): the bundle tokenizer
+# Prompts are bare token ids from the tiny WordLevel vocab (tok_4..tok_10): the bundle tokenizer
 # decodes "tok_N" -> N, so a space-joined string of them round-trips to exactly these ids.
-_PROMPT_IDS = [1, 4, 7]
+_PROMPT_IDS = [4, 7, 10]
 _MAX_NEW_TOKENS = 5
 
 

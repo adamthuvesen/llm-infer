@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -28,6 +29,40 @@ from llm_infer.model.pretrain_bundle import (
     PretrainBundleError,
     PretrainBundleModel,
 )
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _refresh_file_hash(bundle: Path, name: str) -> None:
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = manifest["files"][name]
+    entry["sha256"] = _file_sha256(bundle / entry["path"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _write_weights(bundle: Path, payload: dict[str, object]) -> None:
+    torch.save(payload, bundle / "weights.pt")
+    _refresh_file_hash(bundle, "weights")
+
+
+def _weights_payload(bundle: Path) -> dict[str, object]:
+    return torch.load(bundle / "weights.pt", weights_only=True)
+
+
+def _write_config_and_copies(bundle: Path, config: dict[str, object]) -> None:
+    config_path = bundle / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["model_config"] = config
+    manifest["files"]["config"]["sha256"] = _file_sha256(config_path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    weights = _weights_payload(bundle)
+    weights["model_config"] = config
+    _write_weights(bundle, weights)
 
 
 def _reference_logits(
@@ -117,7 +152,8 @@ def _reference_attention(
 
 
 def test_loads_bundle_manifest_config_weights_and_tokenizer(tmp_path: Path) -> None:
-    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path))
+    bundle = _write_tiny_bundle(tmp_path)
+    model = PretrainBundleModel.load(bundle)
 
     assert model.config.hidden_size == HIDDEN_SIZE
     assert model.config.intermediate_size == INTERMEDIATE_SIZE
@@ -125,11 +161,39 @@ def test_loads_bundle_manifest_config_weights_and_tokenizer(tmp_path: Path) -> N
     assert model.config.num_attention_heads == NUM_HEADS
     assert model.config.num_key_value_heads == NUM_KV_HEADS
     assert model.config.tie_word_embeddings is True
-    assert model.config.logit_soft_cap == 7.5
+    assert model.config.logit_soft_cap is None
     assert model.tokenizer_path.name == "tokenizer.json"
     assert model.tie_word_embeddings is True
     assert model.config.qk_norm is False
     assert "lm_head.weight" not in model.w
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    config = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
+    weights = _weights_payload(bundle)
+    assert manifest["model_config"] == config == weights["model_config"]
+    assert manifest["llm_infer_config"] == weights["llm_infer_config"]
+    assert weights["format"] == weights["key_format"] == BUNDLE_FORMAT
+    assert len(manifest["source_checkpoint_sha256"]) == 64
+    assert weights["state_dict"]["lm_head.weight"] is not None
+    assert (bundle / "README.md").is_file()
+    for name, entry in manifest["files"].items():
+        assert _file_sha256(bundle / entry["path"]) == entry["sha256"], name
+
+
+def test_loads_canonical_mha_null_kv_heads(tmp_path: Path) -> None:
+    model = PretrainBundleModel.load(_write_tiny_bundle(tmp_path, kv_heads=None))
+
+    assert model.config.num_key_value_heads == NUM_HEADS
+
+
+def test_loads_mha_without_kv_heads_field(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path, kv_heads=None)
+    config = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
+    del config["kv_heads"]
+    _write_config_and_copies(bundle, config)
+
+    model = PretrainBundleModel.load(bundle)
+
+    assert model.config.num_key_value_heads == NUM_HEADS
 
 
 def test_dense_bundle_runs_through_engine_cached_contract(tmp_path: Path) -> None:
@@ -186,10 +250,8 @@ def test_qk_norm_requires_exported_norm_weights(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path, qk_norm=True)
     state_dict = _tiny_state_dict(qk_norm=True)
     del state_dict["blocks.0.attention.q_norm.weight"]
-    torch.save(
-        {"metadata": {"key_format": BUNDLE_FORMAT}, "state_dict": state_dict},
-        bundle / "weights.pt",
-    )
+    torch.save({**_weights_payload(bundle), "state_dict": state_dict}, bundle / "weights.pt")
+    _refresh_file_hash(bundle, "weights")
 
     with pytest.raises(PretrainBundleError, match="q_norm"):
         PretrainBundleModel.load(bundle)
@@ -204,7 +266,7 @@ def test_rejects_negative_logit_soft_cap(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
     config = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
     config["logit_soft_cap"] = -0.1
-    (bundle / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    _write_config_and_copies(bundle, config)
 
     with pytest.raises(PretrainBundleError, match="non-negative"):
         PretrainBundleModel.load(bundle)
@@ -230,14 +292,9 @@ def test_rejects_unsupported_manifest_schema_version(tmp_path: Path) -> None:
 
 def test_rejects_unsupported_weights_format_version(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
-    torch.save(
-        {
-            "format_version": 2,
-            "metadata": {"key_format": BUNDLE_FORMAT},
-            "state_dict": _tiny_state_dict(),
-        },
-        bundle / "weights.pt",
-    )
+    weights = _weights_payload(bundle)
+    weights["format_version"] = 2
+    _write_weights(bundle, weights)
 
     with pytest.raises(PretrainBundleError, match="declares format_version 2"):
         PretrainBundleModel.load(bundle)
@@ -248,10 +305,9 @@ def test_accepts_bundle_predating_version_fields(tmp_path: Path) -> None:
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     del manifest["schema_version"]
     (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    torch.save(
-        {"metadata": {"key_format": BUNDLE_FORMAT}, "state_dict": _tiny_state_dict()},
-        bundle / "weights.pt",
-    )
+    weights = _weights_payload(bundle)
+    del weights["format_version"]
+    _write_weights(bundle, weights)
 
     model = PretrainBundleModel.load(bundle)
     assert model.config.vocab_size == VOCAB_SIZE
@@ -259,18 +315,83 @@ def test_accepts_bundle_predating_version_fields(tmp_path: Path) -> None:
 
 def test_rejects_tokenizer_paths_outside_bundle(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
-    (bundle / "manifest.json").write_text(
-        json.dumps({"format": BUNDLE_FORMAT, "tokenizer": {"path": "../tokenizer.json"}}),
-        encoding="utf-8",
-    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["tokenizer"]["path"] = "../tokenizer.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(PretrainBundleError, match="inside the bundle"):
         PretrainBundleModel.load(bundle)
 
 
+@pytest.mark.parametrize("name", ["config", "tokenizer", "weights"])
+def test_rejects_corrupted_bundle_file(tmp_path: Path, name: str) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    path = bundle / manifest["files"][name]["path"]
+    with path.open("ab") as handle:
+        handle.write(b"corrupted")
+
+    with pytest.raises(PretrainBundleError, match=f"hash mismatch for {path.name}"):
+        PretrainBundleModel.load(bundle)
+
+
+def test_rejects_invalid_manifest_file_hash(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["config"]["sha256"] = "not-a-sha256"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(PretrainBundleError, match="SHA-256 hex digest"):
+        PretrainBundleModel.load(bundle)
+
+
+@pytest.mark.parametrize("name", ["config", "tokenizer", "weights"])
+def test_rejects_bundle_file_path_escape(tmp_path: Path, name: str) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][name]["path"] = f"../{name}"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(PretrainBundleError, match="inside the bundle"):
+        PretrainBundleModel.load(bundle)
+
+
+def test_rejects_manifest_model_config_mismatch(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["model_config"]["layers"] += 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(
+        PretrainBundleError, match="manifest.json model_config does not match config.json"
+    ):
+        PretrainBundleModel.load(bundle)
+
+
+def test_rejects_weights_model_config_mismatch(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    weights = _weights_payload(bundle)
+    model_config = dict(weights["model_config"])
+    model_config["layers"] += 1
+    weights["model_config"] = model_config
+    _write_weights(bundle, weights)
+
+    with pytest.raises(
+        PretrainBundleError, match="weights.pt model_config does not match config.json"
+    ):
+        PretrainBundleModel.load(bundle)
+
+
 def test_rejects_weights_without_dense_key_metadata(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
-    torch.save({"state_dict": _tiny_state_dict()}, bundle / "weights.pt")
+    weights = _weights_payload(bundle)
+    del weights["key_format"]
+    weights["metadata"] = {}
+    _write_weights(bundle, weights)
 
     with pytest.raises(PretrainBundleError, match="metadata"):
         PretrainBundleModel.load(bundle)
@@ -280,10 +401,9 @@ def test_rejects_malformed_weight_shapes(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
     state_dict = _tiny_state_dict()
     state_dict["blocks.0.attention.wq.weight"] = torch.zeros(3, HIDDEN_SIZE)
-    torch.save(
-        {"metadata": {"key_format": BUNDLE_FORMAT}, "state_dict": state_dict},
-        bundle / "weights.pt",
-    )
+    weights = _weights_payload(bundle)
+    weights["state_dict"] = state_dict
+    _write_weights(bundle, weights)
 
     with pytest.raises(PretrainBundleError, match="attention.wq"):
         PretrainBundleModel.load(bundle)

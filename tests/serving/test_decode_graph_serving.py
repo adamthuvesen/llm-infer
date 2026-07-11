@@ -25,7 +25,7 @@ from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serve import build_app_from_runtime
 
 # Three prompts stream concurrently so decode batches of 3 pad up to the bucket of 4.
-_PROMPTS = ("tok_1 tok_4 tok_7", "tok_2 tok_5 tok_3 tok_6 tok_9", "tok_8 tok_1")
+_PROMPTS = ("tok_4 tok_7 tok_10", "tok_5 tok_8 tok_6 tok_9", "tok_10 tok_4")
 _MAX_NEW_TOKENS = 10
 
 
