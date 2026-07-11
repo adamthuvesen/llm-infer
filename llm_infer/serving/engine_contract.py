@@ -96,10 +96,17 @@ class EngineMixinHost(Protocol):
     def _sample_rows(self, logits: torch.Tensor, requests: list[Request]) -> torch.Tensor: ...
 
     def _record(
-        self, request: Request, token: int | torch.Tensor, is_eos: bool, result: StepResult
+        self,
+        request: Request,
+        token: int | torch.Tensor,
+        is_eos: bool,
+        result: StepResult,
+        host_token: int | None = None,
     ) -> None: ...
 
-    def _eos_flags(self, tokens: torch.Tensor, requests: list[Request]) -> list[bool]: ...
+    def _eos_flags_and_ids(
+        self, tokens: torch.Tensor, requests: list[Request]
+    ) -> tuple[list[bool], list[int]]: ...
 
     def _release_finished_in(self, requests: list[Request], result: StepResult) -> None: ...
 
