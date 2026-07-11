@@ -116,9 +116,11 @@ class EngineDecodeMixin(EngineMixinHost):
         with self._record_time("sampling"):
             batched = self._sample_rows(logits, requests)
         tokens = list(batched.unbind(0))
-        eos_flags = self._eos_flags(batched, requests)
-        for request, token, is_eos in zip(requests, tokens, eos_flags, strict=True):
-            self._record(request, token, is_eos, result)
+        eos_flags, host_ids = self._eos_flags_and_ids(batched, requests)
+        for request, token, is_eos, host_id in zip(
+            requests, tokens, eos_flags, host_ids, strict=True
+        ):
+            self._record(request, token, is_eos, result, host_token=host_id)
         self._trace_decode_step(requests, list(tokens), token_source="decode")
         self._release_finished_in(requests, result)
 
@@ -338,8 +340,16 @@ class EngineDecodeMixin(EngineMixinHost):
                     else step_ids[step][column] in request.eos_token_ids
                 )
                 # Record the device-tensor view (keeps a request's generated tokens on one
-                # device — ``Request.generated`` stacks them); the host flag drives the stop rule.
-                self._record(request, pending.matrix[step, column], is_eos, result)
+                # device — ``Request.generated`` stacks them); the host flag drives the stop
+                # rule, and the already-copied host id rides along so the serving dispatcher
+                # never re-syncs per token.
+                self._record(
+                    request,
+                    pending.matrix[step, column],
+                    is_eos,
+                    result,
+                    host_token=step_ids[step][column],
+                )
         self._release_finished_in(pending.requests, result)
 
     def _params_for(self, request: Request) -> SamplingParams:
@@ -493,11 +503,24 @@ class EngineDecodeMixin(EngineMixinHost):
         return accepted
 
     def _record(
-        self, request: Request, token: int | torch.Tensor, is_eos: bool, result: StepResult
+        self,
+        request: Request,
+        token: int | torch.Tensor,
+        is_eos: bool,
+        result: StepResult,
+        host_token: int | None = None,
     ) -> None:
-        """Append a sampled token to a request and note it (and any finish) in the step result."""
+        """Append a sampled token to a request and note it (and any finish) in the step result.
+
+        ``token`` may be a device tensor — request state keeps it on the model device. When the
+        caller already holds the token's host id (every path that synced for EOS anyway),
+        passing it as ``host_token`` puts a plain int in the step result, so the serving
+        dispatcher never pays a per-token device sync to materialize it again.
+        """
         request.record(token, is_eos=is_eos)
-        result.tokens.setdefault(request.request_id, []).append(token)
+        result.tokens.setdefault(request.request_id, []).append(
+            host_token if host_token is not None else token
+        )
         if request.finished and request.request_id not in result.finished:
             result.finished.append(request.request_id)
 
@@ -525,24 +548,26 @@ class EngineDecodeMixin(EngineMixinHost):
         self.model.release_table(table)
         table.free()
 
-    def _eos_flags(self, tokens: torch.Tensor, requests: list[Request]) -> list[bool]:
-        """Return per-request EOS flags, using one host sync for the common EOS-set case."""
+    def _eos_flags_and_ids(
+        self, tokens: torch.Tensor, requests: list[Request]
+    ) -> tuple[list[bool], list[int]]:
+        """Per-request EOS flags plus host token ids, from one device-to-host copy.
+
+        The per-step paths must sync for the stop rule anyway; copying the token ids
+        themselves (instead of a device-side EOS mask) makes that single sync also yield the
+        plain ints the serving dispatcher needs, and the tiny stop-set membership check is
+        cheaper on the host than as extra device kernels.
+        """
         flat = tokens.reshape(-1)
         if len(flat) != len(requests):
             raise ValueError(f"token/request count mismatch: {len(flat)} vs {len(requests)}")
-        eos_sets = {request.eos_token_ids for request in requests}
-        if len(eos_sets) == 1:
-            mask = (flat.unsqueeze(-1) == self._eos_lookup(next(iter(eos_sets)), flat.device)).any(
-                dim=-1
-            )
-            with self._record_host_time("cpu_gpu_sync"):
-                return [bool(flag) for flag in mask.cpu().tolist()]
-
-        flags: list[bool] = []
         with self._record_host_time("cpu_gpu_sync"):
-            for token, request in zip(flat, requests, strict=True):
-                flags.append(int(token.cpu().item()) in request.eos_token_ids)
-        return flags
+            ids = [int(token_id) for token_id in flat.cpu().tolist()]
+        flags = [
+            token_id in request.eos_token_ids
+            for token_id, request in zip(ids, requests, strict=True)
+        ]
+        return flags, ids
 
     def _eos_lookup(self, eos_token_ids: frozenset[int], device: torch.device) -> torch.Tensor:
         """The EOS-id comparison tensor for one stop set, built once per engine and reused.

@@ -108,9 +108,11 @@ class EnginePrefillMixin(EngineMixinHost):
         with self._record_time("sampling"):
             tokens = self._sample_rows(logits, requests)
         token_rows = list(tokens.unbind())
-        eos_flags = self._eos_flags(tokens, requests)
-        for request, token, is_eos in zip(requests, token_rows, eos_flags, strict=True):
-            self._record(request, token, is_eos, result)
+        eos_flags, host_ids = self._eos_flags_and_ids(tokens, requests)
+        for request, token, is_eos, host_id in zip(
+            requests, token_rows, eos_flags, host_ids, strict=True
+        ):
+            self._record(request, token, is_eos, result, host_token=host_id)
         self._trace_decode_step(requests, token_rows, token_source="prefill")
         self._release_finished_in(requests, result)
 
@@ -121,7 +123,8 @@ class EnginePrefillMixin(EngineMixinHost):
         request.prefilled = True
         with self._record_time("sampling"):
             token = self._sample_one(logits, request)
-        self._record(request, token, self._eos_flags(token.reshape(1), [request])[0], result)
+        eos_flags, host_ids = self._eos_flags_and_ids(token.reshape(1), [request])
+        self._record(request, token, eos_flags[0], result, host_token=host_ids[0])
         self._trace_decode_step([request], [token], token_source="prefill")
         self._release_finished_in([request], result)
 
@@ -161,9 +164,11 @@ class EnginePrefillMixin(EngineMixinHost):
 
         with self._record_time("sampling"):
             tokens = [self._sample_one(logits, request) for request in members]
-        eos_flags = self._eos_flags(torch.stack(tokens), members)
-        for request, token, is_eos in zip(members, tokens, eos_flags, strict=True):
-            self._record(request, token, is_eos, result)
+        eos_flags, host_ids = self._eos_flags_and_ids(torch.stack(tokens), members)
+        for request, token, is_eos, host_id in zip(
+            members, tokens, eos_flags, host_ids, strict=True
+        ):
+            self._record(request, token, is_eos, result, host_token=host_id)
         self._trace_decode_step(members, tokens, token_source="prefill")
         self._release_finished_in(members, result)
 
