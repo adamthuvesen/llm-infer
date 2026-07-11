@@ -110,6 +110,9 @@ def measure_serving(
                         reference_runtime=reference_runtime,
                         warmup_runs=warmup_runs,
                         measured_runs=measured_runs,
+                        # phase0 measures the steady batch; gating admission keeps every
+                        # run's decode shapes identical so sampled replay can gate.
+                        admission_barrier=True,
                     )
                 )
                 result["batch_size"] = batch_size

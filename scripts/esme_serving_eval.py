@@ -752,8 +752,18 @@ async def run_network_http_workload(
     reference_runtime: ModelRuntime | None = None,
     warmup_runs: int = 0,
     measured_runs: int = 1,
+    admission_barrier: bool = False,
 ) -> dict[str, object]:
-    """Measure streaming through localhost Uvicorn on the normal untraced decode path."""
+    """Measure streaming through localhost Uvicorn on the normal untraced decode path.
+
+    ``admission_barrier`` pauses the engine loop while a run's requests are submitted, so
+    every run admits the whole batch in one drain. Without it, HTTP arrival jitter can admit
+    a straggler a step late, giving it (and the batch) different decode shapes run to run —
+    which forks seeded sampled streams and turns the same-shape replay gate into noise. The
+    fixed-batch phase0 workloads measure the steady batch, so the barrier is measurement
+    hygiene, not a workload change; the barrier wait (spent inside the measured wall) is a
+    few scheduler wakeups.
+    """
     import uvicorn
 
     if warmup_runs < 0:
@@ -821,9 +831,26 @@ async def run_network_http_workload(
                     return await _run_streaming_http(client, spec, runtime.model_id, start)
                 return await _run_blocking_http(client, spec, runtime.model_id, start)
 
+            async def run_once() -> list[ClientRequestResult]:
+                if not admission_barrier:
+                    return await asyncio.gather(*(one(spec) for spec in workload.requests))
+                # Gate the batch: with the loop stopped, handler submissions pile up; once
+                # every request is queued, one drain admits them all in the same step.
+                async_engine.stop()
+                tasks = [asyncio.create_task(one(spec)) for spec in workload.requests]
+                deadline = time.perf_counter() + 30.0
+                while async_engine.pending_submissions < len(workload.requests):
+                    if time.perf_counter() > deadline:
+                        raise TimeoutError(
+                            "admission barrier: not every request was submitted within 30s"
+                        )
+                    await asyncio.sleep(0.001)
+                async_engine.start()
+                return await asyncio.gather(*tasks)
+
             warmup_started_s = time.perf_counter()
             for _ in range(warmup_runs):
-                warmup_results = await asyncio.gather(*(one(spec) for spec in workload.requests))
+                warmup_results = await run_once()
                 failures = [result.error for result in warmup_results if result.status == "error"]
                 if failures:
                     raise RuntimeError(f"serving warmup failed: {failures[0]}")
@@ -835,7 +862,7 @@ async def run_network_http_workload(
             for _ in range(measured_runs):
                 _synchronize_device(device)
                 wall_start = time.perf_counter()
-                run_results = await asyncio.gather(*(one(spec) for spec in workload.requests))
+                run_results = await run_once()
                 _synchronize_device(device)
                 wall_s += time.perf_counter() - wall_start
                 client_results.extend(run_results)
@@ -866,6 +893,7 @@ async def run_network_http_workload(
             "steady_state_wall_s": wall_s,
             "transport": "localhost Uvicorn TCP",
             "max_connections": connection_limit,
+            "admission_barrier": admission_barrier,
             "reference_capture": "one finished-output list copy per request",
             "steady_state_excludes": ["engine_build", "server_start", "metrics_scrape"],
         },

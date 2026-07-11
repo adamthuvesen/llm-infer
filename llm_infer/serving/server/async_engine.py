@@ -95,6 +95,9 @@ class AsyncInferenceEngine:
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("async engine already started")
+        # Support stop()/start() cycles: benchmark harnesses pause the loop to gate a whole
+        # batch's admission into one drain, then resume it.
+        self._shutdown.clear()
         self._thread = threading.Thread(target=self._run_loop, name="infer-engine", daemon=True)
         self._thread.start()
 
@@ -104,6 +107,12 @@ class AsyncInferenceEngine:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+
+    @property
+    def pending_submissions(self) -> int:
+        """Submissions not yet drained into the engine — a stopped loop lets them gather."""
+        with self._lock:
+            return len(self._submissions)
 
     def next_request_id(self) -> str:
         """A process-unique request id; the engine rejects duplicates loudly."""
