@@ -27,9 +27,9 @@ def test_explicit_device_wins_over_auto() -> None:
     assert resolve_device_default("mps") == "mps"
 
 
-def test_dtype_auto_is_fp16_on_mps_fp32_elsewhere() -> None:
+def test_dtype_auto_is_fp16_locally_fp32_on_cuda() -> None:
     assert resolve_dtype_default(None, device="mps") is torch.float16
-    assert resolve_dtype_default(None, device="cpu") is torch.float32
+    assert resolve_dtype_default(None, device="cpu") is torch.float16
     assert resolve_dtype_default(None, device="cuda") is torch.float32
 
 
