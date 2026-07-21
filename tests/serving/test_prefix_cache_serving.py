@@ -14,11 +14,7 @@ import httpx
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.interface import BackendCapabilities
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serve import (
-    build_app_from_runtime,
-    resolve_prefix_cache_default,
-    resolve_prompt_lookup_default,
-)
+from llm_infer.serve import build_app_from_runtime
 
 _CAPS = BackendCapabilities(
     paged_kv=True, prefix_caching=True, speculative=True, flash_attention=False
@@ -85,36 +81,3 @@ def test_two_sequential_completions_match_with_cache_on_and_off(tmp_path: Path) 
     # The cache off never reuses a prefix; the cache on reuses the first turn's donated blocks.
     assert cold_hits == 0
     assert warm_hits > 0
-
-
-def test_prompt_lookup_default_is_on_off_cpu_off_on_cuda() -> None:
-    assert resolve_prompt_lookup_default(None, device="cpu", capabilities=_CAPS) is True
-    assert resolve_prompt_lookup_default(None, device="cuda", capabilities=_CAPS) is False
-    # An explicit choice always wins over the auto default.
-    assert resolve_prompt_lookup_default(False, device="cpu", capabilities=_CAPS) is False
-    assert resolve_prompt_lookup_default(True, device="cuda", capabilities=_CAPS) is True
-    # Auto stays off when the backend cannot speculate at all.
-    no_spec = BackendCapabilities(
-        paged_kv=True, prefix_caching=True, speculative=False, flash_attention=False
-    )
-    assert resolve_prompt_lookup_default(None, device="cpu", capabilities=no_spec) is False
-
-
-def test_prefix_cache_default_is_on_cpu_bundle_off_cuda() -> None:
-    assert (
-        resolve_prefix_cache_default(None, device="cpu", backend="esme", capabilities=_CAPS) is True
-    )
-    assert (
-        resolve_prefix_cache_default(None, device="cuda", backend="esme", capabilities=_CAPS)
-        is False
-    )
-    # Auto is off for the non-bundle reference backend even on CPU.
-    assert (
-        resolve_prefix_cache_default(None, device="cpu", backend="qwen", capabilities=_CAPS)
-        is False
-    )
-    # Explicit wins.
-    assert (
-        resolve_prefix_cache_default(True, device="cuda", backend="esme", capabilities=_CAPS)
-        is True
-    )

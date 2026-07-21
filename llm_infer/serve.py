@@ -6,6 +6,7 @@ import argparse
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
@@ -192,67 +193,85 @@ def _warmup_prompt_ids(runtime: ModelRuntime) -> list[int]:
     return [0]
 
 
-def resolve_prompt_lookup_default(
-    flag: bool | None, *, device: str, capabilities: BackendCapabilities
-) -> bool:
-    """Resolve the tri-state ``--prompt-lookup-speculative`` flag to on/off.
+@dataclass(frozen=True)
+class RuntimeDefaults:
+    """Resolved pre-load choices: device, dtype, and attention backend selector."""
 
-    ``None`` is auto: on for non-CUDA devices (a local serving win) and off on CUDA, where
-    speculative decode would disable the deferred window and grouped graphs. An explicit value
-    always wins; an explicit ``True`` on an unsupported backend is left on so the engine raises
-    a clear error rather than silently ignoring the request.
+    device: str
+    dtype: torch.dtype
+    attention_backend: AttentionBackendChoice
+
+
+def resolve_runtime_defaults(
+    *,
+    device: str,
+    dtype: torch.dtype | None,
+    attention_backend: str,
+    backend: str,
+) -> RuntimeDefaults:
+    """Resolve ``--device``/``--dtype``/``--attention-backend`` autos; explicit values win.
+
+    Measured on the 214M bundle (8-turn chat, 2026-07), which fixes each auto:
+
+    * device ``auto`` -> ``cpu``: mps fp16 served 1.7x *slower* than cpu fp32 (per-op launch
+      overhead dominates this model's tiny per-step GEMMs). ``--device mps`` stays a supported
+      opt-in for larger bundles where the tradeoff may flip.
+    * dtype ``None`` -> fp16 on cpu/mps (~12% faster than fp32, byte-identical on that bench;
+      the startup line labels any non-fp32 config experimental and ``--dtype float32``
+      restores the reference config), fp32 on CUDA so GPU behavior does not move. bf16
+      measured slower than fp32 on this CPU and is never picked automatically.
+    * attention ``auto`` -> ``torch_sdpa`` for non-CUDA bundle backends (the fused local
+      path); CUDA ``auto`` still means FlashInfer inside the loader, and non-bundle backends
+      pass through unchanged.
     """
-    if flag is not None:
-        return flag
-    return capabilities.speculative and torch.device(device).type != "cuda"
+    resolved_device = device if device != "auto" else "cpu"
+    device_type = torch.device(resolved_device).type
+    resolved_dtype = dtype
+    if resolved_dtype is None:
+        resolved_dtype = torch.float16 if device_type in ("cpu", "mps") else torch.float32
+    name = attention_backend
+    if name == "auto" and backend in BUNDLE_BACKENDS and device_type != "cuda":
+        name = "torch_sdpa"
+    # argparse gates the passthrough to registered choices and the loader re-validates.
+    return RuntimeDefaults(resolved_device, resolved_dtype, cast(AttentionBackendChoice, name))
 
 
-def resolve_prefix_cache_default(
-    flag: bool | None, *, device: str, backend: str, capabilities: BackendCapabilities
-) -> bool:
-    """Resolve the tri-state ``--prefix-cache`` flag to on/off.
+@dataclass(frozen=True)
+class EngineDefaults:
+    """Resolved post-load engine features; these need the loaded backend's capabilities."""
 
-    ``None`` is auto: on for non-CUDA bundle backends that support prefix caching over a paged
-    KV cache, off on CUDA. An explicit value always wins.
+    prompt_lookup: bool
+    prefix_cache: bool
+
+
+def resolve_engine_defaults(
+    *,
+    prompt_lookup: bool | None,
+    prefix_cache: bool | None,
+    device: str,
+    backend: str,
+    capabilities: BackendCapabilities,
+) -> EngineDefaults:
+    """Resolve the tri-state speculative/prefix-cache flags; explicit values win.
+
+    Both default on for non-CUDA serving where the backend supports them, and off on CUDA:
+    speculative decode would disable the deferred window and grouped graphs there, and the
+    settled GPU serving config must not move. An explicit ``True`` on an unsupported backend
+    is left on so the engine raises a clear error rather than silently ignoring the request.
     """
-    if flag is not None:
-        return flag
-    return (
-        backend in BUNDLE_BACKENDS
-        and capabilities.prefix_caching
-        and capabilities.paged_kv
-        and torch.device(device).type != "cuda"
-    )
-
-
-def resolve_device_default(device: str) -> str:
-    """Resolve the ``--device`` selector. ``auto`` means ``cpu``; MPS is explicit opt-in.
-
-    Measured on a 214M bundle (8-turn chat, 2026-07): mps fp16 served 1.7x *slower* than cpu
-    fp32 — per-op launch overhead dominates this model's tiny per-step GEMMs — so ``auto``
-    deliberately stays on CPU. ``--device mps`` remains a supported, tested opt-in for larger
-    bundles where the tradeoff may flip. Any explicit value passes through unchanged.
-    """
-    if device != "auto":
-        return device
-    return "cpu"
-
-
-def resolve_dtype_default(dtype: torch.dtype | None, *, device: str) -> torch.dtype:
-    """Resolve the ``--dtype`` selector: fp16 on CPU and MPS, fp32 on CUDA.
-
-    ``None`` is auto. Local CPU serving defaults to float16 — measured ~12% faster than fp32
-    on the 214M bundle (8-turn chat, 2026-07) with output that stayed byte-identical on that
-    bench; the startup line still labels any non-fp32 config experimental against the cpu fp32
-    reference, and ``--dtype float32`` restores the reference config. bf16 measured *slower*
-    than fp32 on CPU (worse ARM kernel story) and is never picked automatically. An explicit
-    dtype always wins; CUDA keeps fp32 so GPU behavior does not move.
-    """
-    if dtype is not None:
-        return dtype
-    if torch.device(device).type in ("cpu", "mps"):
-        return torch.float16
-    return torch.float32
+    local = torch.device(device).type != "cuda"
+    resolved_lookup = prompt_lookup
+    if resolved_lookup is None:
+        resolved_lookup = capabilities.speculative and local
+    resolved_cache = prefix_cache
+    if resolved_cache is None:
+        resolved_cache = (
+            backend in BUNDLE_BACKENDS
+            and capabilities.prefix_caching
+            and capabilities.paged_kv
+            and local
+        )
+    return EngineDefaults(resolved_lookup, resolved_cache)
 
 
 _DTYPE_LABELS = {
@@ -274,21 +293,6 @@ def describe_run_config(device: str, dtype: torch.dtype) -> str:
     if device == "cpu" and dtype == torch.float32:
         return f"device/dtype: {config} (cpu fp32 reference config)"
     return f"device/dtype: experimental: {config} — reference is cpu fp32"
-
-
-def resolve_attention_backend_default(name: str, *, device: str, backend: str) -> str:
-    """Resolve the ``--attention-backend`` selector, defaulting local bundles to SDPA.
-
-    ``auto`` on a non-CUDA device serving a bundle backend picks ``torch_sdpa`` — the fused
-    CPU/MPS path that beats the ``torch_naive`` reference for local serving. Everything else
-    (an explicit name, a non-bundle backend, or CUDA, where ``auto`` still means FlashInfer)
-    passes through unchanged so CUDA behavior does not move.
-    """
-    if name != "auto":
-        return name
-    if backend in BUNDLE_BACKENDS and torch.device(device).type != "cuda":
-        return "torch_sdpa"
-    return "auto"
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -481,14 +485,14 @@ def main() -> None:
 
     import uvicorn
 
-    device = resolve_device_default(args.device)
-    dtype = resolve_dtype_default(args.dtype, device=device)
-    print(describe_run_config(device, dtype))
-    attention_backend_name = resolve_attention_backend_default(
-        args.attention_backend,
-        device=device,
+    defaults = resolve_runtime_defaults(
+        device=args.device,
+        dtype=args.dtype,
+        attention_backend=args.attention_backend,
         backend=args.backend,
     )
+    device, dtype = defaults.device, defaults.dtype
+    print(describe_run_config(device, dtype))
     runtime = load_model_runtime(
         args.backend,
         dtype=dtype,
@@ -496,28 +500,24 @@ def main() -> None:
         bundle_path=bundle_path,
         model_id=args.model_id,
         revision=args.revision,
-        # The resolver only ever yields a registered choice (argparse gates the passthrough,
-        # and the two defaults are valid); load_model_runtime re-validates regardless.
-        attention_backend_name=cast(AttentionBackendChoice, attention_backend_name),
+        attention_backend_name=defaults.attention_backend,
+    )
+    engine_defaults = resolve_engine_defaults(
+        prompt_lookup=args.prompt_lookup_speculative,
+        prefix_cache=args.prefix_cache,
+        device=device,
+        backend=args.backend,
+        capabilities=runtime.capabilities,
     )
     speculative = (
         SpeculativeDecodingConfig(
             max_draft_tokens=args.prompt_lookup_max_draft_tokens,
             max_ngram_size=args.prompt_lookup_max_ngram_size,
         )
-        if resolve_prompt_lookup_default(
-            args.prompt_lookup_speculative,
-            device=device,
-            capabilities=runtime.capabilities,
-        )
+        if engine_defaults.prompt_lookup
         else None
     )
-    prefix_cache = resolve_prefix_cache_default(
-        args.prefix_cache,
-        device=device,
-        backend=args.backend,
-        capabilities=runtime.capabilities,
-    )
+    prefix_cache = engine_defaults.prefix_cache
     try:
         app = build_app_from_runtime(
             runtime,

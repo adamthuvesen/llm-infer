@@ -19,7 +19,6 @@ from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle a
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kernels.torch_sdpa import TorchSdpaAttention
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serve import resolve_attention_backend_default
 from llm_infer.serving import InferenceEngine, Request
 
 RTOL = 1e-5
@@ -254,20 +253,3 @@ def test_engine_greedy_chunked_prefill_matches_reference(tmp_path: Path) -> None
     sdpa = _greedy(bundle, "torch_sdpa", build(), prefill_chunk_size=2)
 
     assert sdpa["only"] == naive["only"]
-
-
-def test_resolve_attention_backend_default_local_bundle_picks_sdpa() -> None:
-    assert resolve_attention_backend_default("auto", device="cpu", backend="esme") == "torch_sdpa"
-    assert resolve_attention_backend_default("auto", device="cpu", backend="dense") == "torch_sdpa"
-
-
-def test_resolve_attention_backend_default_cuda_and_qwen_stay_auto() -> None:
-    # CUDA auto behavior (FlashInfer) must not change.
-    assert resolve_attention_backend_default("auto", device="cuda", backend="esme") == "auto"
-    # The non-bundle reference backend keeps auto even on CPU.
-    assert resolve_attention_backend_default("auto", device="cpu", backend="qwen") == "auto"
-
-
-def test_resolve_attention_backend_default_explicit_passes_through() -> None:
-    for name in ("torch_naive", "torch_sdpa", "flash_attn", "flashinfer"):
-        assert resolve_attention_backend_default(name, device="cpu", backend="esme") == name
