@@ -102,21 +102,35 @@ On a CUDA device with `--dtype float16` or `--dtype bfloat16`, `auto` selects th
 Without it, load fails with an actionable error; pass `--attention-backend torch_naive` or
 `--attention-backend flash_attn` to opt out.
 
+Local (non-CUDA) serving resolves fast defaults automatically: fp16 weights (~12% faster
+than fp32 with output that matched the reference byte-for-byte on the 8-turn bench), the
+fused `torch_sdpa` attention backend, the cross-turn prefix cache (a follow-up chat turn
+reuses the previous turn's prompt KV instead of re-prefilling the conversation), and
+prompt-lookup speculative decode. `--dtype float32` restores the exact cpu fp32 reference
+config; each auto has a `--no-*` or explicit override. CUDA serving keeps its settled
+defaults (fp32 flag default, FlashInfer, decode graphs; cache and speculation off).
+
 The server exposes:
 
 - `POST /v1/chat/completions`
 - `POST /v1/completions`
 - `POST /v1/responses`
 - `GET /metrics`
-- `/` for the small local chat UI
+- `/` for the small local chat UI, including a throughput bench mode (topbar toggle)
+  that streams 8 or 16 concurrent prompts and races concurrent against sequential wall
+  time — point its base-URL field at a remote deployment to compare backends
 
 The official OpenAI Python client works by setting `base_url` to
 `http://127.0.0.1:8000/v1`. The API key is ignored because this local server has no auth.
 
 Engine knobs: `--block-size`, `--num-blocks`, `--decode-window-size` (decode steps per
 EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
-`--preemption-policy`, and `--prompt-lookup-speculative`. See
-`uv run python -m llm_infer.serve --help`.
+`--preemption-policy`, `--prompt-lookup-speculative`/`--no-prompt-lookup-speculative`, and
+`--prefix-cache`/`--no-prefix-cache`. See `uv run python -m llm_infer.serve --help`.
+
+The same app can serve from a GPU on your own Modal account:
+`modal deploy scripts/modal_esme_serve.py` (scale-to-zero; CORS enabled so a locally
+served bench page can point at it).
 
 ## Benchmarks
 

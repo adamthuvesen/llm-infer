@@ -37,3 +37,15 @@ def test_webui_serves_topic_picker_and_training_grounded_questions() -> None:
     assert "Likely coverage, not guaranteed recall." in response.text
     assert 'class="caret"' not in response.text
     assert 'id="thread-title"' not in response.text
+    # Throughput bench mode: the toggle and bench view ship alongside the intact chat UI.
+    assert 'id="bench-toggle"' in response.text
+    assert 'title="Throughput bench"' in response.text
+    assert "Run ×8 concurrent" in response.text
+    assert "Run ×8 sequential" in response.text
+    assert 'id="bench-grid"' in response.text
+    assert "Eight prompts, one engine, one continuously-batched decode loop." in response.text
+    # The single SSE parse loop is shared, not duplicated, between chat and bench.
+    assert "async function readSSE(" in response.text
+    # Stream-count segmented control: ×8 default, ×16 opt-in.
+    assert 'id="bench-count-8"' in response.text
+    assert 'id="bench-count-16"' in response.text

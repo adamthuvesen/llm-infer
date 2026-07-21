@@ -63,4 +63,6 @@ def serve():
         dtype=torch.bfloat16,
         device="cuda",
     )
-    return build_app_from_runtime(runtime, device="cuda")
+    # allow_cors lets the locally-served webui point its throughput-bench base URL at this
+    # deployment's *.modal.run origin for a local-vs-A100 comparison.
+    return build_app_from_runtime(runtime, device="cuda", allow_cors=True)

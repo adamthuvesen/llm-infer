@@ -13,6 +13,7 @@ from llm_infer.kernels.base import AttentionBackend, PackedPrefillAttentionBacke
 from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
+from llm_infer.kernels.torch_sdpa import TorchSdpaAttention
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
@@ -27,10 +28,11 @@ from llm_infer.model.qwen import QwenModel
 RuntimeLoader = Callable[..., ModelRuntime]
 BundleBackendId = Literal["dense", "esme"]
 BUNDLE_BACKENDS = frozenset({"dense", "esme"})
-AttentionBackendChoice = Literal["auto", "torch_naive", "flash_attn", "flashinfer"]
+AttentionBackendChoice = Literal["auto", "torch_naive", "torch_sdpa", "flash_attn", "flashinfer"]
 ATTENTION_BACKEND_CHOICES: tuple[AttentionBackendChoice, ...] = (
     "auto",
     "torch_naive",
+    "torch_sdpa",
     "flash_attn",
     "flashinfer",
 )
@@ -345,6 +347,10 @@ def _resolve_attention_backend(
 
     if attention_backend_name == "torch_naive":
         return TorchNaiveAttention()
+    if attention_backend_name == "torch_sdpa":
+        # SDPA is CPU/MPS/CUDA-capable and dtype-agnostic, so explicit selection has no device
+        # or precision gate — unlike the CUDA-only flash backends below.
+        return TorchSdpaAttention()
     if attention_backend_name == "flash_attn":
         _require_cuda_low_precision(attention_backend_name, dtype=dtype, device=device)
         return _construct_attention_backend("flash_attn")

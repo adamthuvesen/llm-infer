@@ -31,6 +31,7 @@ import torch
 
 from llm_infer.kernels.base import (
     AttentionBackend,
+    GroupedDecodeAttentionBackend,
     PackedPrefillAttentionBackend,
     PagedDecodeAttentionBackend,
 )
@@ -98,6 +99,17 @@ class PretrainBundleModel:
         # step. The backend never changes after construction, so cache the narrowed reference.
         self._paged_backend: PagedDecodeAttentionBackend | None = (
             backend if isinstance(backend, PagedDecodeAttentionBackend) else None
+        )
+        # A grouped-decode backend (SDPA) broadcasts KV heads itself, so the packed decode path
+        # gathers the history at native ``num_kv_heads`` and skips the per-step full-history GQA
+        # expansion. Only worth it under real GQA (fewer KV heads than query heads); MHA models
+        # keep the base packed path. Narrowed once — the runtime_checkable isinstance is too
+        # costly to repeat per layer per decode step.
+        self._grouped_decode_backend: GroupedDecodeAttentionBackend | None = (
+            backend
+            if config.num_key_value_heads < config.num_attention_heads
+            and isinstance(backend, GroupedDecodeAttentionBackend)
+            else None
         )
         self.dtype = dtype
         self.num_layers = config.num_hidden_layers
@@ -592,6 +604,13 @@ class PretrainBundleModel:
             k_hist, v_hist = cache.read_many_plan(layer, read_plan)
         if read_plan.cu_seqlens is None:
             raise ValueError("packed attention needs cumulative sequence lengths")
+        grouped = self._grouped_decode_backend
+        if grouped is not None:
+            # Native KV heads straight from the cache — the backend broadcasts them, so the
+            # whole-history repeat_interleave never runs.
+            return grouped.forward_decode_batch_packed_grouped(
+                queries, k_hist, v_hist, read_plan.cu_seqlens, read_plan.max_len
+            )
         k_exp, v_exp = self._expand_kv_token_major(k_hist, v_hist)
         return self.backend.forward_decode_batch_packed(
             queries, k_exp, v_exp, read_plan.cu_seqlens, read_plan.max_len

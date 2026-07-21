@@ -128,21 +128,6 @@
   .app.rail-open #rail-open { display: none; }
   .topbar .spacer { flex: 1; }
 
-  /* The instrument: live decode-rate trace + session odometer, fed by the real stream. */
-  .meter {
-    display: flex; align-items: center; gap: 12px;
-    font-family: var(--mono); font-size: 11.5px; color: var(--faint);
-    padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px;
-    background: var(--surface); user-select: none;
-  }
-  .meter svg { display: block; width: 84px; height: 20px; overflow: visible; }
-  .meter .trace { fill: none; stroke: var(--line-strong); stroke-width: 1.5; transition: stroke .3s; }
-  .meter.live .trace { stroke: var(--accent); }
-  .meter .rate { min-width: 74px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .meter.live .rate { color: var(--accent-strong); }
-  .meter .sep { width: 1px; height: 14px; background: var(--line); }
-  .meter .odo { color: var(--faint); font-variant-numeric: tabular-nums; }
-
   .scroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
   .scroll::-webkit-scrollbar { width: 10px; }
   .scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 10px; border: 3px solid var(--paper); }
@@ -167,7 +152,6 @@
     font-size: clamp(32px, 4.2vw, 46px);
     line-height: 1.04; letter-spacing: -.015em; font-weight: 500;
   }
-  .hero h1 em { font-style: italic; font-weight: 500; color: var(--accent); }
   .hero-copy p { margin: 12px 0 0; max-width: 560px; color: var(--muted); font-size: 14.5px; line-height: 1.55; }
 
   /* Data plate: the model's real architecture, engraved. */
@@ -253,11 +237,6 @@
   .prose ul, .prose ol { margin: 0 0 12px; padding-left: 22px; }
   .prose strong { font-weight: 600; }
   .prose .err { color: var(--danger); }
-  .tokcaret {
-    display: inline-block; width: 7px; height: 1.05em; margin-left: 1px; vertical-align: text-bottom;
-    background: var(--accent); border-radius: 1.5px; animation: caret-blink 1s steps(2) infinite;
-  }
-  @keyframes caret-blink { 50% { opacity: 0; } }
 
   /* Token inspector: the answer split into the exact chunks the engine emitted. */
   .tokview { white-space: pre-wrap; word-wrap: break-word; line-height: 1.75; }
@@ -297,7 +276,8 @@
   .composer-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px 8px 12px; }
   .params-btn {
     display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 6px;
-    font-family: var(--mono); font-size: 12px; color: var(--muted); transition: background .12s, color .12s;
+    /* Same face as the Question ideas select beside it, so the composer row reads as one set. */
+    font: 500 12.5px/1.2 var(--font); color: var(--muted); transition: background .12s, color .12s;
   }
   .params-btn:hover { background: var(--hover); color: var(--ink); }
   .params-btn svg { width: 13px; height: 13px; }
@@ -332,20 +312,20 @@
   .popover-backdrop.open { display: block; }
   .popover {
     position: fixed; z-index: 41; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 380px; max-width: calc(100vw - 32px);
+    width: 340px; max-width: calc(100vw - 32px);
     max-height: calc(100dvh - 32px); overflow-y: auto;
     background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px;
-    box-shadow: 0 24px 64px -20px rgba(23,26,33,.35); padding: 22px 22px 24px; display: none;
+    box-shadow: 0 24px 64px -20px rgba(23,26,33,.35); padding: 14px 16px 16px; display: none;
   }
   .popover.open { display: block; }
-  .pop-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+  .pop-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .pop-title { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); }
   .pop-close { width: 26px; height: 26px; border-radius: 5px; display: grid; place-items: center; color: var(--muted); transition: background .12s, color .12s; }
   .pop-close:hover { background: var(--hover); color: var(--ink); }
   .pop-close svg { width: 14px; height: 14px; }
-  .field { margin-bottom: 22px; }
+  .field { margin-bottom: 11px; }
   .field:last-child { margin-bottom: 0; }
-  .field label { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 450; margin-bottom: 11px; }
+  .field label { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; font-weight: 450; margin-bottom: 6px; }
   .field .val { font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--hover); padding: 2px 8px; border-radius: 4px; font-variant-numeric: tabular-nums; }
   .field input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; border-radius: 3px; background: var(--line-strong); outline: none; cursor: pointer; }
   .field input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 15px; height: 15px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.25); cursor: pointer; }
@@ -355,7 +335,7 @@
     font-family: inherit; font-size: 13px; line-height: 1.5; outline: none; resize: vertical; color: var(--ink);
   }
   .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash-a); }
-  .field .help { font-size: 11.5px; color: var(--faint); margin-top: 8px; line-height: 1.5; }
+  .field .help { font-size: 11px; color: var(--faint); margin-top: 4px; line-height: 1.45; }
 
   .toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
@@ -363,6 +343,105 @@
     opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 60; max-width: 90vw;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ---------- Throughput bench ---------- */
+  .bench-toggle[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+  .bench-label { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-right: 4px; }
+
+  .bench { max-width: 1180px; margin: 0 auto; padding: 20px 24px 64px; }
+  .bench-head { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; margin-bottom: 16px; }
+  .bench-readout {
+    flex: 1 1 300px; min-width: 250px;
+    border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface);
+    padding: 13px 18px 10px; display: flex; flex-direction: column; justify-content: space-between; gap: 10px;
+  }
+  .bench-readout .k { display: block; font-family: var(--mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); margin-bottom: 6px; }
+  .bench-tps { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .bench-tps .num { font-size: 38px; font-weight: 500; line-height: 1; color: var(--ink); transition: color .3s; }
+  .bench.live .bench-tps .num { color: var(--accent-strong); }
+  .bench-tps .unit { font-size: 14px; color: var(--faint); }
+  .bench-trace { width: 100%; height: 46px; display: block; overflow: visible; }
+  .bench-trace .trace { fill: none; stroke: var(--line-strong); stroke-width: 1.5; transition: stroke .3s; }
+  .bench.live .bench-trace .trace { stroke: var(--accent); }
+  .bench-plate { flex: 2 1 400px; margin-bottom: 0; align-items: stretch; }
+  .bench-plate .plate-cell { display: flex; flex-direction: column; justify-content: center; }
+
+  .bench-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .bench-btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 9px 15px; border-radius: 8px;
+    font: 500 13px/1 var(--font); transition: background .14s, border-color .14s, color .14s, opacity .14s;
+  }
+  .bench-btn.primary { background: var(--accent); color: var(--surface); }
+  .bench-btn.primary:hover:not(:disabled) { background: var(--accent-strong); }
+  .bench-btn.secondary { border: 1px solid var(--line-strong); color: var(--ink); background: var(--surface); }
+  .bench-btn.secondary:hover:not(:disabled) { background: var(--hover); }
+  .bench-btn.ghost { border: 1px solid var(--line-strong); color: var(--muted); background: var(--surface); }
+  .bench-btn.ghost:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+  .bench-btn:disabled { opacity: .48; cursor: not-allowed; }
+  /* Stream-count segmented control: the selected side reads engraved, like tok-toggle. */
+  .bench-count { display: flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; background: var(--surface); }
+  .bench-count button {
+    padding: 7px 11px; font-family: var(--mono); font-size: 12px; color: var(--muted);
+    transition: background .12s, color .12s;
+  }
+  .bench-count button + button { border-left: 1px solid var(--line-strong); }
+  .bench-count button:hover { background: var(--hover); color: var(--ink); }
+  .bench-count button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); font-weight: 500; }
+  .bench-base {
+    appearance: none; min-width: 180px; flex: 0 1 230px;
+    border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink);
+    padding: 8px 11px; font: 500 12px/1.2 var(--mono);
+  }
+  .bench-base::placeholder { color: var(--faint); }
+  .bench-base:disabled { opacity: .6; }
+  .bench-reshuffle { font-family: var(--mono); font-size: 11.5px; color: var(--accent-strong); padding: 4px 6px; }
+  .bench-reshuffle:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+  .bench-reshuffle:disabled { opacity: .48; cursor: not-allowed; }
+  .bench-guide { color: var(--faint); font-size: 12px; font-family: var(--mono); margin: 0 0 16px; }
+
+  .bench-races { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+  .bench-races:empty { display: none; }
+  .race-row { display: flex; align-items: center; gap: 12px; }
+  .race-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); width: 92px; flex: none; }
+  .race-track { flex: 1; height: 22px; background: var(--paper); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .race-fill { display: block; height: 100%; width: 0; transition: width .7s cubic-bezier(.2,.7,.3,1); }
+  /* The in-flight row tracks the 200ms bench tick; a short linear ease just smooths steps. */
+  .race-fill.live { transition: width .25s linear; }
+  .race-fill.sequential { background: var(--user-wash); }
+  .race-fill.concurrent { background: var(--accent); }
+  .race-time { font-family: var(--mono); font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; width: 60px; text-align: right; flex: none; }
+  .race-punch { font-family: var(--mono); font-size: 12.5px; color: var(--accent-strong); padding-left: 104px; }
+
+  .bench-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .pane { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; height: 180px; display: flex; flex-direction: column; overflow: hidden; }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 9px 11px 7px; }
+  .pane-idx { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; color: var(--faint); }
+  .pane-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
+  .pane.streaming .pane-dot { background: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
+  .pane.done .pane-dot { display: none; }
+  .pane.error .pane-dot { background: var(--danger); }
+  .pane.stopped .pane-dot { background: var(--faint); }
+  /* Completion check: replaces the status dot when the request finishes, engraved at the
+     head's right edge so a glance down the grid reads which of the eight are done. */
+  .pane-check { display: none; margin-left: auto; width: 14px; height: 14px; color: var(--accent-strong); flex: none; }
+  .pane.done .pane-check { display: block; animation: check-in .25s cubic-bezier(.2,.7,.3,1) both; }
+  @keyframes check-in { from { opacity: 0; transform: scale(.6); } }
+  .pane-q { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 11px 8px; border-bottom: 1px solid var(--line); }
+  .pane-body {
+    flex: 1; overflow: hidden; padding: 9px 11px 0; font-size: 12.5px; line-height: 1.5; color: var(--ink);
+    white-space: pre-wrap; word-wrap: break-word;
+    -webkit-mask-image: linear-gradient(to bottom, #000 74%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 74%, transparent 100%);
+  }
+  .pane-body.err { color: var(--danger); font-family: var(--mono); font-size: 11.5px; }
+  .pane-foot { padding: 6px 11px 8px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+  @media (max-width: 1100px) { .bench-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 620px) {
+    .bench { padding: 16px 14px 48px; }
+    .bench-grid { grid-template-columns: 1fr; }
+    .race-punch { padding-left: 0; }
+  }
 
   .rail-scrim { display: none; }
 
@@ -374,7 +453,6 @@
     .main { grid-column: 1; grid-row: 1; }
     .app.rail-open .rail { visibility: visible; padding: 14px 12px; border-right: 1px solid var(--line); transform: translateX(0); }
     .bubble { max-width: 88%; }
-    .meter .odo, .meter .sep { display: none; }
   }
 
   @media (max-width: 620px) {
@@ -394,8 +472,6 @@
     .params-btn #params-label { display: none; }
     .composer-dock { padding-inline: 14px; }
     .thread { padding-inline: 14px; }
-    .meter svg { width: 56px; }
-    .meter .rate { min-width: 0; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -440,12 +516,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
       </button>
       <span class="spacer"></span>
-      <div class="meter" id="meter" title="Live decode rate and session tokens" aria-label="Engine meter">
-        <svg viewBox="0 0 84 20" aria-hidden="true"><polyline class="trace" id="meter-trace" points="0,19 84,19" /></svg>
-        <span class="rate" id="meter-rate">— tok/s</span>
-        <span class="sep" aria-hidden="true"></span>
-        <span class="odo" id="meter-odo">Σ 0 tok</span>
-      </div>
+      <span class="bench-label" aria-hidden="true">bench</span>
+      <button class="icon-btn bench-toggle" id="bench-toggle" title="Throughput bench" aria-pressed="false" aria-label="Throughput bench">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+      </button>
     </div>
 
     <div class="scroll" id="scroll">
@@ -466,7 +540,7 @@
     <div class="composer-row">
       <button class="params-btn" id="params-btn" aria-haspopup="true" aria-label="Sampling parameters" title="Sampling parameters">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-        <span id="params-label">temp 0.00 · p 1.00 · k 0</span>
+        <span id="params-label">Settings</span>
       </button>
       <label class="quick-question" title="Choose and send a sample question">
         <span class="sr-only">Sample questions</span>
@@ -487,16 +561,15 @@
         <div class="field">
           <label>Temperature <span class="val" id="temp-val">0.00</span></label>
           <input type="range" id="temp" min="0" max="2" step="0.05" value="0" />
-          <div class="help">0 is the proven greedy reference check — deterministic, token-for-token.</div>
+          <div class="help">0 is the deterministic greedy reference.</div>
         </div>
         <div class="field">
           <label>Top-p <span class="val" id="top-p-val">1.00</span></label>
           <input type="range" id="top-p" min="0.05" max="1" step="0.05" value="1" />
         </div>
         <div class="field">
-          <label>Top-k <span class="val" id="top-k-val">0</span></label>
+          <label title="0 keeps the full vocabulary">Top-k <span class="val" id="top-k-val">0</span></label>
           <input type="range" id="top-k" min="0" max="100" step="1" value="0" />
-          <div class="help">0 keeps the full vocabulary.</div>
         </div>
         <div class="field">
           <label>Frequency penalty <span class="val" id="freq-val">0.00</span></label>
@@ -645,8 +718,17 @@
     starterOffset: 0,
     starterSendPending: false,
     historyExpanded: true,
-    meterTimes: [],         // token arrival times for the current stream
-    meterTotal: 0,          // session odometer
+    benchView: false,       // throughput bench mode showing instead of chat
+    bench: {
+      running: false, mode: null, offset: 0,
+      count: (() => { try { return localStorage.getItem("llm-infer-bench-count") === "16" ? 16 : 8; } catch { return 8; } })(),
+      baseUrl: (() => { try { return localStorage.getItem("llm-infer-bench-base") || ""; } catch { return ""; } })(),
+      times: [],            // aggregate token arrival times across all 8 streams
+      totalTokens: 0, reqsDone: 0, activeCount: 0,
+      controllers: [], stopped: false, runStart: 0,
+      paneProgress: new Array(8).fill(0),  // per-request completion fraction for the live bar
+      results: { sequential: null, concurrent: null },  // wall seconds per mode
+    },
   };
 
   // ---------- persistence ----------
@@ -663,8 +745,6 @@
       if (id) {
         state.modelId = id;
         $("model-name").textContent = id;
-        const heroModel = $("hero-model");
-        if (heroModel) heroModel.textContent = `${id} · serving locally`;
         if (state.starterSendPending) {
           state.starterSendPending = false;
           void send();
@@ -690,46 +770,31 @@
     }).join("");
   }
 
-  // ---------- engine meter ----------
-  const METER_WINDOW_MS = 8000, METER_BUCKET_MS = 250, METER_W = 84, METER_H = 20;
-  let meterTick = null;
+  // ---------- shared trace math ----------
+  const METER_WINDOW_MS = 8000, METER_BUCKET_MS = 250;
 
   function fmtInt(n) { return n.toLocaleString("en-US").replace(/,/g, " "); }
 
-  function drawMeter() {
-    const now = performance.now();
-    const times = state.meterTimes;
-    const buckets = Math.floor(METER_WINDOW_MS / METER_BUCKET_MS);
+  // Shared bucket math for the bench readout's live trace.
+  function bucketRates(times, now, windowMs, bucketMs) {
+    const buckets = Math.floor(windowMs / bucketMs);
     const rates = new Array(buckets).fill(0);
     for (const t of times) {
       const age = now - t;
-      if (age > METER_WINDOW_MS) continue;
-      const i = buckets - 1 - Math.floor(age / METER_BUCKET_MS);
-      if (i >= 0) rates[i] += 1000 / METER_BUCKET_MS;
+      if (age > windowMs) continue;
+      const i = buckets - 1 - Math.floor(age / bucketMs);
+      if (i >= 0) rates[i] += 1000 / bucketMs;
     }
+    return rates;
+  }
+  function polylinePoints(rates, w, h) {
     const max = Math.max(...rates, 20);
-    const step = METER_W / (buckets - 1);
-    const pts = rates.map((r, i) => `${(i * step).toFixed(1)},${(METER_H - 1 - (r / max) * (METER_H - 2)).toFixed(1)}`);
-    $("meter-trace").setAttribute("points", pts.join(" "));
-
-    const lastSec = times.filter((t) => now - t < 1000).length;
-    $("meter-rate").textContent = state.streaming ? `${lastSec} tok/s` : ($("meter-rate").dataset.final || "— tok/s");
-    $("meter-odo").textContent = `Σ ${fmtInt(state.meterTotal)} tok`;
+    const step = w / (rates.length - 1);
+    return rates.map((r, i) => `${(i * step).toFixed(1)},${(h - 1 - (r / max) * (h - 2)).toFixed(1)}`).join(" ");
   }
 
-  function meterStart() {
-    state.meterTimes = [];
-    delete $("meter-rate").dataset.final;
-    $("meter").classList.add("live");
-    meterTick = setInterval(drawMeter, METER_BUCKET_MS);
-  }
 
-  function meterStop(finalRate) {
-    clearInterval(meterTick); meterTick = null;
-    $("meter").classList.remove("live");
-    if (finalRate != null) $("meter-rate").dataset.final = `${finalRate.toFixed(1)} tok/s`;
-    drawMeter();
-  }
+
 
   // ---------- view ----------
   const composerTpl = $("composer-tpl").content;
@@ -738,7 +803,6 @@
   function mountComposer(parent) {
     if (!composerEl) { composerEl = composerTpl.cloneNode(true).firstElementChild; wireComposer(); }
     parent.appendChild(composerEl);
-    syncParamsLabel();
   }
 
   function renderHero() {
@@ -746,8 +810,8 @@
       <div class="hero">
         <div class="hero-inner">
           <div class="hero-copy">
-            <div class="hero-kicker"><span class="status-dot"></span><span id="hero-model">${esc(state.modelId || "esme-214m-chat")} · serving locally</span></div>
-            <h1>Ask a <em>small</em> model a big question.</h1>
+            <div class="hero-kicker"><span class="status-dot"></span><span>serving locally</span></div>
+            <h1>Esme-214M-Chat</h1>
             <p>Esme learned from 10.2 billion tokens of educational English web text. Try a topic it is likely to know, or write your own question.</p>
           </div>
           <div class="plate" role="list" aria-label="Model architecture">
@@ -902,10 +966,19 @@
 
   // ---------- sending ----------
   function newChat() {
+    if (state.bench.running) { toast("Stop the bench run first."); return; }
     if (state.streaming) stopStream();
+    exitBenchView();
     state.activeId = null;
     renderActiveHistory();
     renderHero();
+  }
+
+  // Leaving the bench for a chat view (via sidebar) without a full toggle.
+  function exitBenchView() {
+    if (!state.benchView) return;
+    state.benchView = false;
+    $("bench-toggle").setAttribute("aria-pressed", "false");
   }
 
   function ensureChat(firstMsg) {
@@ -920,6 +993,7 @@
 
   async function send() {
     if (state.streaming) return;
+    if (state.bench.running) { toast("A bench run is in progress."); return; }
     const input = $("input");
     const text = input.value.trim();
     if (!text || !state.modelId) return;
@@ -944,15 +1018,36 @@
     scrollToBottom();
 
     setStreaming(true);
-    meterStart();
     const result = await stream(chat, prose, tel);
     aTurn.querySelector(".avatar").classList.remove("live");
     setStreaming(false);
-    meterStop(result.public.rate);
 
     chat.messages.push({ role: "assistant", content: result.text, stats: result.public, chunks: result.chunks });
     setTelemetry(aTurn, result.public, result.text, result.chunks);
     persist();
+  }
+
+  // The one SSE parse loop: read the response body, split on blank lines, hand each
+  // decoded JSON event to onEvent. Shared by chat stream() and the bench runner.
+  async function readSSE(res, onEvent) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const evt of events) {
+        const line = evt.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let json; try { json = JSON.parse(data); } catch { continue; }
+        onEvent(json);
+      }
+    }
   }
 
   async function stream(chat, prose, tel) {
@@ -966,7 +1061,7 @@
     const chunks = [];
 
     const paint = () => {
-      prose.innerHTML = renderMarkdown(acc) + `<span class="tokcaret" aria-hidden="true"></span>`;
+      prose.innerHTML = renderMarkdown(acc);
       if (firstAt != null && tokens > 0) {
         const secs = (performance.now() - firstAt) / 1000;
         const rate = secs > 0 ? tokens / secs : 0;
@@ -998,34 +1093,17 @@
         throw new Error(detail.detail || `server returned ${res.status}`);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n");
-        buffer = events.pop();
-        for (const evt of events) {
-          const line = evt.split("\n").find((l) => l.startsWith("data:"));
-          if (!line) continue;
-          const data = line.slice(5).trim();
-          if (data === "[DONE]") continue;
-          let json; try { json = JSON.parse(data); } catch { continue; }
-          const reason = json.choices?.[0]?.finish_reason;
-          if (reason) finishReason = reason;
-          const delta = json.choices?.[0]?.delta?.content;
-          if (delta) {
-            if (firstAt == null) firstAt = performance.now();
-            acc += delta; tokens++;
-            chunks.push(delta);
-            state.meterTimes.push(performance.now());
-            state.meterTotal++;
-            paint();
-          }
+      await readSSE(res, (json) => {
+        const reason = json.choices?.[0]?.finish_reason;
+        if (reason) finishReason = reason;
+        const delta = json.choices?.[0]?.delta?.content;
+        if (delta) {
+          if (firstAt == null) firstAt = performance.now();
+          acc += delta; tokens++;
+          chunks.push(delta);
+          paint();
         }
-      }
+      });
     } catch (err) {
       if (err.name !== "AbortError") { acc += (acc ? "\n\n" : "") + `⚠ ${err.message}`; toast(err.message); }
     } finally {
@@ -1061,6 +1139,389 @@
     if (dot) dot.classList.toggle("live", on);
   }
 
+  // ---------- throughput bench ----------
+  // One prompt per starter category so panes differ visibly; ×16 takes two per category.
+  function benchPrompts() {
+    const perCategory = state.bench.count / Object.keys(STARTER_TOPICS).length;
+    return Object.values(STARTER_TOPICS).flatMap((qs) =>
+      Array.from({ length: perCategory }, (_, j) => qs[(state.bench.offset + j) % qs.length])
+    );
+  }
+  function benchUrl(path) {
+    const base = state.bench.baseUrl.trim().replace(/\/+$/, "");
+    return base ? `${base}/${path}` : path;
+  }
+
+  let benchEl = null;
+
+  function paneMarkup(i) {
+    const idx = String(i + 1).padStart(2, "0");
+    return `<li class="pane" role="listitem" data-i="${i}">
+      <div class="pane-head">
+        <span class="pane-idx">${idx}</span>
+        <span class="pane-dot" aria-hidden="true"></span>
+        <span class="sr-only pane-status">idle</span>
+        <svg class="pane-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
+      </div>
+      <div class="pane-q"></div>
+      <div class="pane-body"></div>
+      <div class="pane-foot">— · — · 0 tok</div>
+    </li>`;
+  }
+
+  function benchRoot() {
+    if (benchEl) return benchEl;
+    const panes = Array.from({ length: state.bench.count }, (_, i) => paneMarkup(i)).join("");
+    benchEl = document.createElement("div");
+    benchEl.className = "bench";
+    benchEl.innerHTML = `
+      <div class="bench-head">
+        <div class="bench-readout">
+          <div>
+            <span class="k">combined throughput</span>
+            <div class="bench-tps"><span class="num" id="bench-tps">—</span><span class="unit">tok/s</span></div>
+          </div>
+          <svg class="bench-trace" viewBox="0 0 280 46" aria-hidden="true"><polyline class="trace" id="bench-trace" points="0,45 280,45" /></svg>
+        </div>
+        <div class="plate bench-plate" role="list" aria-label="Bench counters">
+          <div class="plate-cell" role="listitem"><span class="k">active</span><span class="v" id="bench-active">0 / 8</span></div>
+          <div class="plate-cell" role="listitem"><span class="k">Σ tokens</span><span class="v" id="bench-tokens">0</span></div>
+          <div class="plate-cell" role="listitem"><span class="k">wall</span><span class="v" id="bench-wall">0.0 s</span></div>
+          <div class="plate-cell" role="listitem"><span class="k">reqs/s done</span><span class="v" id="bench-reqs">0.00</span></div>
+        </div>
+      </div>
+      <div class="bench-controls">
+        <button class="bench-btn primary" id="bench-run-conc" type="button">Run ×8 concurrent</button>
+        <button class="bench-btn secondary" id="bench-run-seq" type="button">Run ×8 sequential</button>
+        <button class="bench-btn ghost" id="bench-stop" type="button" disabled>Stop</button>
+        <div class="bench-count" role="group" aria-label="Stream count">
+          <button type="button" id="bench-count-8" aria-pressed="true">×8</button>
+          <button type="button" id="bench-count-16" aria-pressed="false">×16</button>
+        </div>
+        <input class="bench-base" id="bench-base" type="text" inputmode="url" spellcheck="false" autocomplete="off" placeholder="same origin" aria-label="Base URL for bench requests" />
+        <button class="bench-reshuffle" id="bench-reshuffle" type="button">reshuffle</button>
+      </div>
+      <p class="bench-guide">Eight prompts, one engine, one continuously-batched decode loop.</p>
+      <div class="bench-races" id="bench-races" aria-live="polite"></div>
+      <ol class="bench-grid" id="bench-grid" role="list">${panes}</ol>`;
+    wireBench();
+    renderBenchPrompts();
+    return benchEl;
+  }
+
+  function wireBench() {
+    const base = benchEl.querySelector("#bench-base");
+    base.value = state.bench.baseUrl;
+    base.addEventListener("input", () => {
+      state.bench.baseUrl = base.value;
+      try { localStorage.setItem("llm-infer-bench-base", base.value); } catch {}
+    });
+    benchEl.querySelector("#bench-run-conc").addEventListener("click", () => runBench("concurrent"));
+    benchEl.querySelector("#bench-run-seq").addEventListener("click", () => runBench("sequential"));
+    benchEl.querySelector("#bench-stop").addEventListener("click", stopBench);
+    benchEl.querySelector("#bench-reshuffle").addEventListener("click", () => {
+      if (state.bench.running) return;
+      state.bench.offset++;
+      renderBenchPrompts();
+    });
+    benchEl.querySelector("#bench-count-8").addEventListener("click", () => setBenchCount(8));
+    benchEl.querySelector("#bench-count-16").addEventListener("click", () => setBenchCount(16));
+    syncBenchCount();
+  }
+
+  function setBenchCount(count) {
+    if (state.bench.running || count === state.bench.count) return;
+    state.bench.count = count;
+    try { localStorage.setItem("llm-infer-bench-count", String(count)); } catch {}
+    // Walls from different stream counts are not comparable, so a count switch retires the race.
+    state.bench.results = { sequential: null, concurrent: null };
+    renderRaces();
+    syncBenchCount();
+    resetBenchRun();
+    renderBenchPrompts();
+  }
+
+  function syncBenchCount() {
+    const count = state.bench.count;
+    benchEl.querySelector("#bench-count-8").setAttribute("aria-pressed", String(count === 8));
+    benchEl.querySelector("#bench-count-16").setAttribute("aria-pressed", String(count === 16));
+    benchEl.querySelector("#bench-run-conc").textContent = `Run ×${count} concurrent`;
+    benchEl.querySelector("#bench-run-seq").textContent = `Run ×${count} sequential`;
+    benchEl.querySelector(".bench-guide").textContent =
+      `${count === 8 ? "Eight" : "Sixteen"} prompts, one engine, one continuously-batched decode loop.`;
+    benchEl.querySelector("#bench-active").textContent = `0 / ${count}`;
+    // Query within benchEl: at wire time the bench root is not attached to the document yet.
+    benchEl.querySelector("#bench-grid").innerHTML =
+      Array.from({ length: count }, (_, i) => paneMarkup(i)).join("");
+  }
+
+  function paneEls() { return benchEl.querySelectorAll(".pane"); }
+
+  function renderBenchPrompts() {
+    if (!benchEl) return;
+    const prompts = benchPrompts();
+    paneEls().forEach((pane, i) => {
+      const q = pane.querySelector(".pane-q");
+      q.textContent = prompts[i];
+      q.title = prompts[i];
+    });
+  }
+
+  function setPaneStatus(pane, status) {
+    pane.classList.remove("streaming", "done", "error", "stopped");
+    if (status !== "idle") pane.classList.add(status);
+    pane.querySelector(".pane-status").textContent = status;
+  }
+
+  function paneFoot(tokens, firstAt, start) {
+    const ttft = firstAt != null ? `${Math.round(firstAt - start)} ms` : "—";
+    const secs = firstAt != null ? (performance.now() - firstAt) / 1000 : 0;
+    const rate = secs > 0 ? `${(tokens / secs).toFixed(1)} tok/s` : "—";
+    return `${ttft} · ${rate} · ${tokens} tok`;
+  }
+
+  // Per-request token budget for bench runs: fixed so wall times and tok/s stay comparable
+  // across runs and backends. The live race bar treats a request as fully done on EOS even
+  // when it stopped short of the budget, so early finishes never stall the bar.
+  const BENCH_MAX_TOKENS = 512;
+
+  function resetBenchRun() {
+    Object.assign(state.bench, { times: [], totalTokens: 0, reqsDone: 0, activeCount: 0, controllers: [], stopped: false, paneProgress: new Array(state.bench.count).fill(0) });
+    paneEls().forEach((pane) => {
+      setPaneStatus(pane, "idle");
+      const body = pane.querySelector(".pane-body");
+      body.textContent = ""; body.classList.remove("err");
+      pane.querySelector(".pane-foot").textContent = "— · — · 0 tok";
+    });
+    $("bench-tps").textContent = "—";
+    $("bench-tokens").textContent = "0";
+    $("bench-active").textContent = `0 / ${state.bench.count}`;
+    $("bench-wall").textContent = "0.0 s";
+    $("bench-reqs").textContent = "0.00";
+  }
+
+  function setBenchRunning(on) {
+    benchEl.querySelector("#bench-run-conc").disabled = on;
+    benchEl.querySelector("#bench-run-seq").disabled = on;
+    benchEl.querySelector("#bench-reshuffle").disabled = on;
+    benchEl.querySelector("#bench-base").disabled = on;
+    benchEl.querySelector("#bench-stop").disabled = !on;
+  }
+
+  let benchTick = null;
+  function benchMeterStart() { benchEl.classList.add("live"); benchTick = setInterval(drawBench, 200); drawBench(); }
+  function benchMeterStop() { clearInterval(benchTick); benchTick = null; benchEl.classList.remove("live"); }
+
+  function drawBench() {
+    const now = performance.now();
+    const rates = bucketRates(state.bench.times, now, METER_WINDOW_MS, METER_BUCKET_MS);
+    $("bench-trace").setAttribute("points", polylinePoints(rates, 280, 46));
+    $("bench-tokens").textContent = fmtInt(state.bench.totalTokens);
+    $("bench-active").textContent = `${state.bench.activeCount} / ${state.bench.count}`;
+    if (state.bench.running) {
+      const lastSec = state.bench.times.filter((t) => now - t < 1000).length;
+      $("bench-tps").textContent = String(lastSec);
+      const elapsed = (now - state.bench.runStart) / 1000;
+      $("bench-wall").textContent = `${elapsed.toFixed(1)} s`;
+      $("bench-reqs").textContent = elapsed > 0 ? (state.bench.reqsDone / elapsed).toFixed(2) : "0.00";
+      const liveFill = $("race-live-fill");
+      if (liveFill) {
+        const done = state.bench.paneProgress.reduce((sum, p) => sum + p, 0) / state.bench.paneProgress.length;
+        liveFill.style.width = `${(done * 100).toFixed(1)}%`;
+        $("race-live-time").textContent = `${elapsed.toFixed(1)} s`;
+      }
+    }
+  }
+
+  function renderLiveRace(mode) {
+    // While a run is in flight the row is a *progress* bar — completion fraction across the
+    // eight requests — with a live clock. finishBench() re-renders the comparative wall-time
+    // bars over it, so the two semantics never show at once for the same mode.
+    const wrap = $("bench-races");
+    const other = mode === "concurrent" ? "sequential" : "concurrent";
+    const otherWall = state.bench.results[other];
+    let html = "";
+    if (otherWall != null) {
+      html += `<div class="race-row">
+        <span class="race-label">${other}</span>
+        <span class="race-track"><span class="race-fill ${other}" style="width:100%"></span></span>
+        <span class="race-time">${otherWall.toFixed(1)} s</span>
+      </div>`;
+    }
+    html += `<div class="race-row">
+      <span class="race-label">${mode}</span>
+      <span class="race-track"><span class="race-fill live ${mode}" id="race-live-fill" style="width:0"></span></span>
+      <span class="race-time" id="race-live-time">0.0 s</span>
+    </div>`;
+    wrap.innerHTML = html;
+  }
+
+  async function runBench(mode) {
+    if (state.bench.running || state.streaming) return;
+    resetBenchRun();
+    const prompts = benchPrompts();
+
+    let modelId;
+    try {
+      const r = await fetch(benchUrl("v1/models"));
+      if (!r.ok) throw new Error(`models returned ${r.status}`);
+      const j = await r.json();
+      modelId = j?.data?.[0]?.id;
+      if (!modelId) throw new Error("no model advertised");
+    } catch (err) {
+      toast(`Bench endpoint unreachable: ${err.message}`);
+      paneEls().forEach((pane) => { setPaneStatus(pane, "error"); showPaneError(pane, err.message); });
+      return;
+    }
+
+    state.bench.running = true;
+    state.bench.mode = mode;
+    setBenchRunning(true);
+    benchMeterStart();
+    state.bench.runStart = performance.now();
+    renderLiveRace(mode);
+
+    if (mode === "concurrent") {
+      await Promise.all(prompts.map((p, i) => runPane(i, p, modelId)));
+    } else {
+      for (let i = 0; i < prompts.length; i++) {
+        if (state.bench.stopped) break;
+        await runPane(i, prompts[i], modelId);
+      }
+    }
+
+    const wall = (performance.now() - state.bench.runStart) / 1000;
+    finishBench(mode, wall);
+  }
+
+  async function runPane(i, prompt, modelId) {
+    const pane = paneEls()[i];
+    const body = pane.querySelector(".pane-body");
+    const foot = pane.querySelector(".pane-foot");
+    const controller = new AbortController();
+    state.bench.controllers.push(controller);
+    setPaneStatus(pane, "streaming");
+    state.bench.activeCount++;
+    let acc = "", tokens = 0, start = performance.now(), firstAt = null;
+    try {
+      const res = await fetch(benchUrl("v1/chat/completions"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: true, temperature: 0, max_tokens: BENCH_MAX_TOKENS }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `server returned ${res.status}`);
+      }
+      await readSSE(res, (json) => {
+        const delta = json.choices?.[0]?.delta?.content;
+        if (delta) {
+          if (firstAt == null) firstAt = performance.now();
+          acc += delta; tokens++;
+          state.bench.times.push(performance.now());
+          state.bench.totalTokens++;
+          state.bench.paneProgress[i] = Math.min(tokens / BENCH_MAX_TOKENS, 1);
+          body.textContent = acc;
+          body.scrollTop = body.scrollHeight;  // auto-follow the tail
+          foot.textContent = paneFoot(tokens, firstAt, start);
+        }
+      });
+      state.bench.activeCount--;
+      if (!state.bench.stopped) state.bench.paneProgress[i] = 1;  // EOS before the budget still completes the request
+      setPaneStatus(pane, state.bench.stopped ? "stopped" : "done");
+    } catch (err) {
+      state.bench.activeCount--;
+      if (err.name === "AbortError") { setPaneStatus(pane, "stopped"); }
+      else { setPaneStatus(pane, "error"); showPaneError(pane, err.message); toast(err.message); }
+    } finally {
+      state.bench.reqsDone++;
+    }
+  }
+
+  function showPaneError(pane, msg) {
+    const body = pane.querySelector(".pane-body");
+    body.classList.add("err");
+    body.textContent = `⚠ ${msg}`;
+  }
+
+  function stopBench() {
+    if (!state.bench.running) return;
+    state.bench.stopped = true;
+    for (const c of state.bench.controllers) { try { c.abort(); } catch {} }
+  }
+
+  function finishBench(mode, wall) {
+    state.bench.running = false;
+    setBenchRunning(false);
+    benchMeterStop();
+    const finalRate = wall > 0 ? state.bench.totalTokens / wall : 0;
+    drawBench();  // flush counters; running is false so it won't clobber the finals below
+    $("bench-tps").textContent = state.bench.totalTokens ? finalRate.toFixed(1) : "—";
+    $("bench-wall").textContent = `${wall.toFixed(1)} s`;
+    $("bench-active").textContent = `0 / ${state.bench.count}`;
+    // An aborted run keeps its partial panes but earns no race bar; re-rendering from
+    // results either way clears the in-flight progress row.
+    if (!state.bench.stopped) state.bench.results[mode] = wall;
+    renderRaces();
+    state.bench.stopped = false;
+  }
+
+  function renderRaces() {
+    const wrap = $("bench-races");
+    const { sequential, concurrent } = state.bench.results;
+    const slower = Math.max(sequential || 0, concurrent || 0) || 1;
+    const bar = (label, wall) => {
+      if (wall == null) return "";
+      const pct = Math.max(2, (wall / slower) * 100).toFixed(1);
+      return `<div class="race-row">
+        <span class="race-label">${label}</span>
+        <span class="race-track"><span class="race-fill ${label}" data-w="${pct}%" style="width:0"></span></span>
+        <span class="race-time">${wall.toFixed(1)} s</span>
+      </div>`;
+    };
+    let html = bar("sequential", sequential) + bar("concurrent", concurrent);
+    if (sequential != null && concurrent != null && concurrent > 0) {
+      html += `<div class="race-punch">concurrent ×${(sequential / concurrent).toFixed(1)} faster</div>`;
+    }
+    // Seed each rebuilt bar at the width its predecessor was showing, so the just-finished
+    // live progress bar glides to its final width instead of flashing back to zero.
+    const prevWidths = {};
+    wrap.querySelectorAll(".race-fill").forEach((f) => {
+      prevWidths[f.classList.contains("sequential") ? "sequential" : "concurrent"] = f.style.width;
+    });
+    wrap.innerHTML = html;
+    // Set the true final widths after a forced reflow: the transition animates them, and with
+    // prefers-reduced-motion (transitions globally off) they simply snap to correct. A reflow
+    // rather than requestAnimationFrame because rAF never fires in a backgrounded tab, which
+    // would leave the bars stuck at zero width.
+    wrap.querySelectorAll(".race-fill").forEach((f) => {
+      const mode = f.classList.contains("sequential") ? "sequential" : "concurrent";
+      f.style.width = prevWidths[mode] || "0";
+      void f.offsetWidth;
+      f.style.width = f.dataset.w;
+    });
+  }
+
+  function toggleBench() {
+    if (state.streaming) { toast("Finish the chat response first."); return; }
+    if (state.bench.running) { toast("Stop the bench run first."); return; }
+    setBenchView(!state.benchView);
+  }
+
+  function setBenchView(on) {
+    state.benchView = on;
+    $("bench-toggle").setAttribute("aria-pressed", String(on));
+    if (on) {
+      scroll.replaceChildren(benchRoot());
+      dock.hidden = true;
+    } else {
+      // Rebuild chat from state — it survived untouched while bench was showing.
+      const chat = activeChat();
+      if (chat && chat.messages.length) renderThread(); else renderHero();
+    }
+  }
+
   // ---------- sidebar / history ----------
   function renderActiveHistory() {
     const h = $("history");
@@ -1087,7 +1548,11 @@
       const b = document.createElement("button");
       b.className = "chat-item" + (c.id === state.activeId ? " active" : "");
       b.textContent = c.title || "Untitled";
-      b.addEventListener("click", () => { state.activeId = c.id; renderThread(); renderActiveHistory(); });
+      b.addEventListener("click", () => {
+        if (state.bench.running) { toast("Stop the bench run first."); return; }
+        exitBenchView();
+        state.activeId = c.id; renderThread(); renderActiveHistory();
+      });
       list.appendChild(b);
     }
     h.appendChild(list);
@@ -1127,34 +1592,49 @@
     // params popover
     const pop = composerEl.querySelector("#popover");
     const back = composerEl.querySelector("#pop-backdrop");
-    const openPop = (o) => { pop.classList.toggle("open", o); back.classList.toggle("open", o); };
+    const openPop = (o) => {
+      // Portal to <body> on open: inside the composer, an animated ancestor turns
+      // position:fixed into a 720px-column containing block, so the backdrop never covered
+      // the whole viewport and outside clicks missed it. Listeners survive the move, and
+      // every control writes state.params on input, so dismissing loses nothing.
+      if (o) document.body.append(back, pop);
+      pop.classList.toggle("open", o);
+      back.classList.toggle("open", o);
+    };
     composerEl.querySelector("#params-btn").addEventListener("click", () => openPop(!pop.classList.contains("open")));
     composerEl.querySelector("#pop-close").addEventListener("click", () => openPop(false));
     back.addEventListener("click", () => openPop(false));
+    // Any click that lands outside the dialog dismisses it (settings are already saved live,
+    // so nothing is lost). The params button is excluded — its own handler toggles.
+    const paramsBtn = composerEl.querySelector("#params-btn");
+    document.addEventListener("click", (e) => {
+      if (!pop.classList.contains("open")) return;
+      if (pop.contains(e.target) || paramsBtn.contains(e.target)) return;
+      openPop(false);
+    });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") openPop(false); });
 
-    const temp = composerEl.querySelector("#temp"), topP = composerEl.querySelector("#top-p"), topK = composerEl.querySelector("#top-k"), freq = composerEl.querySelector("#freq"), presence = composerEl.querySelector("#presence"), maxtok = composerEl.querySelector("#maxtok"), sys = composerEl.querySelector("#system");
+    // Capture controls AND their value chips once, at wire time: the popover is portaled to
+    // <body> on open, so a composerEl.querySelector at event time would come back null.
+    const temp = pop.querySelector("#temp"), topP = pop.querySelector("#top-p"), topK = pop.querySelector("#top-k"), freq = pop.querySelector("#freq"), presence = pop.querySelector("#presence"), maxtok = pop.querySelector("#maxtok"), sys = pop.querySelector("#system");
+    const tempVal = pop.querySelector("#temp-val"), topPVal = pop.querySelector("#top-p-val"), topKVal = pop.querySelector("#top-k-val"), freqVal = pop.querySelector("#freq-val"), presenceVal = pop.querySelector("#presence-val"), maxVal = pop.querySelector("#max-val");
     temp.value = state.params.temperature; topP.value = state.params.topP; topK.value = state.params.topK; freq.value = state.params.frequencyPenalty; presence.value = state.params.presencePenalty; maxtok.value = state.params.maxTokens; sys.value = state.params.system;
-    composerEl.querySelector("#temp-val").textContent = (+temp.value).toFixed(2);
-    composerEl.querySelector("#top-p-val").textContent = (+topP.value).toFixed(2);
-    composerEl.querySelector("#top-k-val").textContent = topK.value;
-    composerEl.querySelector("#freq-val").textContent = (+freq.value).toFixed(2);
-    composerEl.querySelector("#presence-val").textContent = (+presence.value).toFixed(2);
-    composerEl.querySelector("#max-val").textContent = maxtok.value;
-    temp.addEventListener("input", () => { state.params.temperature = +temp.value; composerEl.querySelector("#temp-val").textContent = (+temp.value).toFixed(2); syncParamsLabel(); });
-    topP.addEventListener("input", () => { state.params.topP = +topP.value; composerEl.querySelector("#top-p-val").textContent = (+topP.value).toFixed(2); syncParamsLabel(); });
-    topK.addEventListener("input", () => { state.params.topK = +topK.value; composerEl.querySelector("#top-k-val").textContent = topK.value; syncParamsLabel(); });
-    freq.addEventListener("input", () => { state.params.frequencyPenalty = +freq.value; composerEl.querySelector("#freq-val").textContent = (+freq.value).toFixed(2); });
-    presence.addEventListener("input", () => { state.params.presencePenalty = +presence.value; composerEl.querySelector("#presence-val").textContent = (+presence.value).toFixed(2); });
-    maxtok.addEventListener("input", () => { state.params.maxTokens = +maxtok.value; composerEl.querySelector("#max-val").textContent = maxtok.value; });
+    tempVal.textContent = (+temp.value).toFixed(2);
+    topPVal.textContent = (+topP.value).toFixed(2);
+    topKVal.textContent = topK.value;
+    freqVal.textContent = (+freq.value).toFixed(2);
+    presenceVal.textContent = (+presence.value).toFixed(2);
+    maxVal.textContent = maxtok.value;
+    temp.addEventListener("input", () => { state.params.temperature = +temp.value; tempVal.textContent = (+temp.value).toFixed(2); });
+    topP.addEventListener("input", () => { state.params.topP = +topP.value; topPVal.textContent = (+topP.value).toFixed(2); });
+    topK.addEventListener("input", () => { state.params.topK = +topK.value; topKVal.textContent = topK.value; });
+    freq.addEventListener("input", () => { state.params.frequencyPenalty = +freq.value; freqVal.textContent = (+freq.value).toFixed(2); });
+    presence.addEventListener("input", () => { state.params.presencePenalty = +presence.value; presenceVal.textContent = (+presence.value).toFixed(2); });
+    maxtok.addEventListener("input", () => { state.params.maxTokens = +maxtok.value; maxVal.textContent = maxtok.value; });
     sys.addEventListener("input", () => { state.params.system = sys.value; });
   }
   window.__send = send;
 
-  function syncParamsLabel() {
-    const l = composerEl?.querySelector("#params-label");
-    if (l) l.textContent = `temp ${state.params.temperature.toFixed(2)} · p ${state.params.topP.toFixed(2)} · k ${state.params.topK}`;
-  }
   function autogrow() { const i = $("input"); if (!i) return; i.style.height = "auto"; i.style.height = Math.min(i.scrollHeight, 240) + "px"; }
   function focusInput() { const i = $("input"); if (i) setTimeout(() => i.focus(), 30); }
   function scrollToBottom() { scroll.scrollTop = scroll.scrollHeight; }
@@ -1175,6 +1655,7 @@
     setRailOpen(open);
   });
   $("model-foot").addEventListener("click", () => { const p = composerEl?.querySelector("#params-btn"); p?.click(); });
+  $("bench-toggle").addEventListener("click", toggleBench);
 
   // ---------- boot ----------
   $("model-glyph").innerHTML = ESME_MARK;
@@ -1182,7 +1663,6 @@
   if (window.innerWidth <= 820) app.classList.add("rail-collapsed");
   renderActiveHistory();
   renderHero();
-  drawMeter();
   discoverModel();
 })();
 </script>

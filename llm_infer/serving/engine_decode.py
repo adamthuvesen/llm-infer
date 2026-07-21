@@ -155,12 +155,22 @@ class EngineDecodeMixin:
         )
 
     def _window_blocks_are_private(self, requests: list[Request]) -> bool:
-        """The planned window can skip copy-on-write only when every live block is private."""
+        """The planned window can skip copy-on-write only when every live block is private.
+
+        ``build_decode_window_plan`` refuses *any* shared block in a table, not just shared write
+        targets, and the deferred window keeps a mid-window finisher's blocks referenced past its
+        recorded EOS. A cross-turn cache-hit request keeps its reused prompt-prefix blocks shared
+        with the store (``prefix_group_id`` is ``None`` but the blocks are not private), so when the
+        cache is on every request's blocks are inspected; such a request falls back to the per-step
+        decode path. With neither prefix source active the blocks are always private and the
+        refcount walk is skipped for the hot path.
+        """
+        check_all = self.prefix_cache is not None
         for request in requests:
             table = request.block_table
             if table is None:
                 return False
-            if request.prefix_group_id is None:
+            if request.prefix_group_id is None and not check_all:
                 continue
             if any(self.cache.allocator.refcount(block) > 1 for block in table.blocks):
                 return False
@@ -546,9 +556,33 @@ class EngineDecodeMixin:
                 self._trace_request_finished(request)
                 result.finished_outputs[request.request_id] = request.generated
                 if request.block_table is not None:
+                    # Donate the block-aligned prompt-plus-output prefix to the cross-turn cache
+                    # before freeing: the cache retains those blocks, so the table free only drops
+                    # this request's ref and the donated blocks stay alive for a later turn.
+                    if self.prefix_cache is not None:
+                        self._donate_to_prefix_cache(request)
                     self._free_block_table(request.block_table)
                 self.scheduler.release(request)
                 self._requests.pop(request.request_id, None)
+
+    def _donate_to_prefix_cache(self, request: Request) -> None:
+        """Cache a finished request's block-aligned cached prefix for cross-turn reuse.
+
+        Only the whole blocks the request actually filled are donated (``table.length`` floored
+        to a block multiple); a sequence shorter than one block has nothing block-aligned to give.
+        """
+        if self.prefix_cache is None:
+            return
+        table = request.block_table
+        if table is None:
+            return
+        block_size = self.cache.block_size
+        cached_tokens = (table.length // block_size) * block_size
+        if cached_tokens < block_size:
+            return
+        token_ids = (request.prompt_ids + request.generated)[:cached_tokens]
+        block_ids = table.blocks[: cached_tokens // block_size]
+        self.prefix_cache.donate(token_ids, block_ids)
 
     def _free_block_table(self, table: BlockTable) -> None:
         """Release backend per-table state, then return physical blocks to the pool."""

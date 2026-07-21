@@ -10,6 +10,7 @@ import torch
 
 from llm_infer.kernels.base import PackedPrefillAttentionBackend
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.kv_cache.prefix_cache import PrefixCacheStore
 from llm_infer.model.grouped_decode_graph import (
     DEFAULT_GROUPED_CAPTURE_SIZES,
     EngineOwnedGroupedDecodeGraphRunner,
@@ -69,6 +70,7 @@ class InferenceEngine(
         trace_clock: Callable[[], float] | None = None,
         capabilities: BackendCapabilities | None = None,
         decode_window_size: int = 8,
+        prefix_cache: bool = False,
         batched_prefill: bool = True,
         grouped_decode_graphs: bool = False,
         grouped_capture_sizes: tuple[int, ...] = DEFAULT_GROUPED_CAPTURE_SIZES,
@@ -102,6 +104,22 @@ class InferenceEngine(
         )
         self.preemption = preemption
         self.scheduler = Scheduler(num_blocks, block_size, preemption=preemption)
+        # Cross-turn prefix cache: donated prompt-prefix blocks survive one request's finish so a
+        # follow-up turn reuses them instead of re-prefilling the whole conversation. It over-holds
+        # blocks outside the free pool and gives them back via the allocator's eviction hook, which
+        # is incompatible with preemption's real-free-block footprint admission — reject the combo.
+        self.prefix_cache: PrefixCacheStore | None = None
+        if prefix_cache:
+            if preemption:
+                raise ValueError(
+                    "prefix_cache and preemption cannot be enabled together; the preemption "
+                    "scheduler admits against real free blocks and would fight the cache"
+                )
+            if not (self.capabilities.prefix_caching and self.capabilities.paged_kv):
+                raise ValueError(
+                    "prefix_cache requires a paged-KV backend that advertises prefix caching"
+                )
+            self.prefix_cache = PrefixCacheStore(self.cache.allocator, block_size)
         # The fallback sampling for a request that carries no params of its own. Defaults to
         # greedy (temperature 0, token-for-token the checked reference path).
         self.default_sampling = default_sampling or GREEDY
@@ -171,6 +189,21 @@ class InferenceEngine(
         (pointer mismatch, off-bucket batches) is visible, not just slower.
         """
         return sum(runner.steps_handled for runner in self.grouped_decode_runners.values())
+
+    @property
+    def prefix_cache_hit_tokens_total(self) -> int:
+        """KV positions served from the prefix cache instead of being re-prefilled (0 when off)."""
+        return self.prefix_cache.hit_tokens if self.prefix_cache is not None else 0
+
+    @property
+    def prefix_cache_hits_total(self) -> int:
+        """Prefill lookups that reused a block-aligned prefix (0 when the cache is off)."""
+        return self.prefix_cache.hits if self.prefix_cache is not None else 0
+
+    @property
+    def prefix_cache_misses_total(self) -> int:
+        """Prefill lookups that found no reusable prefix (0 when the cache is off)."""
+        return self.prefix_cache.misses if self.prefix_cache is not None else 0
 
     def add_request(self, request: Request) -> None:
         """Register and queue a request. Duplicate ids are rejected loudly."""

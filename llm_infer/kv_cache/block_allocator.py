@@ -61,6 +61,10 @@ class BlockAllocator:
         # Fires after every physical change to the free pool — the single clear hook for
         # the KV block-lifecycle trace. ``retain`` deliberately does not fire.
         self.observer = observer
+        # Optional last-resort supplier of free blocks, called with the shortfall when an
+        # allocation would otherwise go dry (the prefix cache registers itself here to give back
+        # idle cached blocks). It frees blocks synchronously; ``allocate`` re-checks after.
+        self.eviction_source: Callable[[int], None] | None = None
 
     @property
     def num_free(self) -> int:
@@ -74,6 +78,10 @@ class BlockAllocator:
         """Hand out ``count`` free block ids, removing them from the pool."""
         if count < 1:
             raise ValueError(f"count must be >= 1; got {count}")
+        if count > len(self._free) and self.eviction_source is not None:
+            # A registered evictor (the prefix cache) may hold idle blocks outside the free list;
+            # ask it for the shortfall, then re-check. A genuine over-commit still raises below.
+            self.eviction_source(count - len(self._free))
         if count > len(self._free):
             raise OutOfBlocksError(
                 f"requested {count} blocks but only {len(self._free)} free "

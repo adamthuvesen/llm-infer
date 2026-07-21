@@ -50,7 +50,13 @@ def test_unknown_backend_fails_loudly() -> None:
 
 
 def test_attention_backend_choices_are_stable() -> None:
-    assert ATTENTION_BACKEND_CHOICES == ("auto", "torch_naive", "flash_attn", "flashinfer")
+    assert ATTENTION_BACKEND_CHOICES == (
+        "auto",
+        "torch_naive",
+        "torch_sdpa",
+        "flash_attn",
+        "flashinfer",
+    )
 
 
 def test_auto_bundle_cpu_stays_on_reference_attention(tmp_path: Path) -> None:

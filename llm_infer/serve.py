@@ -6,17 +6,19 @@ import argparse
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from fastapi import FastAPI
 
 from llm_infer.kernels.base import PagedDecodeAttentionBackend
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
-from llm_infer.model.interface import ModelRuntime
+from llm_infer.model.interface import BackendCapabilities, ModelRuntime
 from llm_infer.model.runtime import (
     ATTENTION_BACKEND_CHOICES,
+    AttentionBackendChoice,
     available_backends,
     load_model_runtime,
 )
@@ -54,10 +56,12 @@ def build_app_from_runtime(
     preemption_policy: Literal["off", "recompute"] = "off",
     prefill_chunk_size: int | None = None,
     prompt_lookup_speculative: SpeculativeDecodingConfig | None = None,
+    prefix_cache: bool = False,
     decode_window_size: int = DEFAULT_DECODE_WINDOW_SIZE,
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
     grouped_decode_graphs: bool | None = None,
+    allow_cors: bool = False,
 ) -> FastAPI:
     """Wire a loaded model runtime into the HTTP app.
 
@@ -113,6 +117,7 @@ def build_app_from_runtime(
         preemption=preemption_policy == "recompute",
         prefill_chunk_size=prefill_chunk_size,
         speculative=prompt_lookup_speculative,
+        prefix_cache=prefix_cache,
         decode_window_size=decode_window_size,
         grouped_decode_graphs=grouped_decode_graphs,
         grouped_capture_sizes=decode_graph_buckets,
@@ -131,6 +136,19 @@ def build_app_from_runtime(
         metrics=metrics,
     )
     register_webui(app)
+    if allow_cors:
+        # Off by default: the local server is same-origin (see register_webui). The Modal
+        # deployment turns it on so the *local* webui's throughput bench can point its
+        # base-URL field at the *.modal.run origin. The API carries no credentials or
+        # user data, so a wildcard read-only surface is acceptable there.
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST"],
+            allow_headers=["Content-Type"],
+        )
     return app
 
 
@@ -173,6 +191,108 @@ def _warmup_prompt_ids(runtime: ModelRuntime) -> list[int]:
     if token_ids:
         return [int(token_ids[0])]
     return [0]
+
+
+@dataclass(frozen=True)
+class RuntimeDefaults:
+    """Resolved pre-load choices: device, dtype, and attention backend selector."""
+
+    device: str
+    dtype: torch.dtype
+    attention_backend: AttentionBackendChoice
+
+
+def resolve_runtime_defaults(
+    *,
+    device: str,
+    dtype: torch.dtype | None,
+    attention_backend: str,
+    backend: str,
+) -> RuntimeDefaults:
+    """Resolve ``--device``/``--dtype``/``--attention-backend`` autos; explicit values win.
+
+    Measured on the 214M bundle (8-turn chat, 2026-07), which fixes each auto:
+
+    * device ``auto`` -> ``cpu``: mps fp16 served 1.7x *slower* than cpu fp32 (per-op launch
+      overhead dominates this model's tiny per-step GEMMs). ``--device mps`` stays a supported
+      opt-in for larger bundles where the tradeoff may flip.
+    * dtype ``None`` -> fp16 on cpu/mps (~12% faster than fp32, byte-identical on that bench;
+      the startup line labels any non-fp32 config experimental and ``--dtype float32``
+      restores the reference config), fp32 on CUDA so GPU behavior does not move. bf16
+      measured slower than fp32 on this CPU and is never picked automatically.
+    * attention ``auto`` -> ``torch_sdpa`` for non-CUDA bundle backends (the fused local
+      path); CUDA ``auto`` still means FlashInfer inside the loader, and non-bundle backends
+      pass through unchanged.
+    """
+    resolved_device = device if device != "auto" else "cpu"
+    device_type = torch.device(resolved_device).type
+    resolved_dtype = dtype
+    if resolved_dtype is None:
+        resolved_dtype = torch.float16 if device_type in ("cpu", "mps") else torch.float32
+    name = attention_backend
+    if name == "auto" and backend in BUNDLE_BACKENDS and device_type != "cuda":
+        name = "torch_sdpa"
+    # argparse gates the passthrough to registered choices and the loader re-validates.
+    return RuntimeDefaults(resolved_device, resolved_dtype, cast(AttentionBackendChoice, name))
+
+
+@dataclass(frozen=True)
+class EngineDefaults:
+    """Resolved post-load engine features; these need the loaded backend's capabilities."""
+
+    prompt_lookup: bool
+    prefix_cache: bool
+
+
+def resolve_engine_defaults(
+    *,
+    prompt_lookup: bool | None,
+    prefix_cache: bool | None,
+    device: str,
+    backend: str,
+    capabilities: BackendCapabilities,
+) -> EngineDefaults:
+    """Resolve the tri-state speculative/prefix-cache flags; explicit values win.
+
+    Both default on for non-CUDA serving where the backend supports them, and off on CUDA:
+    speculative decode would disable the deferred window and grouped graphs there, and the
+    settled GPU serving config must not move. An explicit ``True`` on an unsupported backend
+    is left on so the engine raises a clear error rather than silently ignoring the request.
+    """
+    local = torch.device(device).type != "cuda"
+    resolved_lookup = prompt_lookup
+    if resolved_lookup is None:
+        resolved_lookup = capabilities.speculative and local
+    resolved_cache = prefix_cache
+    if resolved_cache is None:
+        resolved_cache = (
+            backend in BUNDLE_BACKENDS
+            and capabilities.prefix_caching
+            and capabilities.paged_kv
+            and local
+        )
+    return EngineDefaults(resolved_lookup, resolved_cache)
+
+
+_DTYPE_LABELS = {
+    torch.float32: "fp32",
+    torch.float16: "fp16",
+    torch.bfloat16: "bf16",
+}
+
+
+def describe_run_config(device: str, dtype: torch.dtype) -> str:
+    """One startup line naming the resolved device/dtype and whether it is the fp32 reference.
+
+    Only ``cpu`` + fp32 reproduces the bundle reference token-for-token; every other config
+    (fp16, or MPS, or both) diverges within numerical noise and is labeled experimental so the
+    difference is visible per repo policy, never silent.
+    """
+    dtype_label = _DTYPE_LABELS.get(dtype, str(dtype).removeprefix("torch."))
+    config = f"{device} {dtype_label}"
+    if device == "cpu" and dtype == torch.float32:
+        return f"device/dtype: {config} (cpu fp32 reference config)"
+    return f"device/dtype: experimental: {config} — reference is cpu fp32"
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -245,12 +365,23 @@ def main() -> None:
         "--attention-backend",
         choices=ATTENTION_BACKEND_CHOICES,
         default="auto",
-        help="Attention backend selector. auto uses FlashInfer for CUDA bf16/fp16 Esme bundles.",
+        help="Attention backend selector. auto uses FlashInfer for CUDA bf16/fp16 Esme bundles "
+        "and torch_sdpa for local (non-CUDA) bundle serving.",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--dtype", type=_dtype, default=torch.float32)
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Torch device. auto resolves to mps on Apple silicon, else cpu; cpu/mps/cuda are "
+        "explicit.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=_dtype,
+        default=None,
+        help="Model dtype. Default is auto: fp16 on MPS, fp32 otherwise; an explicit value wins.",
+    )
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
     parser.add_argument("--num-blocks", type=int, default=DEFAULT_NUM_BLOCKS)
     parser.add_argument(
@@ -301,8 +432,33 @@ def main() -> None:
     )
     parser.add_argument(
         "--prompt-lookup-speculative",
+        dest="prompt_lookup_speculative",
         action="store_true",
-        help="Enable prompt-lookup speculative decode when the backend supports it.",
+        default=None,
+        help="Turn prompt-lookup speculative decode on. Default is auto: on for non-CUDA "
+        "devices (a CPU/Mac serving speedup) and off on CUDA, where it would disable the "
+        "deferred decode window and grouped graphs.",
+    )
+    parser.add_argument(
+        "--no-prompt-lookup-speculative",
+        dest="prompt_lookup_speculative",
+        action="store_false",
+        help="Turn prompt-lookup speculative decode off (overrides the auto default).",
+    )
+    parser.add_argument(
+        "--prefix-cache",
+        dest="prefix_cache",
+        action="store_true",
+        default=None,
+        help="Turn the cross-turn prefix cache on so a follow-up chat turn reuses the previous "
+        "turn's prompt KV instead of re-prefilling it. Default is auto: on for non-CUDA bundle "
+        "backends that support prefix caching, off on CUDA.",
+    )
+    parser.add_argument(
+        "--no-prefix-cache",
+        dest="prefix_cache",
+        action="store_false",
+        help="Turn the cross-turn prefix cache off (overrides the auto default).",
     )
     parser.add_argument(
         "--prompt-lookup-max-draft-tokens",
@@ -329,32 +485,49 @@ def main() -> None:
 
     import uvicorn
 
+    defaults = resolve_runtime_defaults(
+        device=args.device,
+        dtype=args.dtype,
+        attention_backend=args.attention_backend,
+        backend=args.backend,
+    )
+    device, dtype = defaults.device, defaults.dtype
+    print(describe_run_config(device, dtype))
     runtime = load_model_runtime(
         args.backend,
-        dtype=args.dtype,
-        device=args.device,
+        dtype=dtype,
+        device=device,
         bundle_path=bundle_path,
         model_id=args.model_id,
         revision=args.revision,
-        attention_backend_name=args.attention_backend,
+        attention_backend_name=defaults.attention_backend,
+    )
+    engine_defaults = resolve_engine_defaults(
+        prompt_lookup=args.prompt_lookup_speculative,
+        prefix_cache=args.prefix_cache,
+        device=device,
+        backend=args.backend,
+        capabilities=runtime.capabilities,
     )
     speculative = (
         SpeculativeDecodingConfig(
             max_draft_tokens=args.prompt_lookup_max_draft_tokens,
             max_ngram_size=args.prompt_lookup_max_ngram_size,
         )
-        if args.prompt_lookup_speculative
+        if engine_defaults.prompt_lookup
         else None
     )
+    prefix_cache = engine_defaults.prefix_cache
     try:
         app = build_app_from_runtime(
             runtime,
             block_size=args.block_size,
             num_blocks=args.num_blocks,
-            device=args.device,
+            device=device,
             preemption_policy=args.preemption_policy,
             prefill_chunk_size=args.prefill_chunk_size,
             prompt_lookup_speculative=speculative,
+            prefix_cache=prefix_cache,
             decode_window_size=args.decode_window_size,
             decode_graphs=args.decode_graphs,
             decode_graph_buckets=args.decode_graph_buckets,
