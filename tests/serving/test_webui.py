@@ -46,3 +46,6 @@ def test_webui_serves_topic_picker_and_training_grounded_questions() -> None:
     assert "Eight prompts, one engine, one continuously-batched decode loop." in response.text
     # The single SSE parse loop is shared, not duplicated, between chat and bench.
     assert "async function readSSE(" in response.text
+    # Stream-count segmented control: ×8 default, ×16 opt-in.
+    assert 'id="bench-count-8"' in response.text
+    assert 'id="bench-count-16"' in response.text

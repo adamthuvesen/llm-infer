@@ -398,6 +398,15 @@
   .bench-btn.ghost { border: 1px solid var(--line-strong); color: var(--muted); background: var(--surface); }
   .bench-btn.ghost:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
   .bench-btn:disabled { opacity: .48; cursor: not-allowed; }
+  /* Stream-count segmented control: the selected side reads engraved, like tok-toggle. */
+  .bench-count { display: flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; background: var(--surface); }
+  .bench-count button {
+    padding: 7px 11px; font-family: var(--mono); font-size: 12px; color: var(--muted);
+    transition: background .12s, color .12s;
+  }
+  .bench-count button + button { border-left: 1px solid var(--line-strong); }
+  .bench-count button:hover { background: var(--hover); color: var(--ink); }
+  .bench-count button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); font-weight: 500; }
   .bench-base {
     appearance: none; min-width: 180px; flex: 0 1 230px;
     border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink);
@@ -744,6 +753,7 @@
     benchView: false,       // throughput bench mode showing instead of chat
     bench: {
       running: false, mode: null, offset: 0,
+      count: (() => { try { return localStorage.getItem("llm-infer-bench-count") === "16" ? 16 : 8; } catch { return 8; } })(),
       baseUrl: (() => { try { return localStorage.getItem("llm-infer-bench-base") || ""; } catch { return ""; } })(),
       times: [],            // aggregate token arrival times across all 8 streams
       totalTokens: 0, reqsDone: 0, activeCount: 0,
@@ -1191,9 +1201,12 @@
   }
 
   // ---------- throughput bench ----------
-  // Eight prompts, one from the top of each starter category, so panes differ visibly.
+  // One prompt per starter category so panes differ visibly; ×16 takes two per category.
   function benchPrompts() {
-    return Object.values(STARTER_TOPICS).map((qs) => qs[state.bench.offset % qs.length]);
+    const perCategory = state.bench.count / Object.keys(STARTER_TOPICS).length;
+    return Object.values(STARTER_TOPICS).flatMap((qs) =>
+      Array.from({ length: perCategory }, (_, j) => qs[(state.bench.offset + j) % qs.length])
+    );
   }
   function benchUrl(path) {
     const base = state.bench.baseUrl.trim().replace(/\/+$/, "");
@@ -1201,22 +1214,25 @@
   }
 
   let benchEl = null;
+
+  function paneMarkup(i) {
+    const idx = String(i + 1).padStart(2, "0");
+    return `<li class="pane" role="listitem" data-i="${i}">
+      <div class="pane-head">
+        <span class="pane-idx">${idx}</span>
+        <span class="pane-dot" aria-hidden="true"></span>
+        <span class="sr-only pane-status">idle</span>
+        <svg class="pane-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
+      </div>
+      <div class="pane-q"></div>
+      <div class="pane-body"></div>
+      <div class="pane-foot">— · — · 0 tok</div>
+    </li>`;
+  }
+
   function benchRoot() {
     if (benchEl) return benchEl;
-    const panes = Array.from({ length: 8 }, (_, i) => {
-      const idx = String(i + 1).padStart(2, "0");
-      return `<li class="pane" role="listitem" data-i="${i}">
-        <div class="pane-head">
-          <span class="pane-idx">${idx}</span>
-          <span class="pane-dot" aria-hidden="true"></span>
-          <span class="sr-only pane-status">idle</span>
-          <svg class="pane-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
-        </div>
-        <div class="pane-q"></div>
-        <div class="pane-body"></div>
-        <div class="pane-foot">— · — · 0 tok</div>
-      </li>`;
-    }).join("");
+    const panes = Array.from({ length: state.bench.count }, (_, i) => paneMarkup(i)).join("");
     benchEl = document.createElement("div");
     benchEl.className = "bench";
     benchEl.innerHTML = `
@@ -1239,6 +1255,10 @@
         <button class="bench-btn primary" id="bench-run-conc" type="button">Run ×8 concurrent</button>
         <button class="bench-btn secondary" id="bench-run-seq" type="button">Run ×8 sequential</button>
         <button class="bench-btn ghost" id="bench-stop" type="button" disabled>Stop</button>
+        <div class="bench-count" role="group" aria-label="Stream count">
+          <button type="button" id="bench-count-8" aria-pressed="true">×8</button>
+          <button type="button" id="bench-count-16" aria-pressed="false">×16</button>
+        </div>
         <input class="bench-base" id="bench-base" type="text" inputmode="url" spellcheck="false" autocomplete="off" placeholder="same origin" aria-label="Base URL for bench requests" />
         <button class="bench-reshuffle" id="bench-reshuffle" type="button">reshuffle</button>
       </div>
@@ -1265,6 +1285,35 @@
       state.bench.offset++;
       renderBenchPrompts();
     });
+    benchEl.querySelector("#bench-count-8").addEventListener("click", () => setBenchCount(8));
+    benchEl.querySelector("#bench-count-16").addEventListener("click", () => setBenchCount(16));
+    syncBenchCount();
+  }
+
+  function setBenchCount(count) {
+    if (state.bench.running || count === state.bench.count) return;
+    state.bench.count = count;
+    try { localStorage.setItem("llm-infer-bench-count", String(count)); } catch {}
+    // Walls from different stream counts are not comparable, so a count switch retires the race.
+    state.bench.results = { sequential: null, concurrent: null };
+    renderRaces();
+    syncBenchCount();
+    resetBenchRun();
+    renderBenchPrompts();
+  }
+
+  function syncBenchCount() {
+    const count = state.bench.count;
+    benchEl.querySelector("#bench-count-8").setAttribute("aria-pressed", String(count === 8));
+    benchEl.querySelector("#bench-count-16").setAttribute("aria-pressed", String(count === 16));
+    benchEl.querySelector("#bench-run-conc").textContent = `Run ×${count} concurrent`;
+    benchEl.querySelector("#bench-run-seq").textContent = `Run ×${count} sequential`;
+    benchEl.querySelector(".bench-guide").textContent =
+      `${count === 8 ? "Eight" : "Sixteen"} prompts, one engine, one continuously-batched decode loop.`;
+    benchEl.querySelector("#bench-active").textContent = `0 / ${count}`;
+    // Query within benchEl: at wire time the bench root is not attached to the document yet.
+    benchEl.querySelector("#bench-grid").innerHTML =
+      Array.from({ length: count }, (_, i) => paneMarkup(i)).join("");
   }
 
   function paneEls() { return benchEl.querySelectorAll(".pane"); }
@@ -1298,7 +1347,7 @@
   const BENCH_MAX_TOKENS = 512;
 
   function resetBenchRun() {
-    Object.assign(state.bench, { times: [], totalTokens: 0, reqsDone: 0, activeCount: 0, controllers: [], stopped: false, paneProgress: new Array(8).fill(0) });
+    Object.assign(state.bench, { times: [], totalTokens: 0, reqsDone: 0, activeCount: 0, controllers: [], stopped: false, paneProgress: new Array(state.bench.count).fill(0) });
     paneEls().forEach((pane) => {
       setPaneStatus(pane, "idle");
       const body = pane.querySelector(".pane-body");
@@ -1307,7 +1356,7 @@
     });
     $("bench-tps").textContent = "—";
     $("bench-tokens").textContent = "0";
-    $("bench-active").textContent = "0 / 8";
+    $("bench-active").textContent = `0 / ${state.bench.count}`;
     $("bench-wall").textContent = "0.0 s";
     $("bench-reqs").textContent = "0.00";
   }
@@ -1329,7 +1378,7 @@
     const rates = bucketRates(state.bench.times, now, METER_WINDOW_MS, METER_BUCKET_MS);
     $("bench-trace").setAttribute("points", polylinePoints(rates, 280, 46));
     $("bench-tokens").textContent = fmtInt(state.bench.totalTokens);
-    $("bench-active").textContent = `${state.bench.activeCount} / 8`;
+    $("bench-active").textContent = `${state.bench.activeCount} / ${state.bench.count}`;
     if (state.bench.running) {
       const lastSec = state.bench.times.filter((t) => now - t < 1000).length;
       $("bench-tps").textContent = String(lastSec);
@@ -1473,7 +1522,7 @@
     drawBench();  // flush counters; running is false so it won't clobber the finals below
     $("bench-tps").textContent = state.bench.totalTokens ? finalRate.toFixed(1) : "—";
     $("bench-wall").textContent = `${wall.toFixed(1)} s`;
-    $("bench-active").textContent = "0 / 8";
+    $("bench-active").textContent = `0 / ${state.bench.count}`;
     // An aborted run keeps its partial panes but earns no race bar; re-rendering from
     // results either way clears the in-flight progress row.
     if (!state.bench.stopped) state.bench.results[mode] = wall;
