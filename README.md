@@ -128,8 +128,9 @@ EOS host sync; 1 restores the classic per-step path), `--prefill-chunk-size`,
 `--preemption-policy`, `--prompt-lookup-speculative`/`--no-prompt-lookup-speculative`, and
 `--prefix-cache`/`--no-prefix-cache`. See `uv run python -m llm_infer.serve --help`.
 
-The same app serves from an A100 via `modal deploy scripts/modal_esme_serve.py` (scale-to-
-zero; CORS enabled there so the local bench page can race against it).
+The same app can serve from a GPU on your own Modal account:
+`modal deploy scripts/modal_esme_serve.py` (scale-to-zero; CORS enabled so a locally
+served bench page can point at it).
 
 ## Benchmarks
 
