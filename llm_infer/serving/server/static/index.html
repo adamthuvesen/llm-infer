@@ -1376,7 +1376,7 @@
       const res = await fetch(benchUrl("v1/chat/completions"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: true, temperature: 0, max_tokens: 128 }),
+        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: true, temperature: 0, max_tokens: 512 }),
         signal: controller.signal,
       });
       if (!res.ok) {
