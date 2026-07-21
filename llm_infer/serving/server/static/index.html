@@ -429,9 +429,14 @@
   .pane-idx { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; color: var(--faint); }
   .pane-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
   .pane.streaming .pane-dot { background: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
-  .pane.done .pane-dot { background: var(--ink); }
+  .pane.done .pane-dot { display: none; }
   .pane.error .pane-dot { background: var(--danger); }
   .pane.stopped .pane-dot { background: var(--faint); }
+  /* Completion check: replaces the status dot when the request finishes, engraved at the
+     head's right edge so a glance down the grid reads which of the eight are done. */
+  .pane-check { display: none; margin-left: auto; width: 14px; height: 14px; color: var(--accent-strong); flex: none; }
+  .pane.done .pane-check { display: block; animation: check-in .25s cubic-bezier(.2,.7,.3,1) both; }
+  @keyframes check-in { from { opacity: 0; transform: scale(.6); } }
   .pane-q { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 11px 8px; border-bottom: 1px solid var(--line); }
   .pane-body {
     flex: 1; overflow: hidden; padding: 9px 11px 0; font-size: 12.5px; line-height: 1.5; color: var(--ink);
@@ -1205,6 +1210,7 @@
           <span class="pane-idx">${idx}</span>
           <span class="pane-dot" aria-hidden="true"></span>
           <span class="sr-only pane-status">idle</span>
+          <svg class="pane-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
         </div>
         <div class="pane-q"></div>
         <div class="pane-body"></div>
