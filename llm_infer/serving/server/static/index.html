@@ -1492,12 +1492,23 @@
     if (sequential != null && concurrent != null && concurrent > 0) {
       html += `<div class="race-punch">concurrent ×${(sequential / concurrent).toFixed(1)} faster</div>`;
     }
+    // Seed each rebuilt bar at the width its predecessor was showing, so the just-finished
+    // live progress bar glides to its final width instead of flashing back to zero.
+    const prevWidths = {};
+    wrap.querySelectorAll(".race-fill").forEach((f) => {
+      prevWidths[f.classList.contains("sequential") ? "sequential" : "concurrent"] = f.style.width;
+    });
     wrap.innerHTML = html;
     // Set the true final widths after a forced reflow: the transition animates them, and with
     // prefers-reduced-motion (transitions globally off) they simply snap to correct. A reflow
     // rather than requestAnimationFrame because rAF never fires in a backgrounded tab, which
     // would leave the bars stuck at zero width.
-    wrap.querySelectorAll(".race-fill").forEach((f) => { void f.offsetWidth; f.style.width = f.dataset.w; });
+    wrap.querySelectorAll(".race-fill").forEach((f) => {
+      const mode = f.classList.contains("sequential") ? "sequential" : "concurrent";
+      f.style.width = prevWidths[mode] || "0";
+      void f.offsetWidth;
+      f.style.width = f.dataset.w;
+    });
   }
 
   function toggleBench() {
