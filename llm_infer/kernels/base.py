@@ -95,6 +95,36 @@ class PackedPrefillAttentionBackend(AttentionBackend, Protocol):
 
 
 @runtime_checkable
+class GroupedDecodeAttentionBackend(AttentionBackend, Protocol):
+    """Optional batched decode that expands GQA KV heads inside the kernel.
+
+    The base :meth:`~AttentionBackend.forward_decode_batch_packed` contract takes K/V already
+    repeated to ``num_qo_heads``; a caller with grouped-query attention must therefore
+    materialize the whole history at query-head count every step. A backend that broadcasts KV
+    heads natively (SDPA's ``enable_gqa``) implements this method instead, so the caller passes
+    the packed history at its native ``num_kv_heads`` and skips that per-step expansion.
+    """
+
+    def forward_decode_batch_packed_grouped(
+        self,
+        queries: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Batched single-token decode over native-KV-head packed histories.
+
+        ``queries`` is ``(B, num_qo_heads, head_dim)``; ``key``/``value`` are
+        ``(total_kv_tokens, num_kv_heads, head_dim)`` with ``num_qo_heads`` a multiple of
+        ``num_kv_heads`` — the kernel repeats each KV head over its query-head group. Returns
+        ``(B, num_qo_heads, head_dim)``, identical to expanding the KV heads first and calling
+        :meth:`~AttentionBackend.forward_decode_batch_packed`.
+        """
+        ...
+
+
+@runtime_checkable
 class PagedDecodeAttentionBackend(AttentionBackend, Protocol):
     """Optional decode backend that consumes the cache's page table directly."""
 

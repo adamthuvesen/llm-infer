@@ -115,6 +115,54 @@ class TorchSdpaAttention:
             outs.append(out.squeeze(1))
         return torch.stack(outs, dim=0).to(queries.dtype)
 
+    def forward_decode_batch_packed_grouped(
+        self,
+        queries: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Batched single-token decode over native-KV-head packed histories.
+
+        Same per-request SDPA loop as :meth:`forward_decode_batch_packed`, but the history stays
+        at ``num_kv_heads`` and SDPA broadcasts it over the query-head groups (``enable_gqa``).
+        The caller keeps the full history one third the size for a 3:1 GQA ratio, skipping the
+        per-step ``repeat_interleave`` over the whole context. Falls back to repeating the KV
+        heads when the installed SDPA lacks ``enable_gqa`` — the same fallback the prefill path
+        uses — so the result is identical either way.
+        """
+        del max_seqlen_k
+        batch = queries.shape[0]
+        num_qo_heads = queries.shape[1]
+        num_kv_heads = key.shape[1]
+        if num_qo_heads == 0 or num_kv_heads == 0 or num_qo_heads % num_kv_heads != 0:
+            raise ValueError(
+                "grouped decode query head count must be divisible by the KV head count; "
+                f"got query {num_qo_heads}, KV {num_kv_heads}"
+            )
+        gqa_repeats = num_qo_heads // num_kv_heads
+        fused_gqa = gqa_repeats != 1 and _ENABLE_GQA
+        offsets = cu_seqlens_k.tolist()
+        scale = 1.0 / math.sqrt(queries.shape[-1])
+        outs = []
+        for index in range(batch):
+            start, end = offsets[index], offsets[index + 1]
+            query = queries[index].unsqueeze(1)  # (num_qo_heads, 1, head_dim)
+            key_hist = key[start:end].transpose(0, 1)  # (num_kv_heads, seq, head_dim)
+            value_hist = value[start:end].transpose(0, 1)
+            if fused_gqa:
+                out = F.scaled_dot_product_attention(
+                    query, key_hist, value_hist, scale=scale, enable_gqa=True
+                )
+            else:
+                if gqa_repeats != 1:
+                    key_hist = key_hist.repeat_interleave(gqa_repeats, dim=0)
+                    value_hist = value_hist.repeat_interleave(gqa_repeats, dim=0)
+                out = F.scaled_dot_product_attention(query, key_hist, value_hist, scale=scale)
+            outs.append(out.squeeze(1))
+        return torch.stack(outs, dim=0).to(queries.dtype)
+
     def forward_prefill_batch_packed(
         self,
         query: torch.Tensor,

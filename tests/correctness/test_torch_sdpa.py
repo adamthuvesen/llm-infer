@@ -113,6 +113,66 @@ def test_decode_batch_packed_ragged_matches_reference() -> None:
     torch.testing.assert_close(sdpa, reference, rtol=RTOL, atol=ATOL)
 
 
+def test_decode_batch_packed_grouped_matches_expanded_reference() -> None:
+    """Native-GQA decode broadcasts KV heads and matches the expand-then-attend reference.
+
+    The grouped path gathers the history at ``num_kv_heads`` and lets SDPA repeat it; the
+    reference repeats the KV heads first and runs the plain packed decode. Same math, exact.
+    """
+    num_qo_heads, num_kv_heads, head_dim = 6, 2, 8
+    repeats = num_qo_heads // num_kv_heads
+    lengths = [3, 7, 1, 5]
+    total = sum(lengths)
+    queries = torch.randn(len(lengths), num_qo_heads, head_dim)
+    key = torch.randn(total, num_kv_heads, head_dim)
+    value = torch.randn(total, num_kv_heads, head_dim)
+    cu_seqlens_k = _cu_seqlens(lengths)
+    max_len = max(lengths)
+
+    grouped = TorchSdpaAttention().forward_decode_batch_packed_grouped(
+        queries, key, value, cu_seqlens_k, max_len
+    )
+    reference = TorchNaiveAttention().forward_decode_batch_packed(
+        queries,
+        key.repeat_interleave(repeats, dim=1),
+        value.repeat_interleave(repeats, dim=1),
+        cu_seqlens_k,
+        max_len,
+    )
+
+    torch.testing.assert_close(grouped, reference, rtol=RTOL, atol=ATOL)
+
+
+def test_decode_batch_packed_grouped_no_gqa_matches_reference() -> None:
+    """With ``num_kv_heads == num_qo_heads`` (repeats=1) the grouped path is the plain decode."""
+    num_heads, head_dim = 4, 8
+    lengths = [2, 6, 4]
+    total = sum(lengths)
+    queries = torch.randn(len(lengths), num_heads, head_dim)
+    key = torch.randn(total, num_heads, head_dim)
+    value = torch.randn(total, num_heads, head_dim)
+    cu_seqlens_k = _cu_seqlens(lengths)
+    max_len = max(lengths)
+
+    grouped = TorchSdpaAttention().forward_decode_batch_packed_grouped(
+        queries, key, value, cu_seqlens_k, max_len
+    )
+    reference = TorchNaiveAttention().forward_decode_batch_packed(
+        queries, key, value, cu_seqlens_k, max_len
+    )
+
+    torch.testing.assert_close(grouped, reference, rtol=RTOL, atol=ATOL)
+
+
+def test_decode_batch_packed_grouped_rejects_indivisible_head_counts() -> None:
+    queries = torch.randn(2, 5, 8)  # 5 query heads
+    key = torch.randn(4, 2, 8)  # 2 KV heads — 5 % 2 != 0
+    with pytest.raises(ValueError, match="divisible"):
+        TorchSdpaAttention().forward_decode_batch_packed_grouped(
+            queries, key, key, _cu_seqlens([2, 2]), 2
+        )
+
+
 def test_prefill_batch_packed_gqa_uneven_matches_reference() -> None:
     """Native-GQA K/V (kv_heads < q_heads) over uneven prompts: the packed prefill path."""
     num_qo_heads, num_kv_heads, head_dim = 6, 2, 8
