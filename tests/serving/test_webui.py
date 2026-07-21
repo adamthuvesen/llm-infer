@@ -23,7 +23,7 @@ def test_webui_serves_topic_picker_and_training_grounded_questions() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert '<link rel="icon" type="image/svg+xml"' in response.text
-    assert "fill='%23D6531F'" in response.text
+    assert "fill='%237C1F28'" in response.text
     assert 'id="starter-topic"' in response.text
     assert 'id="quick-question"' in response.text
     assert "const ESME_MARK = `<svg" in response.text
