@@ -223,13 +223,18 @@ def build_decode_window_plan(
         for row in page_index_rows:
             row.extend([0] * (max_page_total - len(row)))
 
+    # A pageable host-to-device copy is host-synchronous only under CUDA semantics — the
+    # source is staged before the call returns, so the temporary is safe to drop. MPS makes
+    # no such guarantee: a non_blocking upload there can read the freed host buffer and land
+    # garbage indices in the KV gather. So the async upload is CUDA-only; every other device
+    # copies blocking.
+    non_blocking = device.type == "cuda"
+
     def upload(values: list, dtype: torch.dtype) -> torch.Tensor:
-        # Build on the host, then a non_blocking upload: `torch.tensor(..., device=cuda)`
-        # ends in a blocking stream sync, which at window open would stall the CPU behind
-        # the previous window's queued GPU work (the GPU probe flagged exactly these five
-        # uploads). A pageable H2D copy is host-synchronous per CUDA semantics — the source
-        # is staged before return — so the temporary's lifetime is safe without the sync.
-        return torch.tensor(values, dtype=dtype).to(device, non_blocking=True)
+        # Build on the host, then upload: `torch.tensor(..., device=cuda)` ends in a blocking
+        # stream sync, which at window open would stall the CPU behind the previous window's
+        # queued GPU work (the GPU probe flagged exactly these five uploads).
+        return torch.tensor(values, dtype=dtype).to(device, non_blocking=non_blocking)
 
     return DecodeWindowPlan(
         tables=list(tables),
