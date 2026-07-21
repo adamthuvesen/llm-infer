@@ -23,6 +23,9 @@ class EnginePrefillMixin:
 
     def _prefill_requests(self, requests: list[Request], result: StepResult) -> None:
         """Prefill unstarted requests, sharing prompt blocks for declared sibling groups."""
+        if self.prefix_cache is not None:
+            for request in requests:
+                self._apply_prefix_cache_hit(request)
         if self._can_prefill_many(requests):
             self._prefill_many(requests, result)
             return
@@ -53,9 +56,33 @@ class EnginePrefillMixin:
             self._prefill_shared_group(group, result)
             handled.update(candidate.request_id for candidate in group)
 
+    def _apply_prefix_cache_hit(self, request: Request) -> None:
+        """Seed a fresh request's block table from the longest cached block-aligned prefix.
+
+        Runs before prefill for a plain (non-group, un-started) request when the cross-turn
+        prefix cache is on. A hit builds the request's table over the reused blocks and advances
+        ``prompt_cached_tokens`` to the hit length, so ``_cache_prompt_chunk`` then prefills only
+        the uncached tail via ``prefill_chunk(start_pos=k, ...)``. Because hits are block-aligned,
+        the reused blocks stay read-only and every fresh write lands in a private block.
+        """
+        if self.prefix_cache is None:
+            return
+        if request.block_table is not None or request.prefix_group_id is not None:
+            return
+        hit = self.prefix_cache.lookup(request.prompt_ids)
+        if hit is None:
+            return
+        table = self.cache.new_request()
+        table.owner = request.request_id
+        table.blocks = list(hit.block_ids)
+        table.length = hit.tokens
+        request.block_table = table
+        request.prompt_cached_tokens = hit.tokens
+
     def _can_prefill_many(self, requests: list[Request]) -> bool:
         return (
             self.batched_prefill
+            and self.prefix_cache is None
             and len(requests) >= 2
             and self.capabilities.batched_prefill
             and isinstance(self.model, BatchedPrefillBackend)
