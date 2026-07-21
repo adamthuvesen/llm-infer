@@ -416,6 +416,8 @@
   .race-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); width: 92px; flex: none; }
   .race-track { flex: 1; height: 22px; background: var(--paper); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
   .race-fill { display: block; height: 100%; width: 0; transition: width .7s cubic-bezier(.2,.7,.3,1); }
+  /* The in-flight row tracks the 200ms bench tick; a short linear ease just smooths steps. */
+  .race-fill.live { transition: width .25s linear; }
   .race-fill.sequential { background: var(--user-wash); }
   .race-fill.concurrent { background: var(--accent); }
   .race-time { font-family: var(--mono); font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; width: 60px; text-align: right; flex: none; }
@@ -741,6 +743,7 @@
       times: [],            // aggregate token arrival times across all 8 streams
       totalTokens: 0, reqsDone: 0, activeCount: 0,
       controllers: [], stopped: false, runStart: 0,
+      paneProgress: new Array(8).fill(0),  // per-request completion fraction for the live bar
       results: { sequential: null, concurrent: null },  // wall seconds per mode
     },
   };
@@ -1283,8 +1286,13 @@
     return `${ttft} · ${rate} · ${tokens} tok`;
   }
 
+  // Per-request token budget for bench runs: fixed so wall times and tok/s stay comparable
+  // across runs and backends. The live race bar treats a request as fully done on EOS even
+  // when it stopped short of the budget, so early finishes never stall the bar.
+  const BENCH_MAX_TOKENS = 512;
+
   function resetBenchRun() {
-    Object.assign(state.bench, { times: [], totalTokens: 0, reqsDone: 0, activeCount: 0, controllers: [], stopped: false });
+    Object.assign(state.bench, { times: [], totalTokens: 0, reqsDone: 0, activeCount: 0, controllers: [], stopped: false, paneProgress: new Array(8).fill(0) });
     paneEls().forEach((pane) => {
       setPaneStatus(pane, "idle");
       const body = pane.querySelector(".pane-body");
@@ -1322,8 +1330,37 @@
       const elapsed = (now - state.bench.runStart) / 1000;
       $("bench-wall").textContent = `${elapsed.toFixed(1)} s`;
       $("bench-reqs").textContent = elapsed > 0 ? (state.bench.reqsDone / elapsed).toFixed(2) : "0.00";
+      const liveFill = $("race-live-fill");
+      if (liveFill) {
+        const done = state.bench.paneProgress.reduce((sum, p) => sum + p, 0) / state.bench.paneProgress.length;
+        liveFill.style.width = `${(done * 100).toFixed(1)}%`;
+        $("race-live-time").textContent = `${elapsed.toFixed(1)} s`;
+      }
     }
     drawMeter();  // the session odometer keeps counting bench tokens
+  }
+
+  function renderLiveRace(mode) {
+    // While a run is in flight the row is a *progress* bar — completion fraction across the
+    // eight requests — with a live clock. finishBench() re-renders the comparative wall-time
+    // bars over it, so the two semantics never show at once for the same mode.
+    const wrap = $("bench-races");
+    const other = mode === "concurrent" ? "sequential" : "concurrent";
+    const otherWall = state.bench.results[other];
+    let html = "";
+    if (otherWall != null) {
+      html += `<div class="race-row">
+        <span class="race-label">${other}</span>
+        <span class="race-track"><span class="race-fill ${other}" style="width:100%"></span></span>
+        <span class="race-time">${otherWall.toFixed(1)} s</span>
+      </div>`;
+    }
+    html += `<div class="race-row">
+      <span class="race-label">${mode}</span>
+      <span class="race-track"><span class="race-fill live ${mode}" id="race-live-fill" style="width:0"></span></span>
+      <span class="race-time" id="race-live-time">0.0 s</span>
+    </div>`;
+    wrap.innerHTML = html;
   }
 
   async function runBench(mode) {
@@ -1349,6 +1386,7 @@
     setBenchRunning(true);
     benchMeterStart();
     state.bench.runStart = performance.now();
+    renderLiveRace(mode);
 
     if (mode === "concurrent") {
       await Promise.all(prompts.map((p, i) => runPane(i, p, modelId)));
@@ -1376,7 +1414,7 @@
       const res = await fetch(benchUrl("v1/chat/completions"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: true, temperature: 0, max_tokens: 512 }),
+        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: true, temperature: 0, max_tokens: BENCH_MAX_TOKENS }),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -1391,12 +1429,14 @@
           state.bench.times.push(performance.now());
           state.bench.totalTokens++;
           state.meterTotal++;
+          state.bench.paneProgress[i] = Math.min(tokens / BENCH_MAX_TOKENS, 1);
           body.textContent = acc;
           body.scrollTop = body.scrollHeight;  // auto-follow the tail
           foot.textContent = paneFoot(tokens, firstAt, start);
         }
       });
       state.bench.activeCount--;
+      if (!state.bench.stopped) state.bench.paneProgress[i] = 1;  // EOS before the budget still completes the request
       setPaneStatus(pane, state.bench.stopped ? "stopped" : "done");
     } catch (err) {
       state.bench.activeCount--;
@@ -1428,11 +1468,10 @@
     $("bench-tps").textContent = state.bench.totalTokens ? finalRate.toFixed(1) : "—";
     $("bench-wall").textContent = `${wall.toFixed(1)} s`;
     $("bench-active").textContent = "0 / 8";
-    // An aborted run keeps its partial panes but earns no race bar.
-    if (!state.bench.stopped) {
-      state.bench.results[mode] = wall;
-      renderRaces();
-    }
+    // An aborted run keeps its partial panes but earns no race bar; re-rendering from
+    // results either way clears the in-flight progress row.
+    if (!state.bench.stopped) state.bench.results[mode] = wall;
+    renderRaces();
     state.bench.stopped = false;
   }
 
@@ -1454,11 +1493,11 @@
       html += `<div class="race-punch">concurrent ×${(sequential / concurrent).toFixed(1)} faster</div>`;
     }
     wrap.innerHTML = html;
-    // Set the true final widths after layout: the transition animates them, and with
-    // prefers-reduced-motion (transitions globally off) they simply snap to correct.
-    requestAnimationFrame(() => {
-      wrap.querySelectorAll(".race-fill").forEach((f) => { f.style.width = f.dataset.w; });
-    });
+    // Set the true final widths after a forced reflow: the transition animates them, and with
+    // prefers-reduced-motion (transitions globally off) they simply snap to correct. A reflow
+    // rather than requestAnimationFrame because rAF never fires in a backgrounded tab, which
+    // would leave the bars stuck at zero width.
+    wrap.querySelectorAll(".race-fill").forEach((f) => { void f.offsetWidth; f.style.width = f.dataset.w; });
   }
 
   function toggleBench() {
