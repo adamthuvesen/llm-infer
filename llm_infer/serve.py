@@ -14,7 +14,7 @@ from fastapi import FastAPI
 
 from llm_infer.kernels.base import PagedDecodeAttentionBackend
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
-from llm_infer.model.interface import ModelRuntime
+from llm_infer.model.interface import BackendCapabilities, ModelRuntime
 from llm_infer.model.runtime import (
     ATTENTION_BACKEND_CHOICES,
     available_backends,
@@ -54,6 +54,7 @@ def build_app_from_runtime(
     preemption_policy: Literal["off", "recompute"] = "off",
     prefill_chunk_size: int | None = None,
     prompt_lookup_speculative: SpeculativeDecodingConfig | None = None,
+    prefix_cache: bool = False,
     decode_window_size: int = DEFAULT_DECODE_WINDOW_SIZE,
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
@@ -113,6 +114,7 @@ def build_app_from_runtime(
         preemption=preemption_policy == "recompute",
         prefill_chunk_size=prefill_chunk_size,
         speculative=prompt_lookup_speculative,
+        prefix_cache=prefix_cache,
         decode_window_size=decode_window_size,
         grouped_decode_graphs=grouped_decode_graphs,
         grouped_capture_sizes=decode_graph_buckets,
@@ -173,6 +175,39 @@ def _warmup_prompt_ids(runtime: ModelRuntime) -> list[int]:
     if token_ids:
         return [int(token_ids[0])]
     return [0]
+
+
+def resolve_prompt_lookup_default(
+    flag: bool | None, *, device: str, capabilities: BackendCapabilities
+) -> bool:
+    """Resolve the tri-state ``--prompt-lookup-speculative`` flag to on/off.
+
+    ``None`` is auto: on for non-CUDA devices (a local serving win) and off on CUDA, where
+    speculative decode would disable the deferred window and grouped graphs. An explicit value
+    always wins; an explicit ``True`` on an unsupported backend is left on so the engine raises
+    a clear error rather than silently ignoring the request.
+    """
+    if flag is not None:
+        return flag
+    return capabilities.speculative and torch.device(device).type != "cuda"
+
+
+def resolve_prefix_cache_default(
+    flag: bool | None, *, device: str, backend: str, capabilities: BackendCapabilities
+) -> bool:
+    """Resolve the tri-state ``--prefix-cache`` flag to on/off.
+
+    ``None`` is auto: on for non-CUDA bundle backends that support prefix caching over a paged
+    KV cache, off on CUDA. An explicit value always wins.
+    """
+    if flag is not None:
+        return flag
+    return (
+        backend in BUNDLE_BACKENDS
+        and capabilities.prefix_caching
+        and capabilities.paged_kv
+        and torch.device(device).type != "cuda"
+    )
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -301,8 +336,33 @@ def main() -> None:
     )
     parser.add_argument(
         "--prompt-lookup-speculative",
+        dest="prompt_lookup_speculative",
         action="store_true",
-        help="Enable prompt-lookup speculative decode when the backend supports it.",
+        default=None,
+        help="Turn prompt-lookup speculative decode on. Default is auto: on for non-CUDA "
+        "devices (a CPU/Mac serving speedup) and off on CUDA, where it would disable the "
+        "deferred decode window and grouped graphs.",
+    )
+    parser.add_argument(
+        "--no-prompt-lookup-speculative",
+        dest="prompt_lookup_speculative",
+        action="store_false",
+        help="Turn prompt-lookup speculative decode off (overrides the auto default).",
+    )
+    parser.add_argument(
+        "--prefix-cache",
+        dest="prefix_cache",
+        action="store_true",
+        default=None,
+        help="Turn the cross-turn prefix cache on so a follow-up chat turn reuses the previous "
+        "turn's prompt KV instead of re-prefilling it. Default is auto: on for non-CUDA bundle "
+        "backends that support prefix caching, off on CUDA.",
+    )
+    parser.add_argument(
+        "--no-prefix-cache",
+        dest="prefix_cache",
+        action="store_false",
+        help="Turn the cross-turn prefix cache off (overrides the auto default).",
     )
     parser.add_argument(
         "--prompt-lookup-max-draft-tokens",
@@ -343,8 +403,18 @@ def main() -> None:
             max_draft_tokens=args.prompt_lookup_max_draft_tokens,
             max_ngram_size=args.prompt_lookup_max_ngram_size,
         )
-        if args.prompt_lookup_speculative
+        if resolve_prompt_lookup_default(
+            args.prompt_lookup_speculative,
+            device=args.device,
+            capabilities=runtime.capabilities,
+        )
         else None
+    )
+    prefix_cache = resolve_prefix_cache_default(
+        args.prefix_cache,
+        device=args.device,
+        backend=args.backend,
+        capabilities=runtime.capabilities,
     )
     try:
         app = build_app_from_runtime(
@@ -355,6 +425,7 @@ def main() -> None:
             preemption_policy=args.preemption_policy,
             prefill_chunk_size=args.prefill_chunk_size,
             prompt_lookup_speculative=speculative,
+            prefix_cache=prefix_cache,
             decode_window_size=args.decode_window_size,
             decode_graphs=args.decode_graphs,
             decode_graph_buckets=args.decode_graph_buckets,

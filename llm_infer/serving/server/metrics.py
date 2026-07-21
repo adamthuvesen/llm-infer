@@ -246,6 +246,9 @@ class ServerMetrics:
         *,
         preemptions: Callable[[], float],
         grouped_decode_steps: Callable[[], float],
+        prefix_cache_hit_tokens: Callable[[], float],
+        prefix_cache_hits: Callable[[], float],
+        prefix_cache_misses: Callable[[], float],
         running_requests: Callable[[], float],
         waiting_requests: Callable[[], float],
         kv_blocks_used: Callable[[], float],
@@ -271,6 +274,28 @@ class ServerMetrics:
                 "Decode window steps run by engine-owned grouped graphs (0 when disabled; "
                 "a grouped deployment stuck at 0 is silently falling back).",
                 grouped_decode_steps,
+            )
+        )
+        self.registry.register(
+            SourceCounter(
+                "llm_infer_prefix_cache_hit_tokens_total",
+                "Prompt KV positions served from the cross-turn prefix cache instead of "
+                "being re-prefilled (0 when the cache is off).",
+                prefix_cache_hit_tokens,
+            )
+        )
+        self.registry.register(
+            SourceCounter(
+                "llm_infer_prefix_cache_hits_total",
+                "Prefill lookups that reused a cached block-aligned prefix.",
+                prefix_cache_hits,
+            )
+        )
+        self.registry.register(
+            SourceCounter(
+                "llm_infer_prefix_cache_misses_total",
+                "Prefill lookups that found no reusable cached prefix.",
+                prefix_cache_misses,
             )
         )
         gauges = (

@@ -147,6 +147,9 @@ class AsyncInferenceEngine:
         metrics.bind_engine_gauges(
             preemptions=lambda: engine.preemption_count,
             grouped_decode_steps=lambda: engine.grouped_decode_steps_total,
+            prefix_cache_hit_tokens=lambda: engine.prefix_cache_hit_tokens_total,
+            prefix_cache_hits=lambda: engine.prefix_cache_hits_total,
+            prefix_cache_misses=lambda: engine.prefix_cache_misses_total,
             running_requests=lambda: len(scheduler.running),
             waiting_requests=lambda: len(scheduler.waiting),
             kv_blocks_used=lambda: allocator.num_used,
