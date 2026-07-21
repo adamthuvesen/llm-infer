@@ -297,3 +297,27 @@ def test_esme_serving_rejects_unknown_model_id(tmp_path: Path) -> None:
             assert response.status_code == 404
 
     asyncio.run(go())
+
+
+def test_cors_headers_are_opt_in(tmp_path: Path) -> None:
+    """``allow_cors=True`` answers cross-origin preflights; the default app stays same-origin."""
+    runtime = _esme_runtime(tmp_path)
+    preflight = {
+        "Origin": "http://127.0.0.1:8000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Content-Type",
+    }
+
+    async def go() -> None:
+        open_app = build_app_from_runtime(runtime, block_size=8, num_blocks=32, allow_cors=True)
+        async with open_app.router.lifespan_context(open_app), _client(open_app) as client:
+            response = await client.options("/v1/chat/completions", headers=preflight)
+            assert response.status_code == 200
+            assert response.headers["access-control-allow-origin"] == "*"
+
+        closed_app = build_app_from_runtime(runtime, block_size=8, num_blocks=32)
+        async with closed_app.router.lifespan_context(closed_app), _client(closed_app) as client:
+            response = await client.options("/v1/chat/completions", headers=preflight)
+            assert "access-control-allow-origin" not in response.headers
+
+    asyncio.run(go())

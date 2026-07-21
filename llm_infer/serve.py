@@ -60,6 +60,7 @@ def build_app_from_runtime(
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
     grouped_decode_graphs: bool | None = None,
+    allow_cors: bool = False,
 ) -> FastAPI:
     """Wire a loaded model runtime into the HTTP app.
 
@@ -134,6 +135,19 @@ def build_app_from_runtime(
         metrics=metrics,
     )
     register_webui(app)
+    if allow_cors:
+        # Off by default: the local server is same-origin (see register_webui). The Modal
+        # deployment turns it on so the *local* webui's throughput bench can point its
+        # base-URL field at the *.modal.run origin. The API carries no credentials or
+        # user data, so a wildcard read-only surface is acceptable there.
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST"],
+            allow_headers=["Content-Type"],
+        )
     return app
 
 
