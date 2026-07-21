@@ -211,6 +211,54 @@ def resolve_prefix_cache_default(
     )
 
 
+def resolve_device_default(device: str) -> str:
+    """Resolve the ``--device`` selector. ``auto`` means ``cpu``; MPS is explicit opt-in.
+
+    Measured on a 214M bundle (8-turn chat, 2026-07): mps fp16 served 1.7x *slower* than cpu
+    fp32 — per-op launch overhead dominates this model's tiny per-step GEMMs — so ``auto``
+    deliberately stays on CPU. ``--device mps`` remains a supported, tested opt-in for larger
+    bundles where the tradeoff may flip. Any explicit value passes through unchanged.
+    """
+    if device != "auto":
+        return device
+    return "cpu"
+
+
+def resolve_dtype_default(dtype: torch.dtype | None, *, device: str) -> torch.dtype:
+    """Resolve the ``--dtype`` selector, defaulting to fp16 on MPS and fp32 elsewhere.
+
+    ``None`` is auto: float16 on an MPS device (the accelerator's point — a Mac's fp32 CPU GEMM
+    is what local decode is bound on), float32 otherwise. An explicit dtype always wins. The
+    ``device`` here is the already-resolved one, so ``--device auto`` on a Mac lands fp16.
+    """
+    if dtype is not None:
+        return dtype
+    if torch.device(device).type == "mps":
+        return torch.float16
+    return torch.float32
+
+
+_DTYPE_LABELS = {
+    torch.float32: "fp32",
+    torch.float16: "fp16",
+    torch.bfloat16: "bf16",
+}
+
+
+def describe_run_config(device: str, dtype: torch.dtype) -> str:
+    """One startup line naming the resolved device/dtype and whether it is the fp32 reference.
+
+    Only ``cpu`` + fp32 reproduces the bundle reference token-for-token; every other config
+    (fp16, or MPS, or both) diverges within numerical noise and is labeled experimental so the
+    difference is visible per repo policy, never silent.
+    """
+    dtype_label = _DTYPE_LABELS.get(dtype, str(dtype).removeprefix("torch."))
+    config = f"{device} {dtype_label}"
+    if device == "cpu" and dtype == torch.float32:
+        return f"device/dtype: {config} (cpu fp32 reference config)"
+    return f"device/dtype: experimental: {config} — reference is cpu fp32"
+
+
 def resolve_attention_backend_default(name: str, *, device: str, backend: str) -> str:
     """Resolve the ``--attention-backend`` selector, defaulting local bundles to SDPA.
 
@@ -301,8 +349,18 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--dtype", type=_dtype, default=torch.float32)
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Torch device. auto resolves to mps on Apple silicon, else cpu; cpu/mps/cuda are "
+        "explicit.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=_dtype,
+        default=None,
+        help="Model dtype. Default is auto: fp16 on MPS, fp32 otherwise; an explicit value wins.",
+    )
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
     parser.add_argument("--num-blocks", type=int, default=DEFAULT_NUM_BLOCKS)
     parser.add_argument(
@@ -406,15 +464,18 @@ def main() -> None:
 
     import uvicorn
 
+    device = resolve_device_default(args.device)
+    dtype = resolve_dtype_default(args.dtype, device=device)
+    print(describe_run_config(device, dtype))
     attention_backend_name = resolve_attention_backend_default(
         args.attention_backend,
-        device=args.device,
+        device=device,
         backend=args.backend,
     )
     runtime = load_model_runtime(
         args.backend,
-        dtype=args.dtype,
-        device=args.device,
+        dtype=dtype,
+        device=device,
         bundle_path=bundle_path,
         model_id=args.model_id,
         revision=args.revision,
@@ -429,14 +490,14 @@ def main() -> None:
         )
         if resolve_prompt_lookup_default(
             args.prompt_lookup_speculative,
-            device=args.device,
+            device=device,
             capabilities=runtime.capabilities,
         )
         else None
     )
     prefix_cache = resolve_prefix_cache_default(
         args.prefix_cache,
-        device=args.device,
+        device=device,
         backend=args.backend,
         capabilities=runtime.capabilities,
     )
@@ -445,7 +506,7 @@ def main() -> None:
             runtime,
             block_size=args.block_size,
             num_blocks=args.num_blocks,
-            device=args.device,
+            device=device,
             preemption_policy=args.preemption_policy,
             prefill_chunk_size=args.prefill_chunk_size,
             prompt_lookup_speculative=speculative,
