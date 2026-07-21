@@ -7,7 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from fastapi import FastAPI
@@ -17,6 +17,7 @@ from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.interface import BackendCapabilities, ModelRuntime
 from llm_infer.model.runtime import (
     ATTENTION_BACKEND_CHOICES,
+    AttentionBackendChoice,
     available_backends,
     load_model_runtime,
 )
@@ -210,6 +211,21 @@ def resolve_prefix_cache_default(
     )
 
 
+def resolve_attention_backend_default(name: str, *, device: str, backend: str) -> str:
+    """Resolve the ``--attention-backend`` selector, defaulting local bundles to SDPA.
+
+    ``auto`` on a non-CUDA device serving a bundle backend picks ``torch_sdpa`` — the fused
+    CPU/MPS path that beats the ``torch_naive`` reference for local serving. Everything else
+    (an explicit name, a non-bundle backend, or CUDA, where ``auto`` still means FlashInfer)
+    passes through unchanged so CUDA behavior does not move.
+    """
+    if name != "auto":
+        return name
+    if backend in BUNDLE_BACKENDS and torch.device(device).type != "cuda":
+        return "torch_sdpa"
+    return "auto"
+
+
 def _dtype(name: str) -> torch.dtype:
     if name == "float32":
         return torch.float32
@@ -280,7 +296,8 @@ def main() -> None:
         "--attention-backend",
         choices=ATTENTION_BACKEND_CHOICES,
         default="auto",
-        help="Attention backend selector. auto uses FlashInfer for CUDA bf16/fp16 Esme bundles.",
+        help="Attention backend selector. auto uses FlashInfer for CUDA bf16/fp16 Esme bundles "
+        "and torch_sdpa for local (non-CUDA) bundle serving.",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -389,6 +406,11 @@ def main() -> None:
 
     import uvicorn
 
+    attention_backend_name = resolve_attention_backend_default(
+        args.attention_backend,
+        device=args.device,
+        backend=args.backend,
+    )
     runtime = load_model_runtime(
         args.backend,
         dtype=args.dtype,
@@ -396,7 +418,9 @@ def main() -> None:
         bundle_path=bundle_path,
         model_id=args.model_id,
         revision=args.revision,
-        attention_backend_name=args.attention_backend,
+        # The resolver only ever yields a registered choice (argparse gates the passthrough,
+        # and the two defaults are valid); load_model_runtime re-validates regardless.
+        attention_backend_name=cast(AttentionBackendChoice, attention_backend_name),
     )
     speculative = (
         SpeculativeDecodingConfig(
