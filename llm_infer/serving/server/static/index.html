@@ -128,21 +128,6 @@
   .app.rail-open #rail-open { display: none; }
   .topbar .spacer { flex: 1; }
 
-  /* The instrument: live decode-rate trace + session odometer, fed by the real stream. */
-  .meter {
-    display: flex; align-items: center; gap: 12px;
-    font-family: var(--mono); font-size: 11.5px; color: var(--faint);
-    padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px;
-    background: var(--surface); user-select: none;
-  }
-  .meter svg { display: block; width: 84px; height: 20px; overflow: visible; }
-  .meter .trace { fill: none; stroke: var(--line-strong); stroke-width: 1.5; transition: stroke .3s; }
-  .meter.live .trace { stroke: var(--accent); }
-  .meter .rate { min-width: 74px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .meter.live .rate { color: var(--accent-strong); }
-  .meter .sep { width: 1px; height: 14px; background: var(--line); }
-  .meter .odo { color: var(--faint); font-variant-numeric: tabular-nums; }
-
   .scroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
   .scroll::-webkit-scrollbar { width: 10px; }
   .scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 10px; border: 3px solid var(--paper); }
@@ -167,7 +152,6 @@
     font-size: clamp(32px, 4.2vw, 46px);
     line-height: 1.04; letter-spacing: -.015em; font-weight: 500;
   }
-  .hero h1 em { font-style: normal; font-weight: 500; color: var(--accent); }
   .hero-copy p { margin: 12px 0 0; max-width: 560px; color: var(--muted); font-size: 14.5px; line-height: 1.55; }
 
   /* Data plate: the model's real architecture, engraved. */
@@ -469,7 +453,6 @@
     .main { grid-column: 1; grid-row: 1; }
     .app.rail-open .rail { visibility: visible; padding: 14px 12px; border-right: 1px solid var(--line); transform: translateX(0); }
     .bubble { max-width: 88%; }
-    .meter .odo, .meter .sep { display: none; }
   }
 
   @media (max-width: 620px) {
@@ -489,8 +472,6 @@
     .params-btn #params-label { display: none; }
     .composer-dock { padding-inline: 14px; }
     .thread { padding-inline: 14px; }
-    .meter svg { width: 56px; }
-    .meter .rate { min-width: 0; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -539,12 +520,6 @@
       <button class="icon-btn bench-toggle" id="bench-toggle" title="Throughput bench" aria-pressed="false" aria-label="Throughput bench">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
       </button>
-      <div class="meter" id="meter" title="Live decode rate and session tokens" aria-label="Engine meter">
-        <svg viewBox="0 0 84 20" aria-hidden="true"><polyline class="trace" id="meter-trace" points="0,19 84,19" /></svg>
-        <span class="rate" id="meter-rate">— tok/s</span>
-        <span class="sep" aria-hidden="true"></span>
-        <span class="odo" id="meter-odo">Σ 0 tok</span>
-      </div>
     </div>
 
     <div class="scroll" id="scroll">
@@ -743,8 +718,6 @@
     starterOffset: 0,
     starterSendPending: false,
     historyExpanded: true,
-    meterTimes: [],         // token arrival times for the current stream
-    meterTotal: 0,          // session odometer
     benchView: false,       // throughput bench mode showing instead of chat
     bench: {
       running: false, mode: null, offset: 0,
@@ -797,13 +770,12 @@
     }).join("");
   }
 
-  // ---------- engine meter ----------
-  const METER_WINDOW_MS = 8000, METER_BUCKET_MS = 250, METER_W = 84, METER_H = 20;
-  let meterTick = null;
+  // ---------- shared trace math ----------
+  const METER_WINDOW_MS = 8000, METER_BUCKET_MS = 250;
 
   function fmtInt(n) { return n.toLocaleString("en-US").replace(/,/g, " "); }
 
-  // Shared bucket math for every live trace (topbar meter + bench readout).
+  // Shared bucket math for the bench readout's live trace.
   function bucketRates(times, now, windowMs, bucketMs) {
     const buckets = Math.floor(windowMs / bucketMs);
     const rates = new Array(buckets).fill(0);
@@ -821,29 +793,8 @@
     return rates.map((r, i) => `${(i * step).toFixed(1)},${(h - 1 - (r / max) * (h - 2)).toFixed(1)}`).join(" ");
   }
 
-  function drawMeter() {
-    const now = performance.now();
-    const rates = bucketRates(state.meterTimes, now, METER_WINDOW_MS, METER_BUCKET_MS);
-    $("meter-trace").setAttribute("points", polylinePoints(rates, METER_W, METER_H));
 
-    const lastSec = state.meterTimes.filter((t) => now - t < 1000).length;
-    $("meter-rate").textContent = state.streaming ? `${lastSec} tok/s` : ($("meter-rate").dataset.final || "— tok/s");
-    $("meter-odo").textContent = `Σ ${fmtInt(state.meterTotal)} tok`;
-  }
 
-  function meterStart() {
-    state.meterTimes = [];
-    delete $("meter-rate").dataset.final;
-    $("meter").classList.add("live");
-    meterTick = setInterval(drawMeter, METER_BUCKET_MS);
-  }
-
-  function meterStop(finalRate) {
-    clearInterval(meterTick); meterTick = null;
-    $("meter").classList.remove("live");
-    if (finalRate != null) $("meter-rate").dataset.final = `${finalRate.toFixed(1)} tok/s`;
-    drawMeter();
-  }
 
   // ---------- view ----------
   const composerTpl = $("composer-tpl").content;
@@ -859,7 +810,7 @@
       <div class="hero">
         <div class="hero-inner">
           <div class="hero-copy">
-            <div class="hero-kicker"><span class="status-dot"></span><span id="hero-model">serving locally</span></div>
+            <div class="hero-kicker"><span class="status-dot"></span><span>serving locally</span></div>
             <h1>Esme-214M-Chat</h1>
             <p>Esme learned from 10.2 billion tokens of educational English web text. Try a topic it is likely to know, or write your own question.</p>
           </div>
@@ -1067,11 +1018,9 @@
     scrollToBottom();
 
     setStreaming(true);
-    meterStart();
     const result = await stream(chat, prose, tel);
     aTurn.querySelector(".avatar").classList.remove("live");
     setStreaming(false);
-    meterStop(result.public.rate);
 
     chat.messages.push({ role: "assistant", content: result.text, stats: result.public, chunks: result.chunks });
     setTelemetry(aTurn, result.public, result.text, result.chunks);
@@ -1152,8 +1101,6 @@
           if (firstAt == null) firstAt = performance.now();
           acc += delta; tokens++;
           chunks.push(delta);
-          state.meterTimes.push(performance.now());
-          state.meterTotal++;
           paint();
         }
       });
@@ -1384,7 +1331,6 @@
         $("race-live-time").textContent = `${elapsed.toFixed(1)} s`;
       }
     }
-    drawMeter();  // the session odometer keeps counting bench tokens
   }
 
   function renderLiveRace(mode) {
@@ -1475,7 +1421,6 @@
           acc += delta; tokens++;
           state.bench.times.push(performance.now());
           state.bench.totalTokens++;
-          state.meterTotal++;
           state.bench.paneProgress[i] = Math.min(tokens / BENCH_MAX_TOKENS, 1);
           body.textContent = acc;
           body.scrollTop = body.scrollHeight;  // auto-follow the tail
@@ -1718,7 +1663,6 @@
   if (window.innerWidth <= 820) app.classList.add("rail-collapsed");
   renderActiveHistory();
   renderHero();
-  drawMeter();
   discoverModel();
 })();
 </script>
