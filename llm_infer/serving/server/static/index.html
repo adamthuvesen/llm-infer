@@ -4,31 +4,34 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>llm-infer</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23D6531F'/%3E%3Cpath d='M5 10h8M4 16h10M5 22h8' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='m20 7 8 9-8 9-6-9 6-9Z' fill='none' stroke='white' stroke-width='2.4' stroke-linejoin='round'/%3E%3Ccircle cx='20.5' cy='16' r='1.7' fill='white'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <style>
   :root {
-    /* Light, neutral paper. Color is reserved for one thing only: the engine is alive. */
-    --bg: #FBFBFA;
+    /* Warm technical paper, with orange for actions and green for engine status. */
+    --bg: #F7F7F4;
     --surface: #FFFFFF;
-    --ink: #19191A;
-    --muted: #74736E;
-    --faint: #A2A19C;
-    --line: #ECEBE8;
-    --line-strong: #E0DFDB;
-    --hover: #F4F3F0;
-    --user-bubble: #F2F1EE;
-    /* Liveness accent — appears only while the engine generates. */
-    --live: #19191A;
-    --live-soft: #E7E6E3;
+    --ink: #191B20;
+    --muted: #696C72;
+    --faint: #6F7278;
+    --line: #E9E9E5;
+    --line-strong: #DCDDD9;
+    --hover: #F1F2EF;
+    --user-bubble: #EFF0ED;
+    --accent: #D6531F;
+    --accent-strong: #A83B13;
+    --accent-soft: #FFF0E8;
+    --model-mark: var(--accent);
+    --live: #187557;
     --danger: #C2402F;
 
     --font: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
     --rail: 248px;
     --measure: 740px;
-    --radius: 6px;
+    --radius: 10px;
   }
 
   * { box-sizing: border-box; }
@@ -45,24 +48,30 @@
   }
   button { font-family: inherit; color: inherit; cursor: pointer; border: none; background: none; }
   textarea { font-family: inherit; }
-  ::selection { background: var(--live-soft); }
+  ::selection { background: var(--accent-soft); }
+  :focus-visible { outline: 3px solid rgba(214, 83, 31, .3); outline-offset: 2px; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
 
   .app { display: grid; grid-template-columns: var(--rail) 1fr; height: 100dvh; }
   .app.rail-collapsed { grid-template-columns: 0 1fr; }
 
   /* ---------- Sidebar ---------- */
   .rail {
+    grid-column: 1; grid-row: 1;
     border-right: 1px solid var(--line);
     display: flex; flex-direction: column;
     padding: 14px 12px; gap: 4px;
     overflow: hidden; min-width: 0;
     background: var(--bg);
   }
-  .rail-collapsed .rail { display: none; }
+  .rail-collapsed .rail { visibility: hidden; padding-inline: 0; border-right: 0; }
   .brand { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 14px; }
   .brand .mark { display: flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -0.01em; }
-  .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink); }
-  .brand .dot.live { background: var(--live); box-shadow: 0 0 0 4px var(--live-soft); }
+  .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+  .brand .dot.live { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
   .icon-btn {
     width: 30px; height: 30px; border-radius: 5px; display: grid; place-items: center;
     color: var(--muted); transition: background .12s, color .12s;
@@ -78,8 +87,17 @@
   .new-chat:hover { background: var(--hover); }
   .new-chat svg { width: 16px; height: 16px; color: var(--muted); }
 
-  .history { margin-top: 14px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 1px; }
-  .history-label { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); padding: 6px 10px 4px; }
+  .history { margin-top: 14px; overflow-y: auto; flex: 1; }
+  .history-toggle {
+    width: 100%; display: flex; align-items: center; gap: 6px; padding: 6px 10px 5px;
+    border-radius: 5px; color: var(--faint); font-size: 11px; letter-spacing: .04em;
+    text-transform: uppercase; text-align: left; transition: background .12s, color .12s;
+  }
+  .history-toggle:hover { background: var(--hover); color: var(--ink); }
+  .history-toggle svg { width: 12px; height: 12px; transition: transform .16s ease; }
+  .history-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
+  .history-list { display: flex; flex-direction: column; gap: 1px; }
+  .history-list[hidden] { display: none; }
   .chat-item {
     display: block; width: 100%; text-align: left; padding: 8px 10px; border-radius: 5px;
     font-size: 13.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -94,16 +112,18 @@
     transition: background .12s;
   }
   .model-chip:hover { background: var(--hover); }
-  .model-chip .glyph { width: 26px; height: 26px; border-radius: 5px; background: var(--ink); color: var(--surface);
-    display: grid; place-items: center; font-family: var(--mono); font-size: 12px; font-weight: 500; flex: none; }
+  .model-chip .glyph { width: 26px; height: 26px; border-radius: 6px; background: var(--model-mark); color: var(--surface);
+    display: grid; place-items: center; flex: none; }
+  .model-chip .glyph svg, .avatar svg { width: 17px; height: 17px; display: block; }
   .model-chip .meta { min-width: 0; text-align: left; }
   .model-chip .name { font-family: var(--mono); font-size: 12.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .model-chip .sub { font-size: 11px; color: var(--faint); }
 
   /* ---------- Main ---------- */
-  .main { display: flex; flex-direction: column; min-width: 0; position: relative; }
+  .main { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
   .topbar { height: 52px; display: flex; align-items: center; gap: 6px; padding: 0 14px; flex: none; }
-  .topbar .title { font-weight: 500; font-size: 14px; color: var(--muted); }
+  .app:not(.rail-collapsed) #rail-open { display: none; }
+  .app.rail-open #rail-open { display: none; }
   .topbar .spacer { flex: 1; }
 
   .scroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
@@ -111,8 +131,51 @@
   .scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 10px; border: 3px solid var(--bg); }
 
   /* ---------- Empty / hero state ---------- */
-  .hero { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 24px 8vh; }
-  .hero .composer-wrap { width: 100%; max-width: var(--measure); }
+  .hero {
+    min-height: 100%; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 34px 24px 9vh;
+  }
+  .hero-inner { width: 100%; max-width: var(--measure); }
+  .hero-copy { margin-bottom: 24px; }
+  .hero-kicker {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+    color: var(--muted); font-family: var(--mono); font-size: 11.5px;
+  }
+  .hero-kicker .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--live); }
+  .hero h1 { margin: 0; max-width: 620px; font-size: clamp(26px, 3vw, 34px); line-height: 1.15; letter-spacing: -.035em; font-weight: 600; }
+  .hero-copy p { margin: 10px 0 0; max-width: 600px; color: var(--muted); font-size: 14.5px; line-height: 1.55; }
+  .starter {
+    margin-bottom: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+    background: rgba(255,255,255,.72); overflow: hidden;
+  }
+  .starter-head {
+    min-height: 48px; display: flex; align-items: center; gap: 14px; padding: 8px 12px 8px 15px;
+    border-bottom: 1px solid var(--line);
+  }
+  .starter-title { font-size: 13px; font-weight: 500; white-space: nowrap; }
+  .starter-head .spacer { flex: 1; }
+  .topic-select-wrap { position: relative; display: flex; align-items: center; }
+  .topic-select {
+    appearance: none; min-width: 166px; border: 1px solid var(--line-strong); border-radius: 7px;
+    background: var(--surface); color: var(--ink); padding: 7px 30px 7px 10px;
+    font: 500 12px/1.2 var(--font); cursor: pointer;
+  }
+  .topic-select-wrap svg { position: absolute; right: 9px; width: 13px; height: 13px; pointer-events: none; color: var(--muted); }
+  .starter-questions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; }
+  .starter-question {
+    min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 11px; border-radius: 7px; text-align: left; color: var(--muted);
+    font-size: 13px; line-height: 1.35; transition: background .12s, color .12s;
+  }
+  .starter-question:hover { background: var(--accent-soft); color: var(--accent-strong); }
+  .starter-question svg { width: 15px; height: 15px; flex: none; opacity: .72; }
+  .starter-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 8px 14px 10px; color: var(--faint); font-size: 11.5px;
+  }
+  .more-questions { color: var(--accent-strong); font-size: 11.5px; font-weight: 500; padding: 4px 0; }
+  .more-questions:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .hero .composer-wrap { width: 100%; }
 
   /* ---------- Thread ---------- */
   .thread { max-width: var(--measure); margin: 0 auto; padding: 18px 24px 8px; display: flex; flex-direction: column; gap: 26px; }
@@ -126,10 +189,10 @@
   .answer { display: flex; gap: 14px; }
   .avatar {
     width: 27px; height: 27px; border-radius: 5px; flex: none; margin-top: 2px;
-    background: var(--ink); color: var(--surface); display: grid; place-items: center;
-    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    background: var(--model-mark); color: var(--surface); display: grid; place-items: center;
   }
-  .avatar.live { background: var(--live); }
+  .avatar.live svg { animation: stream-mark .8s ease-in-out infinite; }
+  @keyframes stream-mark { 50% { transform: translateX(1px); opacity: .76; } }
   .prose { min-width: 0; flex: 1; }
   .prose > *:first-child { margin-top: 0; }
   .prose > *:last-child { margin-bottom: 0; }
@@ -140,17 +203,12 @@
   .prose pre code { background: none; padding: 0; font-size: 13px; }
   .prose ul, .prose ol { margin: 0 0 12px; padding-left: 22px; }
   .prose strong { font-weight: 600; }
-  .caret { display: inline-block; width: 8px; height: 1.05em; vertical-align: text-bottom;
-    background: var(--live); border-radius: 1.5px; margin-left: 2px; animation: blink 1s steps(2) infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-
   /* The signature: clear, measured telemetry — claimed by no one, read from the stream. */
   .telemetry { margin-top: 9px; padding-left: 41px; font-family: var(--mono); font-size: 11.5px; color: var(--faint);
     display: flex; align-items: center; gap: 0; opacity: 0; transition: opacity .3s; }
   .telemetry.show { opacity: 1; }
   .telemetry .sep { margin: 0 9px; color: var(--line-strong); }
-  .telemetry .rate { color: var(--live); }
-  .telemetry.streaming .rate { color: var(--live); }
+  .telemetry .rate { color: inherit; }
 
   /* ---------- Composer ---------- */
   .composer-dock { flex: none; padding: 8px 24px 20px; }
@@ -161,7 +219,7 @@
     box-shadow: 0 1px 2px rgba(0,0,0,.03), 0 8px 24px -16px rgba(0,0,0,.12);
     transition: border-color .14s, box-shadow .14s;
   }
-  .composer.focused { border-color: #C9C8C3; box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 10px 30px -16px rgba(0,0,0,.16); }
+  .composer.focused { border-color: #E1A58C; box-shadow: 0 0 0 3px rgba(214,83,31,.1), 0 10px 30px -16px rgba(0,0,0,.16); }
   .composer textarea {
     display: block; width: 100%; border: none; outline: none; resize: none; background: none;
     padding: 16px 18px 4px; font-size: 15.5px; line-height: 1.55; color: var(--ink);
@@ -176,6 +234,18 @@
   .params-btn:hover { background: var(--hover); color: var(--ink); }
   .params-btn svg { width: 13px; height: 13px; }
   .params-btn #params-label { display: none; }
+  .quick-question {
+    position: relative; display: flex; align-items: center; min-width: 0; color: var(--muted);
+    border-radius: 5px; transition: background .12s, color .12s;
+  }
+  .quick-question:hover { background: var(--hover); color: var(--ink); }
+  .quick-question:has(select:disabled) { opacity: .52; pointer-events: none; }
+  .quick-question .idea-icon { position: absolute; left: 8px; width: 14px; height: 14px; pointer-events: none; }
+  .quick-question .chevron { position: absolute; right: 7px; width: 12px; height: 12px; pointer-events: none; }
+  .quick-question select {
+    appearance: none; width: 142px; min-width: 0; border: 0; outline: 0; background: transparent;
+    color: inherit; padding: 6px 24px 6px 27px; font: 500 12.5px/1.2 var(--font); cursor: pointer;
+  }
   .composer-row .spacer { flex: 1; }
   .send {
     width: 34px; height: 34px; border-radius: 6px; flex: none;
@@ -184,8 +254,10 @@
   }
   .send svg { width: 17px; height: 17px; }
   .send:disabled { background: var(--line-strong); color: var(--surface); cursor: not-allowed; }
+  .send:not(:disabled) { background: var(--accent); }
+  .send:not(:disabled):hover { background: var(--accent-strong); }
   .send:not(:disabled):active { transform: scale(.92); }
-  .send.stop { background: var(--live); }
+  .send.stop { background: var(--accent-strong); }
   .send.stop svg { width: 13px; height: 13px; }
 
   /* ---------- Params popover ---------- */
@@ -209,13 +281,13 @@
   .field label { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 450; margin-bottom: 11px; }
   .field .val { font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--hover); padding: 2px 8px; border-radius: 4px; }
   .field input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; border-radius: 3px; background: var(--line-strong); outline: none; cursor: pointer; }
-  .field input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 15px; height: 15px; border-radius: 50%; background: var(--live); border: 2px solid var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.25); cursor: pointer; }
-  .field input[type=range]::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--live); border: 2px solid var(--surface); cursor: pointer; }
+  .field input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 15px; height: 15px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.25); cursor: pointer; }
+  .field input[type=range]::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); cursor: pointer; }
   .field textarea {
     width: 100%; border: 1px solid var(--line-strong); border-radius: 5px; padding: 9px 11px;
     font-family: inherit; font-size: 13px; line-height: 1.5; outline: none; resize: vertical; color: var(--ink);
   }
-  .field textarea:focus { border-color: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
+  .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .field .help { font-size: 11.5px; color: var(--faint); margin-top: 8px; line-height: 1.5; }
 
   .toast {
@@ -228,9 +300,26 @@
   @media (max-width: 820px) {
     /* Rail becomes a fixed overlay, so the grid is a single column the main fills. */
     .app, .app.rail-collapsed, .app.rail-open { grid-template-columns: 1fr; }
-    .rail { position: fixed; z-index: 50; width: var(--rail); height: 100dvh; box-shadow: 0 0 40px rgba(0,0,0,.12); transform: translateX(-100%); transition: transform .2s; display: flex; }
-    .app.rail-open .rail { transform: translateX(0); }
+    .rail { grid-column: 1; grid-row: 1; position: fixed; z-index: 50; width: var(--rail); height: 100dvh; box-shadow: 0 0 40px rgba(0,0,0,.12); transform: translateX(-100%); transition: transform .2s; display: flex; }
+    .main { grid-column: 1; grid-row: 1; }
+    .app.rail-open .rail { visibility: visible; padding: 14px 12px; border-right: 1px solid var(--line); transform: translateX(0); }
     .bubble { max-width: 88%; }
+  }
+
+  @media (max-width: 620px) {
+    .hero { justify-content: flex-start; padding: 48px 14px 32px; }
+    .hero-copy { margin-bottom: 20px; }
+    .hero h1 { font-size: 27px; }
+    .starter-head { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+    .starter-head .spacer { display: none; }
+    .topic-select-wrap, .topic-select { width: 100%; }
+    .starter-questions { grid-template-columns: 1fr; }
+    .starter-question { min-height: 46px; }
+    .starter-foot span { display: none; }
+    .starter-foot { justify-content: flex-end; }
+    .quick-question select { width: 128px; }
+    .composer-dock { padding-inline: 14px; }
+    .thread { padding-inline: 14px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -241,10 +330,10 @@
 <body>
 <div class="app rail-collapsed" id="app">
   <!-- Sidebar -->
-  <aside class="rail">
+  <aside class="rail" id="sidebar">
     <div class="brand">
       <div class="mark"><span class="dot" id="brand-dot"></span> llm-infer</div>
-      <button class="icon-btn" id="rail-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">
+      <button class="icon-btn" id="rail-toggle" title="Close sidebar" aria-label="Close sidebar" aria-controls="sidebar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
       </button>
     </div>
@@ -257,7 +346,7 @@
     </div>
     <div class="rail-foot">
       <button class="model-chip" id="model-foot" title="Sampling parameters">
-        <span class="glyph" id="model-glyph">··</span>
+        <span class="glyph" id="model-glyph" aria-hidden="true"></span>
         <span class="meta">
           <span class="name" id="model-name">connecting…</span>
         </span>
@@ -268,10 +357,9 @@
   <!-- Main -->
   <main class="main">
     <div class="topbar">
-      <button class="icon-btn" id="rail-open" title="Open sidebar" aria-label="Open sidebar">
+      <button class="icon-btn" id="rail-open" title="Open sidebar" aria-label="Open sidebar" aria-controls="sidebar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
       </button>
-      <span class="title" id="thread-title"></span>
       <span class="spacer"></span>
     </div>
 
@@ -295,6 +383,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
         <span id="params-label">temp 0.00 · p 1.00 · k 0</span>
       </button>
+      <label class="quick-question" title="Choose and send a sample question">
+        <span class="sr-only">Sample questions</span>
+        <svg class="idea-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 18h6M10 22h4M8.5 14.5A7 7 0 1 1 15.5 14.5C14.5 15.3 14 16 14 18h-4c0-2-.5-2.7-1.5-3.5Z"/></svg>
+        <select id="quick-question" aria-label="Sample questions">
+          <option value="">Question ideas</option>
+        </select>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+      </label>
       <div class="popover-backdrop" id="pop-backdrop"></div>
       <div class="popover" id="popover" role="dialog" aria-label="Sampling parameters">
         <div class="pop-head">
@@ -326,8 +422,8 @@
           <input type="range" id="presence" min="-2" max="2" step="0.05" value="0" />
         </div>
         <div class="field">
-          <label>Max new tokens <span class="val" id="max-val">64</span></label>
-          <input type="range" id="maxtok" min="16" max="2048" step="16" value="64" />
+          <label>Max new tokens <span class="val" id="max-val">128</span></label>
+          <input type="range" id="maxtok" min="16" max="2048" step="16" value="128" />
         </div>
         <div class="field">
           <label for="system">System prompt</label>
@@ -355,8 +451,91 @@
     topK: 0,
     frequencyPenalty: 0,
     presencePenalty: 0,
-    maxTokens: 64,
+    maxTokens: 128,
     system: "Always write short, direct responses.",
+  };
+  const ESME_MARK = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3.5 7h6M3 12h7.5M3.5 17h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.2 5.2 21 12l-5.8 6.8L11 12l4.2-6.8Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="15.6" cy="12" r="1.35" fill="currentColor"/></svg>`;
+  const STARTER_TOPICS = {
+    "Science": [
+      "Why do Earth's seasons occur?",
+      "How does photosynthesis work?",
+      "What does DNA do?",
+      "Why does ice float on water?",
+      "What is an electric circuit?",
+      "Why can sound not travel through empty space?",
+      "What causes a solar eclipse?",
+      "How do magnets work?",
+    ],
+    "Body & health": [
+      "What do the kidneys do?",
+      "What is the difference between bacteria and viruses?",
+      "Why does the body need iron?",
+      "What does the immune system do?",
+      "Why do humans need sleep?",
+      "What is the purpose of digestion?",
+      "How do the lungs exchange oxygen and carbon dioxide?",
+      "What is a cell?",
+    ],
+    "Nature & climate": [
+      "Why are coral reefs important?",
+      "How do greenhouse gases warm the atmosphere?",
+      "What is an ecosystem?",
+      "What is the difference between weather and climate?",
+      "How does deforestation affect the environment?",
+      "What is biodiversity?",
+      "What causes ocean tides?",
+      "How does the water cycle work?",
+    ],
+    "History & politics": [
+      "What caused the French Revolution?",
+      "What was the Roman Republic?",
+      "What were the main causes of World War I?",
+      "Why was the Industrial Revolution important?",
+      "What was the Cold War?",
+      "How does a parliamentary system work?",
+      "What was the Silk Road?",
+      "How did the printing press change Europe?",
+    ],
+    "Geography & civics": [
+      "What is the capital of Kenya?",
+      "Where are the Andes Mountains?",
+      "Which countries border Germany?",
+      "What is the difference between Great Britain and the United Kingdom?",
+      "What is the purpose of a constitution?",
+      "What does a central bank do?",
+      "What does the World Health Organization do?",
+      "What is the role of a president?",
+    ],
+    "Math & language": [
+      "Explain the Pythagorean theorem.",
+      "What is a prime number?",
+      "How do you calculate the area of a circle?",
+      "What is the difference between mean, median, and mode?",
+      "Why can you not divide by zero?",
+      "What is a metaphor?",
+      "What is the difference between a fact and an opinion?",
+      "Explain supply and demand.",
+    ],
+    "Computing": [
+      "What is an HTTP request?",
+      "How does binary search work?",
+      "What is a Python dictionary?",
+      "What happens when you enter a URL in a browser?",
+      "What is the difference between RAM and storage?",
+      "What does an operating system do?",
+      "What is a database?",
+      "What is the difference between encryption and hashing?",
+    ],
+    "Everyday ideas": [
+      "Why does bread rise?",
+      "How does a refrigerator work?",
+      "Why do metals rust?",
+      "What are the main ideas of Buddhism?",
+      "What is utilitarianism?",
+      "What is inflation?",
+      "How does a semiconductor work?",
+      "Why does recycling aluminum save energy?",
+    ],
   };
 
   const $ = (id) => document.getElementById(id);
@@ -369,6 +548,10 @@
     abort: null,
     streaming: false,
     params: { ...DEFAULT_PARAMS },
+    starterTopic: Object.keys(STARTER_TOPICS)[0],
+    starterOffset: 0,
+    starterSendPending: false,
+    historyExpanded: true,
   };
 
   // ---------- persistence ----------
@@ -385,7 +568,12 @@
       if (id) {
         state.modelId = id;
         $("model-name").textContent = id;
-        $("model-glyph").textContent = id.replace(/[^a-z0-9]/gi, "").slice(0, 2).toLowerCase() || "lm";
+        const heroModel = $("hero-model");
+        if (heroModel) heroModel.textContent = `${id} · running locally`;
+        if (state.starterSendPending) {
+          state.starterSendPending = false;
+          void send();
+        }
       }
     } catch {
       $("model-name").textContent = "offline";
@@ -420,13 +608,79 @@
   function renderHero() {
     scroll.innerHTML = `
       <div class="hero">
-        <div class="composer-wrap">
+        <div class="hero-inner">
+          <div class="hero-copy">
+            <div class="hero-kicker"><span class="status-dot"></span><span id="hero-model">${esc(state.modelId || "Esme-214M-Chat")} · running locally</span></div>
+            <h1>Ask a small model a big question.</h1>
+            <p>Esme learned from 10.2 billion tokens of educational English web text. Try a topic it is likely to know, or write your own question.</p>
+          </div>
+          <section class="starter" aria-labelledby="starter-title">
+            <div class="starter-head">
+              <span class="starter-title" id="starter-title">Try asking Esme</span>
+              <span class="spacer"></span>
+              <label class="topic-select-wrap">
+                <span class="sr-only">Question topic</span>
+                <select class="topic-select" id="starter-topic" aria-label="Question topic">
+                  ${Object.keys(STARTER_TOPICS).map((topic) => `<option${topic === state.starterTopic ? " selected" : ""}>${esc(topic)}</option>`).join("")}
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+              </label>
+            </div>
+            <div class="starter-questions" id="starter-questions" aria-live="polite"></div>
+            <div class="starter-foot">
+              <span>Likely coverage, not guaranteed recall.</span>
+              <button class="more-questions" id="more-questions" type="button">Show four more</button>
+            </div>
+          </section>
+          <div class="composer-wrap">
           <div id="hero-slot"></div>
+          </div>
         </div>
       </div>`;
     dock.hidden = true;
     mountComposer($("hero-slot"));
+    wireStarters();
     focusInput();
+  }
+
+  function wireStarters() {
+    const topic = $("starter-topic");
+    topic.addEventListener("change", () => {
+      state.starterTopic = topic.value;
+      state.starterOffset = 0;
+      renderStarterQuestions();
+    });
+    $("more-questions").addEventListener("click", () => {
+      state.starterOffset = (state.starterOffset + 4) % STARTER_TOPICS[state.starterTopic].length;
+      renderStarterQuestions();
+    });
+    renderStarterQuestions();
+  }
+
+  function renderStarterQuestions() {
+    const list = $("starter-questions");
+    if (!list) return;
+    const questions = STARTER_TOPICS[state.starterTopic];
+    const visible = Array.from({ length: 4 }, (_, index) => questions[(state.starterOffset + index) % questions.length]);
+    list.replaceChildren(...visible.map((question) => {
+      const button = document.createElement("button");
+      button.className = "starter-question";
+      button.type = "button";
+      button.innerHTML = `<span></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>`;
+      button.querySelector("span").textContent = question;
+      button.setAttribute("aria-label", `Ask Esme: ${question}`);
+      button.addEventListener("click", () => useStarterQuestion(question));
+      return button;
+    }));
+  }
+
+  function useStarterQuestion(question) {
+    const input = $("input");
+    input.value = question;
+    autogrow();
+    $("send").disabled = false;
+    if (state.modelId) void send();
+    else state.starterSendPending = true;
   }
 
   function renderThread() {
@@ -452,7 +706,7 @@
     } else {
       turn.innerHTML = `
         <div class="answer">
-          <div class="avatar">${state.modelId ? state.modelId.slice(0, 2).toLowerCase() : "lm"}</div>
+          <div class="avatar" aria-hidden="true">${ESME_MARK}</div>
           <div class="prose"></div>
         </div>
         <div class="telemetry"></div>`;
@@ -503,14 +757,13 @@
     else { $("thread").appendChild(turnEl("user", text)); }
 
     renderActiveHistory();
-    $("thread-title").textContent = chat.title;
 
     // assistant turn shell
     const aTurn = turnEl("assistant", "");
     const prose = aTurn.querySelector(".prose");
     const tel = aTurn.querySelector(".telemetry");
     aTurn.querySelector(".avatar").classList.add("live");
-    prose.innerHTML = `<span class="caret"></span>`;
+    prose.textContent = "";
     $("thread").appendChild(aTurn);
     scrollToBottom();
 
@@ -533,7 +786,7 @@
     let acc = "", tokens = 0, start = performance.now(), firstAt = null;
 
     const paint = () => {
-      prose.innerHTML = renderMarkdown(acc) + `<span class="caret"></span>`;
+      prose.innerHTML = renderMarkdown(acc);
       if (firstAt != null && tokens > 0) {
         const secs = (performance.now() - firstAt) / 1000;
         const rate = secs > 0 ? tokens / secs : 0;
@@ -615,6 +868,8 @@
       ? `<rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" stroke="none"/>`
       : `<path d="M12 19V5M5 12l7-7 7 7"/>`;
     send.setAttribute("aria-label", on ? "Stop" : "Send");
+    const quickQuestion = composerEl.querySelector("#quick-question");
+    quickQuestion.disabled = on;
   }
 
   function setBrandLive(intensity) {
@@ -626,21 +881,40 @@
   // ---------- sidebar / history ----------
   function renderActiveHistory() {
     const h = $("history");
-    h.innerHTML = state.chats.length ? `<div class="history-label">Recent</div>` : "";
+    h.replaceChildren();
+    if (!state.chats.length) return;
+
+    const toggle = document.createElement("button");
+    toggle.className = "history-toggle";
+    toggle.type = "button";
+    toggle.setAttribute("aria-controls", "recent-chats");
+    toggle.setAttribute("aria-expanded", String(state.historyExpanded));
+    toggle.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Recent</span>`;
+    toggle.addEventListener("click", () => {
+      state.historyExpanded = !state.historyExpanded;
+      renderActiveHistory();
+    });
+    h.appendChild(toggle);
+
+    const list = document.createElement("div");
+    list.className = "history-list";
+    list.id = "recent-chats";
+    list.hidden = !state.historyExpanded;
     for (const c of state.chats) {
       const b = document.createElement("button");
       b.className = "chat-item" + (c.id === state.activeId ? " active" : "");
       b.textContent = c.title || "Untitled";
-      b.addEventListener("click", () => { state.activeId = c.id; renderThread(); renderActiveHistory(); $("thread-title").textContent = c.title; });
-      h.appendChild(b);
+      b.addEventListener("click", () => { state.activeId = c.id; renderThread(); renderActiveHistory(); });
+      list.appendChild(b);
     }
+    h.appendChild(list);
   }
 
   // ---------- composer wiring ----------
   function wireComposer() {
     const input = composerEl.querySelector("#input");
     const send = composerEl.querySelector("#send");
-    const composer = composerEl.querySelector("#composer");
+    const composer = composerEl;
 
     input.addEventListener("input", () => { autogrow(); if (!state.streaming) send.disabled = !input.value.trim(); });
     input.addEventListener("focus", () => composer.classList.add("focused"));
@@ -649,6 +923,23 @@
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); state.streaming ? stopStream() : window.__send(); }
     });
     send.addEventListener("click", () => state.streaming ? stopStream() : window.__send());
+
+    const quickQuestion = composerEl.querySelector("#quick-question");
+    for (const [topic, questions] of Object.entries(STARTER_TOPICS)) {
+      const group = document.createElement("optgroup");
+      group.label = topic;
+      for (const question of questions) {
+        const option = document.createElement("option");
+        option.value = question;
+        option.textContent = question;
+        group.appendChild(option);
+      }
+      quickQuestion.appendChild(group);
+    }
+    quickQuestion.addEventListener("change", () => {
+      if (quickQuestion.value) useStarterQuestion(quickQuestion.value);
+      quickQuestion.value = "";
+    });
 
     // params popover
     const pop = composerEl.querySelector("#popover");
@@ -690,11 +981,19 @@
   function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3200); }
 
   $("new-chat").addEventListener("click", newChat);
-  $("rail-toggle").addEventListener("click", () => app.classList.toggle("rail-collapsed"));
-  $("rail-open").addEventListener("click", () => { if (window.innerWidth <= 820) app.classList.toggle("rail-open"); else app.classList.toggle("rail-collapsed"); });
+  function setRailOpen(open) {
+    if (window.innerWidth <= 820) app.classList.toggle("rail-open", open);
+    else app.classList.toggle("rail-collapsed", !open);
+  }
+  $("rail-toggle").addEventListener("click", () => setRailOpen(false));
+  $("rail-open").addEventListener("click", () => {
+    const open = window.innerWidth <= 820 ? !app.classList.contains("rail-open") : true;
+    setRailOpen(open);
+  });
   $("model-foot").addEventListener("click", () => { const p = composerEl?.querySelector("#params-btn"); p?.click(); });
 
   // ---------- boot ----------
+  $("model-glyph").innerHTML = ESME_MARK;
   app.classList.remove("rail-collapsed"); // open by default on desktop
   if (window.innerWidth <= 820) app.classList.add("rail-collapsed");
   renderActiveHistory();
