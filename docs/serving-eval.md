@@ -62,7 +62,13 @@ Server-wide controls exposed by `python -m llm_infer.serve`:
 - `--prefill-chunk-size N`: cache at most `N` prompt tokens per prefill step.
 - `--decode-window-size N`: decode steps per EOS/stop host sync for all-greedy batches;
   `1` restores the classic per-step decode path.
-- `--prompt-lookup-speculative`: enable prompt-lookup speculative decode when supported.
+- `--prompt-lookup-speculative` / `--no-prompt-lookup-speculative`: tri-state; auto is on
+  for non-CUDA serving where the backend supports it, off on CUDA.
+- `--prefix-cache` / `--no-prefix-cache`: cross-turn prefix reuse of finished requests'
+  prompt KV; auto is on for non-CUDA bundle backends, off on CUDA.
+- `--device` / `--dtype` / `--attention-backend`: `auto` resolves locally to cpu + fp16 +
+  `torch_sdpa` (the startup line labels any non-fp32 config experimental against the cpu
+  fp32 reference); explicit values always win.
 
 Per-request HTTP controls:
 
