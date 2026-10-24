@@ -39,7 +39,7 @@ Two rules apply to every entry:
 | 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
-| 19 | What does removing the per-step `plan()` sync buy? | Rule failed as written (underpowered); grouped faster in all 6 pilot rows; the first version raced a FlashInfer buffer | Confirmatory run registered |
+| 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -818,7 +818,38 @@ applies the rule to both records, so no row is judged by eye.
 - **Predictions:** grouped batch 1 and 8 gain 2–4%, and grouped batch 64 gains 3–12%, depending on
   host speed. Every piecewise and compiled interval includes 0.
 
-**Confirmatory result.** Pending.
+**Confirmatory result.** The merge gate passed, so the fix ships. Two A100 PCIe (300 W)
+containers, 11 rounds per row, judged by `scripts/judge_host_plan_ab.py`. Parity is exact in all 18
+rows, no row regresses, and no interval is wide enough to count as inconclusive.
+
+| Config | Batch | Container 1 | Container 2 | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| Grouped | 1 | −2.9% [−3.1, −2.8] | −2.5% [−2.6, −2.5] | Qualified gain, **−2.5%** |
+| Grouped | 8 | −1.8% [−2.2, −1.7] | −1.6% [−1.6, −1.6] | Qualified gain, **−1.6%** |
+| Grouped | 64 | −4.6% [−4.7, −4.5] | −3.8% [−3.8, −3.7] | Qualified gain, **−3.8%** |
+| Piecewise | 1 | −3.8% [−3.9, −3.7] | −3.7% [−3.8, −3.4] | Reported |
+| Piecewise | 8 | −2.6% [−2.7, −2.6] | −2.4% [−2.9, −2.2] | Reported |
+| Piecewise | 64 | −7.7% [−7.8, −7.5] | −7.1% [−7.2, −7.0] | Reported |
+| Compiled | 1 | −0.6% [−0.9, −0.4] | −0.5% [−0.7, −0.4] | Reported |
+| Compiled | 8 | −0.8% [−1.8, −0.4] | −0.5% [−0.7, −0.1] | Reported |
+| Compiled | 64 | −0.5% [−0.6, −0.3] | −0.3% [−0.7, −0.1] | Reported |
+
+(Median paired change in ms per step, host against device metadata, with 95% bootstrap intervals;
+negative is faster.)
+
+- **Grouped graphs, the HTTP-server default, gain 1.6–3.8%,** a qualified relative result.
+- **Two of three grouped predictions held.** Batch 1 (2.5%) and batch 64 (3.8%) fall in their
+  predicted ranges. Batch 8 (1.6%) falls just below 2–4%.
+- **"Every piecewise and compiled interval includes 0" was wrong, in the favorable direction.**
+  Every interval sits below 0, and piecewise gains 2.4–7.7%. Under the registered rule these rows
+  are reported, not claimed.
+- **Eleven paired rounds fixed the pilot's noise problem.** The widest interval here is 1.4
+  points, against pilot intervals of up to 28 points from five rounds.
+- **Limit:** both containers landed on the same host class (Intel family 6, model 106). The
+  result does not cover other host classes.
+
+Records: [`assets/esme-decode-host-plan-ab-confirm-1.json`](../assets/esme-decode-host-plan-ab-confirm-1.json),
+[`assets/esme-decode-host-plan-ab-confirm-2.json`](../assets/esme-decode-host-plan-ab-confirm-2.json).
 
 Records (pilot): [`assets/esme-decode-host-plan-ab-pilot-sxm4.json`](../assets/esme-decode-host-plan-ab-pilot-sxm4.json),
 [`assets/esme-decode-host-plan-ab-pilot-pcie.json`](../assets/esme-decode-host-plan-ab-pilot-pcie.json).
