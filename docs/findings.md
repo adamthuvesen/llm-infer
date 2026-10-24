@@ -37,7 +37,8 @@ Two rules apply to every entry:
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
 | 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; raw wall does not follow | Not shipped; see 16 |
 | 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
-| 17 | Is the compiled arm host-bound or GPU-bound? | Pending; predictions registered before the run | — |
+| 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
+| 18 | Do grouped graphs still pay in the server? | +2.5% to +12.3% on greedy; raw timing | Keep the server default |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -362,7 +363,8 @@ vLLM itself measured 2–27% faster on the new host.
   fixed-length A/B measured +29.8% at batch 1. A plausible cause is the native-GQA decode change in
   PR #27, which removed per-layer eager KV expansion between graph segments. That eager work is
   what grouped graphs absorbed. This is a hypothesis, not a measurement. The HTTP-server default
-  needs a fresh serving A/B before anyone relies on its +18% claim.
+  needed a fresh serving A/B before anyone relied on its +18% claim. Entry 18 ran it: +12.3% at
+  batch 1.
 
 **Limits.**
 
@@ -625,14 +627,91 @@ instrumentation is too costly, and the question stays open.
   that arm as 91% GPU-busy.
 - **Regions:** an average graph-replay call above 200 µs means a launch blocks on the host.
 
-**Result.** Pending.
+**Result.** The gate failed on its first condition, so entry 15's question stays open. This
+container was an A100-SXM4 (500 W). Entries 15 and 16 ran on A100 PCIe. Here the compiled arm was
+faster, not slower (raw timing, no speed claim):
+
+| Pass (ms per token step) | Eager | Compiled |
+| --- | ---: | ---: |
+| Uninstrumented wall | 5.105 | 3.100 |
+| `issue` overhead vs uninstrumented | +0.01% | −0.03% |
+| Host issue time / wall | 99.6% | 100.6% |
+| `Event.synchronize` | 0.018 | 0.002 |
+
+Every instrumented pass added at most 0.5% to wall, so the method is cheap enough to repeat on a
+PCIe host.
+
+**Outside the gate: the planner syncs on every step.** The `regions` pass found where the eager
+arm's wait hides. It is not in `Event.synchronize`. It is in FlashInfer's `plan()`:
+
+| Region (ms per token step) | Eager | Compiled | Calls per step |
+| --- | ---: | ---: | ---: |
+| FlashInfer `plan()` | 2.297 | 0.256 | 1 |
+| Eager attention | 2.417 | 2.493 | 30 |
+| Graph replay | 0.178 | 0.195 | 31 |
+| Window open | 0.027 | 0.021 | 0.13 |
+
+FlashInfer 0.6.14's `BatchDecodeWithPagedKVCacheWrapper.plan()` copies `indptr` and
+`last_page_len` to the CPU. The engine passed device tensors, so every call was a blocking
+device-to-host copy. The host waited there for the previous step's GPU work to drain. This is why
+the eager arm's host issue time was about 100% of wall and the third prediction failed: the wait
+sat inside `engine.step()`, not in the window flush. The compiled arm's GPU work drains sooner, so
+the same call waited only 0.26 ms. What remains is host time for the 30 eager attention regions:
+about 2.5 ms per step, or 83 µs per layer. On this host that is the floor for a compiled batch-1
+step.
+
+Both consequences are untested. Host-side metadata removes the sync, which lets the host issue
+step n+1 while the GPU runs step n. Capturing attention inside graphs removes most of the 2.5 ms.
+Grouped graphs already do that, which is consistent with entry 18's batch-1 gain.
+
+Record: [`assets/esme-decode-host-timeline.json`](../assets/esme-decode-host-timeline.json).
+Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-timeline --batch-sizes 1`.
+
+## 18. Grouped graphs in the HTTP server, rerun
+
+**Question.** Do grouped graphs still pay in the HTTP server? Entry 7's serving A/B predates
+PR #27, and the raw-engine harness of entries 12 and 13 showed no gain.
+
+**Method.** One A100-SXM4 container (400 W). Streaming requests over localhost HTTP, greedy and
+seeded sampled workloads, batch 1, 8, and 64, 128 new tokens, 2 warmups, and 5 measured runs per
+row. Graph capture for batch sizes 1 to 256 ran before timing. The piecewise arm ran first, then
+the grouped arm.
+
+**Result** (tok/s, raw timing):
+
+| Workload | Batch | Piecewise | Grouped | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Greedy | 1 | 158.2 | 177.6 | +12.3% |
+| Greedy | 8 | 978.2 | 1,002.7 | +2.5% |
+| Greedy | 64 | 3,292.0 | 3,526.9 | +7.1% |
+| Sampled | 1 | 136.0 | 147.7 | +8.6% |
+| Sampled | 8 | 769.2 | 760.6 | −1.1% |
+| Sampled | 64 | 1,659.9 | 2,245.9 | +35.3% |
+
+Every row passed its reference gate. Greedy rows match the fp32 oracle: exact at batch 1, and
+`accepted_numerical` at batch 8 and 64 with the same step-9 tie in both arms. Sampled rows pass
+same-shape replay. The record has no direct parity between the arms, so the changes are raw
+timing, not qualified A/B ratios. At greedy batch 1 both arms are exact against one oracle, so
+their tokens are identical.
+
+The sampled batch-64 row is unexplained. The piecewise arm's sampled row is 2.0x slower than its
+greedy row, and the grouped arm's is 1.6x slower. One run in a fixed order cannot separate that
+from an order or warm-up effect.
+
+**Decision.** Keep grouped graphs as the HTTP-server CUDA default. The gain is smaller than entry
+7's +18% at batch 1, but it is positive in five of six rows. This entry does not explain why the
+raw-engine harness shows no gain: the harness, load shape, and container all differ.
+
+Record: [`assets/esme-serving-grouped-ab.json`](../assets/esme-serving-grouped-ab.json) (per-token
+inter-token latencies dropped; the full record keeps them). Reproduce:
+`modal run scripts/modal_esme_serving_eval.py --batch-sizes 1,8,64 --measured-runs 5 --grouped-ab`.
 
 ## Open questions
 
-- Why is the compiled arm's uninstrumented step slower when both its host and GPU costs fell?
-  An uninstrumented measurement of host issue time per step separates a host-side cause from a
-  GPU-side one (entry 16).
-- Do grouped graphs still pay anywhere? Entries 12 and 13 show no gain on the current engine. The
-  HTTP serving A/B that justified the server default predates PR #27.
+- Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
+  The entry-17 method is cheap enough to run there.
+- How much does removing the per-step `plan()` sync buy, and how much does capturing attention
+  in graphs buy on top (entry 17)?
+- Is the sampled batch-64 grouped gain real (entry 18)? It needs a repeat with alternating order.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
   than the 8 in the headline pool.
