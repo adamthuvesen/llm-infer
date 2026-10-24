@@ -1,0 +1,167 @@
+{
+  "probe": "decode-host-timeline",
+  "arms": {
+    "eager": [
+      {
+        "batch_size": 1,
+        "passes": [
+          {
+            "pass": "uninstrumented",
+            "walls_s": [
+              0.6483812549999968,
+              0.6482680410000015,
+              0.6487465000000014
+            ],
+            "wall_ms_per_token_step": 5.1053642125984,
+            "host_ms_per_token_step": {},
+            "calls_per_token_step": {}
+          },
+          {
+            "pass": "issue",
+            "walls_s": [
+              0.6487832179999984,
+              0.6483886349999963,
+              0.648470531000001
+            ],
+            "wall_ms_per_token_step": 5.106067173228354,
+            "host_ms_per_token_step": {
+              "engine_step": 5.105565834645616,
+              "event_synchronize": 0.01836231496056678
+            },
+            "calls_per_token_step": {
+              "engine_step": 0.13385826771653545,
+              "event_synchronize": 0.12598425196850394
+            },
+            "host_issue_ms_per_token_step": 5.087203519685049,
+            "host_issue_fraction_of_wall": 0.9963056393691394,
+            "overhead_vs_uninstrumented": 0.00013769059379131754
+          },
+          {
+            "pass": "regions",
+            "walls_s": [
+              0.6491252650000021,
+              0.6490947710000015,
+              0.6486951089999948
+            ],
+            "wall_ms_per_token_step": 5.110982448818909,
+            "host_ms_per_token_step": {
+              "open_window": 0.0265322834644487,
+              "flashinfer_plan": 2.297291853018467,
+              "graph_replay": 0.17824575590592567,
+              "eager_attention": 2.416912509186584,
+              "engine_step": 5.108947133858309,
+              "event_synchronize": 0.017670097112954267
+            },
+            "calls_per_token_step": {
+              "open_window": 0.12598425196850394,
+              "flashinfer_plan": 1.0,
+              "graph_replay": 31.0,
+              "eager_attention": 30.0,
+              "engine_step": 0.13385826771653545,
+              "event_synchronize": 0.12598425196850394
+            },
+            "host_issue_ms_per_token_step": 5.091277036745355,
+            "host_issue_fraction_of_wall": 0.9961444962351401,
+            "overhead_vs_uninstrumented": 0.0011004574769895026
+          }
+        ]
+      }
+    ],
+    "compiled": [
+      {
+        "batch_size": 1,
+        "passes": [
+          {
+            "pass": "uninstrumented",
+            "walls_s": [
+              0.39366256200000294,
+              0.394294857999995,
+              0.3925639749999874
+            ],
+            "wall_ms_per_token_step": 3.0997052125984483,
+            "host_ms_per_token_step": {},
+            "calls_per_token_step": {}
+          },
+          {
+            "pass": "issue",
+            "walls_s": [
+              0.4021232999999995,
+              0.3931233929999962,
+              0.3935598070000026
+            ],
+            "wall_ms_per_token_step": 3.0988961181102566,
+            "host_ms_per_token_step": {
+              "engine_step": 3.119360734907993,
+              "event_synchronize": 0.0022422729659373236
+            },
+            "calls_per_token_step": {
+              "engine_step": 0.13385826771653545,
+              "event_synchronize": 0.12598425196850394
+            },
+            "host_issue_ms_per_token_step": 3.1171184619420558,
+            "host_issue_fraction_of_wall": 1.0058802693402034,
+            "overhead_vs_uninstrumented": -0.00026102304338593285
+          },
+          {
+            "pass": "regions",
+            "walls_s": [
+              0.4062221269999924,
+              0.39527685400000223,
+              0.3956417499999958
+            ],
+            "wall_ms_per_token_step": 3.115289370078707,
+            "host_ms_per_token_step": {
+              "open_window": 0.021292401574855284,
+              "flashinfer_plan": 0.2559696430444524,
+              "graph_replay": 0.19530486876254366,
+              "eager_attention": 2.492535238843219,
+              "engine_step": 3.141223317585233,
+              "event_synchronize": 0.001665577427971355
+            },
+            "calls_per_token_step": {
+              "open_window": 0.12598425196850394,
+              "flashinfer_plan": 1.0,
+              "graph_replay": 31.0,
+              "eager_attention": 30.0,
+              "engine_step": 0.13385826771653545,
+              "event_synchronize": 0.12598425196850394
+            },
+            "host_issue_ms_per_token_step": 3.1395577401572616,
+            "host_issue_fraction_of_wall": 1.0077900853486177,
+            "overhead_vs_uninstrumented": 0.005027625664827173
+          }
+        ]
+      }
+    ]
+  },
+  "effect_reproduces": false,
+  "gpu": {
+    "name": "NVIDIA A100-SXM4-80GB",
+    "clocks_sm": "1410 MHz",
+    "clocks_max_sm": "1410 MHz",
+    "power_limit": "500.00 W",
+    "memory_total": "81920 MiB"
+  },
+  "versions": {
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "transformers": "5.13.0",
+    "flash_attn": "2.8.3.post1",
+    "vllm": "absent",
+    "numpy": "2.4.6"
+  },
+  "config": {
+    "command": "host-timeline",
+    "model": "Esme-214M-Chat",
+    "batch_sizes": [
+      1
+    ],
+    "max_new_tokens": 128,
+    "warmup": 6,
+    "iters": 3,
+    "backend": "comparison (bf16)",
+    "reference": "none (diagnostic attribution only, never a speed claim)",
+    "repro_command": "modal run scripts/modal_esme_decode_profile.py --command host-timeline --batch-sizes 1",
+    "note": "Produced before the host-timeline fix: six warmup decodes per arm, and host_ms_per_token_step is the mean over the three runs while wall_ms_per_token_step is their median, so host_issue_fraction_of_wall can exceed 1. Compare host time to the mean of walls_s instead."
+  }
+}

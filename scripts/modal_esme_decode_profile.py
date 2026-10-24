@@ -22,6 +22,7 @@ bf16 CUDA Esme attention path, greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8
     modal run scripts/modal_esme_decode_profile.py --command fusion-probe --batch-sizes 1,8
     modal run scripts/modal_esme_decode_profile.py --command timeline --batch-sizes 1
+    modal run scripts/modal_esme_decode_profile.py --command host-timeline --batch-sizes 1
 
 ``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
 probe, launch counts, and the oracle-gated same-GPU ablation across the eager window and
@@ -30,10 +31,12 @@ the manual piecewise CUDA-graph runner.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import math
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import modal
@@ -1946,6 +1949,62 @@ def roofline_report(batch_sizes: list[int]) -> str:
     )
 
 
+@contextlib.contextmanager
+def _compiled_elementwise() -> Iterator[None]:
+    """Swap ``rms_norm`` and ``apply_rope`` for ``torch.compile`` versions in the model modules.
+
+    The decode graphs and the bundle model look both names up as module globals at call time, so
+    replacing them before the model loads routes every call (and every graph capture) through
+    the compiled versions. The originals come back on exit, before any fp32 oracle runs.
+    """
+    import torch
+
+    import llm_infer.model.decode_graph as decode_graph_module
+    import llm_infer.model.pretrain_bundle as bundle_module
+    from llm_infer.model import rope_utils
+
+    originals = (bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm)
+    compiled_rms_norm = torch.compile(rope_utils.rms_norm, dynamic=True)
+    bundle_module.rms_norm = compiled_rms_norm
+    bundle_module.apply_rope = torch.compile(rope_utils.apply_rope, dynamic=True)
+    decode_graph_module.rms_norm = compiled_rms_norm
+    try:
+        yield
+    finally:
+        bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm = originals
+
+
+def _load_bf16_with_graphs(capture_sizes: tuple[int, ...], *, warm: bool) -> tuple[object, float]:
+    """Load the bf16 bundle and capture piecewise decode graphs at ``capture_sizes``.
+
+    ``warm`` runs every decode shape on the eager path first, so a compiled arm does most of
+    its compilation before capture; capture's own warmup runs each segment before recording it.
+    """
+    import torch
+
+    from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    if warm:
+        for size in capture_sizes:
+            engine = InferenceEngine(
+                runtime.model,
+                block_size=BLOCK_SIZE,
+                num_blocks=size * 4 + 4,
+                device="cuda",
+                capabilities=runtime.capabilities,
+            )
+            for req in build_requests(runtime.tokenizer, size):
+                engine.add_request(Request(req.request_id, list(req.prompt_ids), 16, frozenset()))
+            engine.run()
+    return runtime, enable_decode_graphs_if_cuda(runtime.model, capture_sizes)
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -1964,17 +2023,12 @@ def fusion_probe(batch_sizes: list[int]) -> str:
     """
     import torch
 
-    import llm_infer.model.decode_graph as decode_graph_module
-    import llm_infer.model.pretrain_bundle as bundle_module
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.esme_paged import build_requests
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
     from llm_infer.benchmarks.reference_policy import normalized_outputs_match
-    from llm_infer.model import rope_utils
     from llm_infer.model.decode import greedy_decode
-    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
@@ -1984,47 +2038,18 @@ def fusion_probe(batch_sizes: list[int]) -> str:
         raise RuntimeError(f"no spec HBM bandwidth recorded for GPU {gpu.get('name')!r}")
     capture_sizes = tuple(sorted(set(batch_sizes)))
 
-    def load_with_graphs(warm: bool) -> tuple[object, float]:
-        runtime = load_model_runtime(
-            "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
-        )
-        if warm:
-            # Run every decode shape on the eager path first, so most compilation happens
-            # before capture; capture's own warmup runs each segment before recording it.
-            for size in capture_sizes:
-                requests = build_requests(runtime.tokenizer, size)
-                engine = InferenceEngine(
-                    runtime.model,
-                    block_size=BLOCK_SIZE,
-                    num_blocks=size * 4 + 4,
-                    device="cuda",
-                    capabilities=runtime.capabilities,
-                )
-                for req in requests:
-                    engine.add_request(
-                        Request(req.request_id, list(req.prompt_ids), 16, frozenset())
-                    )
-                engine.run()
-        return runtime, enable_decode_graphs_if_cuda(runtime.model, capture_sizes)
-
     arms: dict[str, dict] = {}
     outputs: dict[str, dict[int, dict[str, list[int]]]] = {}
-    runtime, capture_s = load_with_graphs(warm=False)
+    runtime, capture_s = _load_bf16_with_graphs(capture_sizes, warm=False)
     rows, outputs["eager"] = _roofline_rows(runtime, batch_sizes, peak_bytes_per_s)
     arms["eager"] = {"rows": rows, "capture_s": capture_s}
     tokenizer = runtime.tokenizer
     del runtime
     torch.cuda.empty_cache()
 
-    originals = (bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm)
-    compiled_rms_norm = torch.compile(rope_utils.rms_norm, dynamic=True)
-    compiled_apply_rope = torch.compile(rope_utils.apply_rope, dynamic=True)
-    bundle_module.rms_norm = compiled_rms_norm
-    bundle_module.apply_rope = compiled_apply_rope
-    decode_graph_module.rms_norm = compiled_rms_norm
-    try:
+    with _compiled_elementwise():
         compile_start = time.perf_counter()
-        runtime, capture_s = load_with_graphs(warm=True)
+        runtime, capture_s = _load_bf16_with_graphs(capture_sizes, warm=True)
         compile_and_capture_s = time.perf_counter() - compile_start
         rows, outputs["compiled"] = _roofline_rows(runtime, batch_sizes, peak_bytes_per_s)
         arms["compiled"] = {
@@ -2034,8 +2059,6 @@ def fusion_probe(batch_sizes: list[int]) -> str:
         }
         del runtime
         torch.cuda.empty_cache()
-    finally:
-        bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm = originals
 
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -2272,6 +2295,208 @@ def timeline_trace(batch_sizes: list[int]) -> str:
     )
 
 
+HOST_TIMELINE_REGIONS = (
+    ("graph_replay", "runner", "_run_segment"),
+    ("eager_attention", "runner", "_attention_eager"),
+    ("flashinfer_plan", "backend", "plan_decode_batch_paged"),
+    ("open_window", "model", "open_decode_window"),
+)
+
+
+def _host_timeline_row(runtime, size: int) -> dict:
+    """The three host-timeline passes for one batch size on one persistent engine."""
+    from collections import defaultdict
+
+    import torch
+
+    from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.serving import InferenceEngine, Request
+
+    token_steps = ROOFLINE_NEW_TOKENS - 1
+    runs = MEASURED_ITERS
+    requests = build_requests(runtime.tokenizer, size)
+    engine = InferenceEngine(
+        runtime.model,
+        block_size=BLOCK_SIZE,
+        num_blocks=size * (ROOFLINE_NEW_TOKENS // BLOCK_SIZE + 2) + 4,
+        device="cuda",
+        capabilities=runtime.capabilities,
+    )
+    # Host totals are kept per run, so each pass reports the host time of the same run its
+    # median wall comes from, not a mean that one slow run can push above wall.
+    run_totals: list[dict[str, float]] = []
+    run_calls: list[dict[str, int]] = []
+    active = {"on": False}
+
+    def timed(target: object, name: str, bucket: str) -> None:
+        original = getattr(target, name)
+
+        def measured(*args: object, **kwargs: object) -> object:
+            if not active["on"]:
+                return original(*args, **kwargs)
+            start = time.perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                run_totals[-1][bucket] += time.perf_counter() - start
+                run_calls[-1][bucket] += 1
+
+        setattr(target, name, measured)
+
+    def decode_runs(count: int = runs) -> list[float]:
+        walls: list[float] = []
+        for _ in range(count):
+            run_totals.append(defaultdict(float))
+            run_calls.append(defaultdict(int))
+            for req in requests:
+                engine.add_request(
+                    Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
+                )
+            engine.step()
+            torch.cuda.synchronize()
+            active["on"] = True
+            start = time.perf_counter()
+            while engine.scheduler.has_work():
+                engine.step()
+            torch.cuda.synchronize()
+            walls.append(time.perf_counter() - start)
+            active["on"] = False
+        return walls
+
+    def summarize(pass_name: str, walls: list[float]) -> dict:
+        median_run = sorted(range(len(walls)), key=walls.__getitem__)[len(walls) // 2]
+        wall_ms = walls[median_run] * 1000.0 / token_steps
+        totals, calls = run_totals[-len(walls) :][median_run], run_calls[-len(walls) :][median_run]
+        per_step = {name: total * 1000.0 / token_steps for name, total in totals.items()}
+        row: dict[str, object] = {
+            "pass": pass_name,
+            "walls_s": walls,
+            "median_run": median_run,
+            "wall_ms_per_token_step": wall_ms,
+            "host_ms_per_token_step": per_step,
+            "calls_per_token_step": {name: count / token_steps for name, count in calls.items()},
+        }
+        if "engine_step" in per_step:
+            issue = per_step["engine_step"] - per_step.get("event_synchronize", 0.0)
+            row["host_issue_ms_per_token_step"] = issue
+            row["host_issue_fraction_of_wall"] = issue / wall_ms
+        return row
+
+    decode_runs(count=2)
+    passes = [summarize("uninstrumented", decode_runs())]
+    original_synchronize = torch.cuda.Event.synchronize
+
+    def timed_synchronize(event: object) -> object:
+        if not active["on"]:
+            return original_synchronize(event)
+        start = time.perf_counter()
+        try:
+            return original_synchronize(event)
+        finally:
+            run_totals[-1]["event_synchronize"] += time.perf_counter() - start
+            run_calls[-1]["event_synchronize"] += 1
+
+    targets = {
+        "runner": runtime.model.decode_graphs,
+        "backend": runtime.model.backend,
+        "model": runtime.model,
+    }
+    torch.cuda.Event.synchronize = timed_synchronize
+    try:
+        timed(engine, "step", "engine_step")
+        passes.append(summarize("issue", decode_runs()))
+        for bucket, target_name, method in HOST_TIMELINE_REGIONS:
+            timed(targets[target_name], method, bucket)
+        passes.append(summarize("regions", decode_runs()))
+    finally:
+        torch.cuda.Event.synchronize = original_synchronize
+        # The region timers wrap shared model objects; drop them so the next batch size and
+        # arm start unwrapped.
+        for _, target_name, method in HOST_TIMELINE_REGIONS:
+            if method in vars(targets[target_name]):
+                delattr(targets[target_name], method)
+    base = passes[0]["wall_ms_per_token_step"]
+    for row in passes[1:]:
+        row["overhead_vs_uninstrumented"] = row["wall_ms_per_token_step"] / base - 1
+    issue_row = passes[1]
+    print(
+        f"[host-timeline] b{size}: wall {base:.3f} ms/step; issue pass wall "
+        f"{issue_row['wall_ms_per_token_step']:.3f}, host issue "
+        f"{issue_row['host_issue_ms_per_token_step']:.3f} "
+        f"({issue_row['host_issue_fraction_of_wall']:.0%} of wall), sync "
+        f"{issue_row['host_ms_per_token_step'].get('event_synchronize', 0.0):.3f}"
+    )
+    return {"batch_size": size, "passes": passes}
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def host_timeline(batch_sizes: list[int]) -> str:
+    """Host issue time per decode step, eager vs compiled elementwise, without CUPTI.
+
+    Three passes per arm on one persistent engine with a fixed output length:
+
+    * ``uninstrumented``: wall per token step only.
+    * ``issue``: adds two timers, around ``engine.step`` and around ``Event.synchronize`` (the
+      window flush's only explicit wait). Host issue time is step time minus that wait. If it
+      is close to wall, the step is host-bound; if it is far below, the host waits on the GPU.
+    * ``regions``: adds host timers around each graph replay, each eager attention region, each
+      FlashInfer ``plan`` call, and each window open. A call far longer than its work suggests
+      a blocking CUDA call inside it.
+
+    Each instrumented pass reports its own wall, so its overhead against ``uninstrumented`` is
+    visible. Diagnostic only: no reference gate and no speed claim.
+    """
+
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    capture_sizes = tuple(sorted(set(batch_sizes)))
+
+    def measure_arm(runtime) -> list[dict]:
+        rows = []
+        for size in batch_sizes:
+            rows.append(_host_timeline_row(runtime, size))
+            torch.cuda.empty_cache()
+        return rows
+
+    arms: dict[str, list[dict]] = {}
+    runtime, _ = _load_bf16_with_graphs(capture_sizes, warm=False)
+    arms["eager"] = measure_arm(runtime)
+    del runtime
+    torch.cuda.empty_cache()
+    with _compiled_elementwise():
+        runtime, _ = _load_bf16_with_graphs(capture_sizes, warm=True)
+        arms["compiled"] = measure_arm(runtime)
+        del runtime
+        torch.cuda.empty_cache()
+
+    effect_reproduces = {
+        str(eager["batch_size"]): (
+            compiled["passes"][0]["wall_ms_per_token_step"]
+            > eager["passes"][0]["wall_ms_per_token_step"]
+        )
+        for eager, compiled in zip(arms["eager"], arms["compiled"], strict=True)
+    }
+    return json.dumps(
+        {
+            "probe": "decode-host-timeline",
+            "arms": arms,
+            # Per batch size: is the compiled arm's uninstrumented wall above the eager arm's?
+            "effect_reproduces": effect_reproduces,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -2407,12 +2632,13 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "roofline",
         "fusion-probe",
         "timeline",
+        "host-timeline",
     ):
         raise ValueError(
             "command must be 'profile', 'sampled-profile', 'bench', 'ablate', 'capture', "
             "'sync', 'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
             "'four-layer-group-ab', 'four-layer-parity', 'bucket-policy', 'roofline', "
-            "'fusion-probe', or 'timeline', "
+            "'fusion-probe', 'timeline', or 'host-timeline', "
             f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
@@ -2464,6 +2690,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     elif command == "timeline":
         print(f"[esme-decode] nsys timeline: batches {sizes}, eager vs compiled elementwise")
         record = json.loads(timeline_trace.remote(sizes))
+    elif command == "host-timeline":
+        print(f"[esme-decode] host timeline: batches {sizes}, eager vs compiled, no CUPTI")
+        record = json.loads(host_timeline.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
@@ -2488,6 +2717,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 "bucket-policy",
                 "roofline",
                 "fusion-probe",
+                "host-timeline",
             )
             else MAX_NEW_TOKENS
         ),
@@ -2504,6 +2734,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 "bucket-policy",
                 "roofline",
                 "fusion-probe",
+                "host-timeline",
             )
             else WARMUP_ITERS
         ),
@@ -2536,7 +2767,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             "eager/compiled parity"
             if command == "fusion-probe"
             else "none (diagnostic attribution only, never a speed claim)"
-            if command in ("roofline", "timeline")
+            if command in ("roofline", "timeline", "host-timeline")
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"
         ),
         "repro_command": (
