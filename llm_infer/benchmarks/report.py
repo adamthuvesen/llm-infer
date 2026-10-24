@@ -14,8 +14,11 @@ Reference gating and public tok/s eligibility live in
 
 from __future__ import annotations
 
+import os
+import platform
 import subprocess
 from collections.abc import Iterable
+from pathlib import Path
 
 
 def normalize_at_eos(token_ids: Iterable[int], eos_token_ids: frozenset[int]) -> list[int]:
@@ -38,7 +41,11 @@ def total_output_tokens(outputs: dict[str, list[int]], eos_token_ids: frozenset[
 
 
 def gpu_snapshot() -> dict[str, object]:
-    """GPU name, SM/max clocks, power cap, memory — best-effort from nvidia-smi."""
+    """GPU name, SM/max clocks, power cap, memory, and host CPU — best-effort.
+
+    The host CPU matters: a batch-1 decode step spends most of its time issuing work, and
+    A100 containers on different host classes differ at batch 1 (docs/findings.md entry 18).
+    """
     fields = "name,clocks.sm,clocks.max.sm,power.limit,memory.total"
     try:
         out = subprocess.run(
@@ -52,7 +59,21 @@ def gpu_snapshot() -> dict[str, object]:
         return {"error": f"nvidia-smi unavailable: {exc}"}
     values = [v.strip() for v in out.splitlines()[0].split(",")]
     keys = ["name", "clocks_sm", "clocks_max_sm", "power_limit", "memory_total"]
-    return dict(zip(keys, values, strict=False))
+    snapshot: dict[str, object] = dict(zip(keys, values, strict=False))
+    snapshot["host_cpu"] = _host_cpu_model()
+    snapshot["host_cpu_count"] = os.cpu_count()
+    return snapshot
+
+
+def _host_cpu_model() -> str:
+    try:
+        lines = Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return platform.processor() or "unknown"
+    return next(
+        (line.split(":", 1)[1].strip() for line in lines if line.startswith("model name")),
+        "unknown",
+    )
 
 
 def library_versions() -> dict[str, str]:
