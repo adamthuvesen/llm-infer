@@ -14,6 +14,31 @@ from dataclasses import dataclass
 import torch
 
 
+class PlanCopyFence:
+    """Keep FlashInfer's pinned plan-info buffer alive until the GPU has copied it.
+
+    ``plan()`` writes its plan info into one pinned host buffer and queues an async copy to the
+    device. With device-side page metadata, ``plan()`` first read ``indptr`` back to the CPU,
+    which drained the GPU and so made the reuse safe. With host-side metadata a decode window
+    can run steps ahead, and the next ``plan()`` could overwrite the buffer before the queued
+    copy ran: a kernel then read another step's plan and never finished (docs/findings.md
+    entry 19). Waiting on an event recorded after the previous ``plan()`` waits only until the
+    GPU reaches that copy, not until it finishes the step.
+    """
+
+    def __init__(self) -> None:
+        self._copied: torch.cuda.Event | None = None
+
+    def before_plan(self) -> None:
+        if self._copied is not None:
+            self._copied.synchronize()
+
+    def after_plan(self, device: torch.device) -> None:
+        if device.type == "cuda":
+            self._copied = torch.cuda.Event()
+            self._copied.record()
+
+
 @dataclass(frozen=True)
 class FlashInferDecodeShape:
     num_qo_heads: int
