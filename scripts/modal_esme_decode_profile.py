@@ -41,6 +41,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -2498,7 +2499,6 @@ def host_timeline(batch_sizes: list[int]) -> str:
 
 
 HOST_PLAN_ROUNDS = 5
-STALL_DUMP_S = 300
 HOST_PLAN_METADATA = ("device", "host")
 
 
@@ -2617,6 +2617,7 @@ def _host_plan_rows(
             f"{row['device']['wall_ms_per_token_step']:.3f} -> host "
             f"{row['host']['wall_ms_per_token_step']:.3f} ms/step"
         )
+        stall_guard.progress()
         del engine
         torch.cuda.empty_cache()
     return rows, outputs
@@ -2637,9 +2638,6 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     entry 17). Fixed 128-token greedy output, EOS ignored. Every arm gates against the fp32
     oracle, and the record stores direct device/host parity per configuration and batch.
     """
-    import faulthandler
-    import sys
-
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2649,8 +2647,7 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.runtime import load_model_runtime
 
-    # A first run went silent for 50 minutes with no error; a stall now leaves stacks in the log.
-    faulthandler.dump_traceback_later(STALL_DUMP_S, repeat=True, file=sys.stderr)
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     capture_sizes = tuple(sorted(set(batch_sizes)))
@@ -2707,6 +2704,7 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
                 f"[host-plan] {name} b{size}: parity {row['parity_status']}, nontie "
                 f"{row['device']['agreement']['nontie']}/{row['host']['agreement']['nontie']}"
             )
+            stall_guard.progress()
 
     return json.dumps(
         {
