@@ -35,6 +35,7 @@ Two rules apply to every entry:
 | 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
 | 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
+| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; wall does not (b1 +9%, b8 −10%) | Not shipped; the host is the next wall |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -470,7 +471,7 @@ once at the A100's 2.039 TB/s spec bandwidth: 427.9 MB of bf16 weights, plus the
 itself, RoPE with the QK norm, SiLU with the gate multiply) ran as a few kernels instead of
 dozens, most of the 3.7 ms would go. If "other" fell to about 0.7 ms, a batch-1 step would take
 about 2.5 ms, about 400 tok/s against vLLM's 563. That number is an estimate from this profile,
-not a measurement.
+not a measurement. Entry 15 tested it: the kernel count halved, but the step did not get faster.
 
 There is evidence against the easy route. Entry 4's `torch.compile` runner did not lower GPU
 work: 59.9 ms of GPU busy time per pass against 55.2 ms for manual graphs. So Inductor, as
@@ -485,10 +486,62 @@ Only a candidate that does goes on to the usual gate: fp32 reference, then a sam
 Record: [`assets/esme-decode-roofline.json`](../assets/esme-decode-roofline.json).
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8,64`.
 
+## 15. Fusion probe: half the kernels, no faster
+
+**Question.** Entry 14 predicted that fusing the elementwise chains would cut most of the 3.7 ms of
+small kernels and bring batch-1 decode near 400 tok/s. Does it?
+
+**Method.** Two arms in one container, each measured with the entry-14 roofline protocol. The
+`eager` arm is the default path. The `compiled` arm replaces `rms_norm` and `apply_rope` with
+`torch.compile` versions (no compiler CUDA graphs), compiles every decode shape on the eager path
+first, then captures the usual manual piecewise graphs around the compiled kernels. Both arms are
+gated against the fp32 oracle, which runs with the original functions. A second batch-1 run adds
+host-side counters: graph launches, kernel launches, and the most expensive host operations.
+
+**Result** (A100 80GB PCIe, ms per token step):
+
+| Arm | Batch | Kernel launches | Kernel time | Other kernels | Idle gap | Wall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| eager | 1 | 2,008 | 5.02 | 3.68 | 0.04 | 5.06 |
+| compiled | 1 | 921 | 2.73 | 1.42 | 2.77 | 5.51 |
+| eager | 8 | 2,099 | 6.39 | 4.41 | 0.21 | 6.60 |
+| compiled | 8 | 1,012 | 3.70 | 1.75 | 2.24 | 5.94 |
+
+Both arms have zero non-tie divergences. They resolve some bf16 ties differently, so direct
+parity is `review_required`, not exact.
+
+**Findings.**
+
+- **The kernel-level prediction holds.** Compiling two functions cuts kernel launches per step by
+  54% and kernel time by 45%. RMSNorm becomes one fused Triton reduction instead of about eight
+  kernels.
+- **The wall-time prediction fails.** Batch 1 is 9% slower; a repeat run measured 17% slower.
+  Batch 8 is 10% faster. The idle gap grows by as much as the kernel time falls.
+- **The host did not do more work.** Both arms replay the same 31 graphs and issue the same 156
+  ordinary kernel launches per step, with the same host operations on top. The CPU cost of
+  `cudaGraphLaunch` halves (3.29 to 1.58 ms per step under the profiler), because a graph with
+  fewer nodes is cheaper to launch.
+- **So the GPU was hiding a second wall.** In the eager arm, GPU time (5.0 ms) and host time are
+  nearly balanced, and the GPU is slightly longer. Remove half the GPU time and the step waits on
+  something else. These counters cannot say whether that is host dispatch (the eager attention
+  region, KV-write index math, graph launches) or gaps between graph nodes on the GPU. A timeline
+  trace (Nsight Systems) can separate the two.
+
+**Decision.** Do not ship the compiled path. Entry 14's 400 tok/s estimate assumed the step would
+shrink with GPU time; this probe disproves that assumption. The next measurement is a timeline
+of one eager and one compiled step. Fusion pays only after the second wall moves, and the best
+candidate is the eager per-layer attention region, which holds most of the host operations above.
+
+Records: [`assets/esme-decode-fusion-probe.json`](../assets/esme-decode-fusion-probe.json)
+(batches 1 and 8) and
+[`assets/esme-decode-fusion-probe-host.json`](../assets/esme-decode-fusion-probe-host.json)
+(batch 1 with host counters). Reproduce:
+`modal run scripts/modal_esme_decode_profile.py --command fusion-probe --batch-sizes 1,8`.
+
 ## Open questions
 
-- Does compiled elementwise fusion inside the manual graphs close the batch-1 gap that entry 14
-  predicts?
+- After fusion, is the second wall host dispatch or gaps between graph nodes? A timeline trace of
+  one eager and one compiled step answers it.
 - Do grouped graphs still pay anywhere? Entries 12 and 13 show no gain on the current engine. The
   HTTP serving A/B that justified the server default predates PR #27.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
