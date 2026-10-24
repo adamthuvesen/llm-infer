@@ -901,7 +901,9 @@ is a policy decision, so this entry does not make it.
 
 **Result.** The decision rule keeps the 0.1 bound as it is: the 99.9th-percentile shrink is 0.25,
 and 7 flips have an fp32 gap above 0.1. Three of four predictions held. 130,048 positions per
-comparison on one A100-SXM4, with the row-to-request mapping checked on every batch.
+comparison on one A100-SXM4, with the row-to-request mapping checked on every batch. Each request
+contributes its 127 decode steps. The first generated token comes from prefill, and the recorder
+does not see it, so no claim below covers that token.
 
 | Statistic (logits) | Engine vs fp32 | bf16 recompute vs fp32 | Engine vs bf16 recompute |
 | --- | ---: | ---: | ---: |
@@ -946,13 +948,14 @@ Engine flips by the fp32 top-two margin:
   came from rare large logits. The error builds up through the model's 30 bf16 layers, not in the
   last rounding step.
 - **Divergence from fp32 greedy is normal, not rare.** 544 of the 1,024 prompts flip at least once
-  in 128 tokens. Almost every such flip sits inside the 0.1 tie band, so policy v2 accepts it. At
-  most 7 prompts in 1,024 (0.7%) would reach `review_required`.
+  in their 127 measured decode steps. Almost every such flip sits inside the 0.1 tie band, so
+  policy v2 accepts it. At most 7 prompts in 1,024 (0.7%) would reach `review_required` from a
+  decode step; the prefill token is not measured.
 
 **Proposal for the maintainer (not adopted).** The data supports either option below. Choosing one
 is a policy change, so this entry does not make it.
 
-- **Keep 0.1.** At most 0.7% of 128-token greedy requests would need review, and every observed
+- **Keep 0.1.** At most 0.7% of requests would need review from their decode steps, and every observed
   review case would be a measured near-tie (fp32 gap at most 0.135 on the engine).
 - **Raise the bound to 0.25,** the measured 99.9th-percentile shrink. It would accept all 807
   observed engine flips and all 767 recompute flips. The cost: a real kernel bug whose error stays
