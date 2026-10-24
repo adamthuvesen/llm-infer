@@ -78,8 +78,8 @@
       1
     ],
     "max_new_tokens": 64,
-    "warmup": 1,
-    "iters": 3,
+    "warmup": 3,
+    "iters": 1,
     "backend": "comparison (bf16)",
     "reference": "none (diagnostic attribution only, never a speed claim)",
     "repro_command": "modal run scripts/modal_esme_decode_profile.py --command timeline --batch-sizes 1"

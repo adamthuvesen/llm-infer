@@ -2493,7 +2493,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         ),
         "warmup": (
             3
-            if command == "flashinfer-graph-probe"
+            if command in ("flashinfer-graph-probe", "timeline")
             else 0
             if command == "four-layer-parity"
             else 2
@@ -2504,7 +2504,6 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 "bucket-policy",
                 "roofline",
                 "fusion-probe",
-                "timeline",
             )
             else WARMUP_ITERS
         ),
