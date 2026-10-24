@@ -12,7 +12,8 @@ functions, and the record stores direct token parity. ``scripts/judge_paired_ab.
 rule registered in docs/findings.md.
 
 ``startup`` runs in its own fresh container: one cold ``build_app_from_runtime`` with the server
-defaults, then warm grouped-graph capture at the server buckets for four layers against all 30.
+defaults, then warm engines at the server's cache settings and buckets: no grouped graphs, four
+grouped layers, and all 30.
 
     modal run scripts/modal_esme_fusion_ab.py
     modal run scripts/modal_esme_fusion_ab.py --command startup
@@ -268,7 +269,12 @@ def server_startup() -> str:
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serve import DEFAULT_DECODE_GRAPH_BUCKETS, build_app_from_runtime
+    from llm_infer.serve import (
+        DEFAULT_BLOCK_SIZE,
+        DEFAULT_DECODE_GRAPH_BUCKETS,
+        DEFAULT_NUM_BLOCKS,
+        build_app_from_runtime,
+    )
     from llm_infer.serving import InferenceEngine
 
     stall_guard.arm()
@@ -293,20 +299,26 @@ def server_startup() -> str:
     print(f"[startup] cold build_app_from_runtime: {cold['build_app_s']:.1f} s")
     stall_guard.progress()
 
-    # Warm comparison: the app above owns one engine; each engine here is built and dropped.
-    warm: dict[str, list[dict]] = {"grouped4": [], "full_step": []}
-    layers = {"grouped4": 4, "full_step": runtime.model.num_layers}
+    # Warm comparison at the server's own cache settings. The app above owns one engine; each
+    # engine here is built and dropped. ``none`` has no grouped graphs, so the reserved-memory
+    # difference against it is what grouped capture adds: graphs, their buffers, and the shared
+    # FlashInfer workspace.
+    warm: dict[str, list[dict]] = {"none": [], "grouped4": [], "full_step": []}
+    layers = {"none": None, "grouped4": 4, "full_step": runtime.model.num_layers}
     for repeat in range(STARTUP_REPEATS):
-        for arm in ("grouped4", "full_step") if repeat % 2 == 0 else ("full_step", "grouped4"):
+        order = tuple(warm) if repeat % 2 == 0 else tuple(reversed(warm))
+        for arm in order:
+            torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            reserved_before = torch.cuda.memory_reserved()
             start = time.perf_counter()
             engine = InferenceEngine(
                 runtime.model,
-                block_size=BLOCK_SIZE,
-                num_blocks=4 * max(DEFAULT_DECODE_GRAPH_BUCKETS) + 4,
+                block_size=DEFAULT_BLOCK_SIZE,
+                num_blocks=DEFAULT_NUM_BLOCKS,
                 device="cuda",
                 capabilities=runtime.capabilities,
-                grouped_decode_graphs=True,
+                grouped_decode_graphs=arm != "none",
                 grouped_capture_sizes=DEFAULT_DECODE_GRAPH_BUCKETS,
                 grouped_layers=layers[arm],
             )
@@ -316,19 +328,19 @@ def server_startup() -> str:
                 {
                     "engine_build_s": time.perf_counter() - start,
                     "capture_s": sum(runner.capture_seconds for runner in runners.values()),
-                    "group_memory_bytes": sum(
-                        runner.owned_group_memory_bytes for runner in runners.values()
-                    ),
+                    "reserved_bytes": torch.cuda.memory_reserved() - reserved_before,
                 }
             )
             del engine, runners
-            torch.cuda.empty_cache()
             stall_guard.progress()
     for arm, runs in warm.items():
         print(
-            f"[startup] warm {arm}: capture "
+            f"[startup] warm {arm}: build "
+            + ", ".join(f"{run['engine_build_s']:.1f} s" for run in runs)
+            + "; capture "
             + ", ".join(f"{run['capture_s']:.1f} s" for run in runs)
-            + f"; group memory {runs[-1]['group_memory_bytes'] / 2**20:.0f} MiB"
+            + "; reserved "
+            + ", ".join(f"{run['reserved_bytes'] / 2**20:.0f} MiB" for run in runs)
         )
     return json.dumps(
         {
