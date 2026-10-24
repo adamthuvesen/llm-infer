@@ -44,7 +44,7 @@ Two rules apply to every entry:
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 ||||||| parent of 85a5c95 (feat(bench): prompt-lookup speculation A/B on CUDA, predictions registered)
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Pending; predictions registered before the run | — |
-| 22 | Does prompt-lookup speculation pay on the CUDA engine? | Pending; predictions registered before the run | — |
+| 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: about 3.5x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1067,10 +1067,45 @@ that workload is a qualified gain: exact direct parity on both containers, and a
 bound below 0 on both. Otherwise it stays off, and the timing is reported as raw. The
 identical-stream subset is reported, never claimed.
 
-**Result.** Pending.
+**Result.** The gate failed, and speculation stays off on CUDA. It is about 3.5x slower per
+request on both workloads, in two A100 PCIe (300 W) containers on different host classes (AMD
+family 25 and Intel family 6, model 106).
+
+| Workload | Container 1 | Container 2 | Tokens per verify step | Identical streams |
+| --- | ---: | ---: | ---: | ---: |
+| Open | +311.6% [+270.7, +332.0] | +315.9% [+263.1, +342.4] | 2.01 | 33 of 64 |
+| Grounded | +248.9% [+208.5, +291.2] | +250.8% [+205.8, +276.2] | 2.24 | 32 of 64 |
+
+(Median paired change in request latency, speculative against baseline, with 95% bootstrap
+intervals; positive is slower.)
+
+- **Parity is not exact (held).** About half the prompts' streams diverge between the arms, so
+  neither workload can qualify. Both arms pass the fp32 gate, apart from one baseline row noted
+  below.
+- **Open prompts accept more drafts than predicted (failed).** The prediction was 1.0–1.4 tokens
+  per verify step. The measured 2.01 comes from the model repeating its own output, which prompt
+  lookup finds in the generated history.
+- **Grounded acceptance held:** 2.24 tokens per verify step, inside 1.5–2.5.
+- **Both slowdowns are far larger than predicted** (+249% and +312%, against 10–60%). The cost is
+  the verify step, not the drafts. Dividing the median request time by the verify steps per
+  request gives at most 50–77 ms per verify step, against 5–6 ms per generated token on the
+  graphed baseline, prefill included. One eager verify step costs about ten graphed decode
+  steps. Accepting two tokens per step cannot recover that.
+- **The identical-stream subset agrees (held).** It shows +227% to +273%, the same sign as the
+  full workloads.
+- **One baseline row is `review_required`.** At grounded prompt `esme-066`, step 63, the baseline
+  chose a token 0.119 logits below the fp32 maximum in both containers. That is one of the rare
+  cases above 0.1 that entry 20 measured. It changes no conclusion here.
+
+**Decision.** Speculation stays off on CUDA. For it to compete at batch 1, the verify step needs
+the same treatment as decode: a graphed, planned multi-token path. That is an open question.
+
+Records: [`assets/esme-spec-decode-ab-1.json`](../assets/esme-spec-decode-ab-1.json),
+[`assets/esme-spec-decode-ab-2.json`](../assets/esme-spec-decode-ab-2.json).
 
 ## Open questions
 
+- Can a graphed, planned multi-token verify step make speculation pay on CUDA (entry 22)?
 - Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
   The entry-17 method is cheap enough to run there.
 - How much does capturing attention in graphs buy on top of removing the `plan()` sync (entries
