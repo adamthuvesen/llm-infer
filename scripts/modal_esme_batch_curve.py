@@ -32,6 +32,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -58,7 +59,7 @@ app = modal.App("llm-infer-esme-batch-curve")
 # Same vLLM image recipe as scripts/modal_esme_three_way.py: vLLM pulls its own torch/CUDA
 # stack, so it cannot share the flash image (and therefore cannot share its container).
 vllm_image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.debian_slim(python_version="3.13")
     .pip_install("vllm")
     .env(
         {
@@ -1031,6 +1032,8 @@ def sweep_ladder(
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    # HF's sequential floor at large batch can run many minutes between progress points.
+    stall_guard.arm(limit_s=30 * 60)
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -1135,6 +1138,7 @@ def sweep_ladder(
         floor_iters,
     )
     rows.append(gated_row("hf_sequential", floor_batch, floor_requests, outputs, per_iter))
+    stall_guard.progress()
 
     for size in batch_sizes:
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
@@ -1143,6 +1147,7 @@ def sweep_ladder(
         )
         rows.append(gated_row("hf_batched", size, requests, outputs, per_iter))
         print(f"[ladder] batch={size} hf_batched: median {statistics.median(per_iter):.3f} s")
+        stall_guard.progress()
 
         needed = sum(
             math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
@@ -1184,6 +1189,7 @@ def sweep_ladder(
                 if iteration >= warmup:
                     timings[name].append(time.perf_counter() - start)
                     rung_outputs[name] = result
+                stall_guard.progress()
 
         grouped_runner = engines["+grouped_graphs"][0].grouped_decode_runners[size]
         if grouped_runner.steps_handled == 0:

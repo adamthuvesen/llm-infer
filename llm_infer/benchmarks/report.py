@@ -89,7 +89,7 @@ def library_versions() -> dict[str, str]:
     """Versions of every library whose behavior the numbers depend on."""
     import torch
 
-    versions: dict[str, str] = {"torch": torch.__version__}
+    versions: dict[str, str] = {"python": platform.python_version(), "torch": torch.__version__}
     versions["cuda"] = torch.version.cuda or "none"
     for name in ("transformers", "flash_attn", "vllm", "numpy"):
         try:
