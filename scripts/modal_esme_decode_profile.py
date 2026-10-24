@@ -2478,13 +2478,19 @@ def host_timeline(batch_sizes: list[int]) -> str:
         del runtime
         torch.cuda.empty_cache()
 
-    eager_wall = arms["eager"][0]["passes"][0]["wall_ms_per_token_step"]
-    compiled_wall = arms["compiled"][0]["passes"][0]["wall_ms_per_token_step"]
+    effect_reproduces = {
+        str(eager["batch_size"]): (
+            compiled["passes"][0]["wall_ms_per_token_step"]
+            > eager["passes"][0]["wall_ms_per_token_step"]
+        )
+        for eager, compiled in zip(arms["eager"], arms["compiled"], strict=True)
+    }
     return json.dumps(
         {
             "probe": "decode-host-timeline",
             "arms": arms,
-            "effect_reproduces": compiled_wall > eager_wall,
+            # Per batch size: is the compiled arm's uninstrumented wall above the eager arm's?
+            "effect_reproduces": effect_reproduces,
             "gpu": gpu_snapshot(),
             "versions": library_versions(),
         }
