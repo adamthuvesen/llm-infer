@@ -55,10 +55,10 @@ def measure_serving(
 ) -> str:
     """Run greedy and sampled HTTP rows in one A100 process.
 
-    ``grouped_ab`` measures every row twice in this same container — piecewise-only
-    engines, then engines with the exact-batch grouped runner — so the old-default versus
-    new-default comparison is like-for-like on one GPU. Each row carries a ``grouped``
-    field naming its arm.
+    ``grouped_ab`` measures every row twice in this same container, with piecewise-only
+    engines and with the exact-batch grouped runner, so the old-default versus new-default
+    comparison is like-for-like on one GPU. The arm that runs first alternates from cell to
+    cell. Each row carries a ``grouped`` field naming its arm and a ``run_order`` (0 first).
     """
     import asyncio
 
@@ -88,17 +88,27 @@ def measure_serving(
     capture_s = enable_decode_graphs_if_cuda(runtime.model, CAPTURE_SIZES)
     arms = (False, True) if grouped_ab else (grouped,)
     rows: list[dict[str, object]] = []
-    for arm_grouped in arms:
-        for batch_size in batch_sizes:
-            # Grouped runners are per-engine and exact-batch; capture only this workload's
-            # steady batch so per-workload engine builds stay cheap. Ramp-up windows below
-            # the steady batch fall back to the piecewise buckets, the serving reality.
-            for workload in phase0_http_workloads(
-                batch_size,
-                max_new_tokens=max_new_tokens,
-                grouped_decode_graphs=arm_grouped,
-                grouped_capture_sizes=(batch_size,) if arm_grouped else None,
-            ):
+    for batch_index, batch_size in enumerate(batch_sizes):
+        # Grouped runners are per-engine and exact-batch; capture only this workload's
+        # steady batch so per-workload engine builds stay cheap. Ramp-up windows below
+        # the steady batch fall back to the piecewise buckets, the serving reality.
+        workloads_by_arm = {
+            arm_grouped: list(
+                phase0_http_workloads(
+                    batch_size,
+                    max_new_tokens=max_new_tokens,
+                    grouped_decode_graphs=arm_grouped,
+                    grouped_capture_sizes=(batch_size,) if arm_grouped else None,
+                )
+            )
+            for arm_grouped in arms
+        }
+        for workload_index in range(len(workloads_by_arm[arms[0]])):
+            # Alternate which arm runs first from cell to cell, so container drift or a
+            # second-run warmup benefit cannot land on one arm only.
+            order = arms if (batch_index + workload_index) % 2 == 0 else arms[::-1]
+            for arm_grouped in order:
+                workload = workloads_by_arm[arm_grouped][workload_index]
                 reference_runtime = (
                     oracle_runtime if workload.requests[0].sampling.is_greedy else runtime
                 )
@@ -117,6 +127,7 @@ def measure_serving(
                 )
                 result["batch_size"] = batch_size
                 result["grouped"] = arm_grouped
+                result["run_order"] = order.index(arm_grouped)
                 rows.append(result)
                 metrics = result["metrics"]
                 reference = result["reference"]
