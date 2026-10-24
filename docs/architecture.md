@@ -43,7 +43,7 @@ flowchart TB
         API["AttentionBackend"]
         Naive["torch_naive (fp32 reference)"]
         SDPA["torch_sdpa (CPU default)"]
-        FI["flashinfer_paged (CUDA default)"]
+        FI["flashinfer_paged (CUDA bf16/fp16 default)"]
         Flash["flash_attn_paged"]
     end
 

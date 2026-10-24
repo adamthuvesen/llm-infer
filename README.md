@@ -147,7 +147,8 @@ make check
 `make check` runs lint, format check, types, and the CPU test suite. The slow 3B Qwen reference
 checks are opt-in: `uv run pytest tests/correctness -q -m slow`. `make reproduce` re-derives the
 committed benchmark verdicts without a GPU. GPU benchmarks run on Modal A100s through the
-`scripts/modal_esme_*` harnesses. Each findings entry names its command.
+`scripts/modal_esme_*` harnesses. Findings entries 12 onward name the command that produced
+their record.
 
 ## Documentation
 
