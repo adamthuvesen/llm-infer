@@ -1,15 +1,19 @@
 """Modal A100 three-way benchmark for Esme-214M-Chat: naive HF vs llm_infer vs vLLM.
 
-The primary Esme external-baseline harness. Esme has no public HF/vLLM checkpoint, so
-this harness converts the ``llm_pretrain_dense_v1`` bundle to a ``Qwen3ForCausalLM`` checkpoint
-(``scripts/convert_esme_to_hf.py``). The local ``modal run`` client has no torch, so it only
-uploads the raw bundle files to the repo-scoped Modal volume ``llm-infer-esme-bundles``; the
-torch-importing conversion runs **remotely** in :func:`convert_bundle_to_hf` on ``FLASH_IMAGE`` and
-writes the HF checkpoint back to the volume. Then it runs:
+The HF and llm_infer legs share one container, and vLLM runs in a second, so the two
+containers can land on different A100 hosts. The same-host vLLM comparison in README.md
+(``assets/esme-vllm-same-host.json``) comes from ``scripts/modal_esme_vllm_baseline.py``.
+
+Esme has no public HF/vLLM checkpoint, so this harness converts the ``llm_pretrain_dense_v1``
+bundle to a ``Qwen3ForCausalLM`` checkpoint (``scripts/convert_esme_to_hf.py``). The local
+``modal run`` client has no torch, so it only uploads the raw bundle files to the repo-scoped
+Modal volume ``llm-infer-esme-bundles``; the torch-importing conversion runs **remotely** in
+:func:`convert_bundle_to_hf` on ``FLASH_IMAGE`` and writes the HF checkpoint back to the volume.
+Then it runs:
 
 * ``hf_sequential`` — naive HF ``Qwen3ForCausalLM.generate()`` per request (the floor).
 * ``llm_infer`` — this engine's Esme paged-KV path on the bundle, bf16 on the default CUDA
-  attention backend. Today that is FlashInfer paged decode.
+  attention backend, which is FlashInfer paged decode.
 * ``vllm`` — vLLM offline generate on the converted checkpoint (the ceiling).
 
 Agreement uses reference policy v2 against the fp32 oracle. Raw timing is retained; public tok/s
@@ -22,7 +26,7 @@ in the shared flash CUDA image. Both functions are A100-80GB.
     modal run scripts/modal_esme_three_way.py --command headline  # N=64, 256 tokens, 1+3 iters
 
 ``smoke``/``bench`` cycle the four short DEFAULT_PROMPTS (the cheap oracle-gated regression
-workload); ``headline`` is the published serving shape — 64 chat requests over the wider
+workload); ``headline`` is the larger serving shape: 64 chat requests over the wider
 HEADLINE_PROMPTS pool, up to 256 new tokens each.
 """
 

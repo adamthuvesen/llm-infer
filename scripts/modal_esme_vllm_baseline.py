@@ -1,7 +1,7 @@
 """Same-host A100 comparison: llm_infer and vLLM on the converted Esme checkpoint.
 
-The older Esme comparison starts two Modal GPU functions, so its vLLM and ``llm_infer`` rows
-can land on different A100 hosts. This Phase 0 harness reserves one A100 and launches each
+``scripts/modal_esme_three_way.py`` starts two Modal GPU functions, so its vLLM and ``llm_infer``
+rows can land on different A100 hosts. This harness reserves one A100 and launches each
 system as a fresh child process inside that function. Process exit releases vLLM's CUDA memory,
 while the parent keeps the host reservation. Hostname and GPU UUID are recorded for the parent,
 the fp32 oracle, and both engine children and must match before a result is accepted.
@@ -12,10 +12,10 @@ vLLM. vLLM is pinned to ``VLLM_VERSION`` so a rerun measures engine changes, not
 
 Every speed row is gated against the fp32 ``PretrainBundleModel.logits()`` oracle. Exact output
 matches pass. A first divergence passes only when the fp32 top-two gap is within the audited
-Esme bf16 tolerance used by the existing three-way benchmark. A non-tie divergence leaves
+Esme bf16 tolerance (``BF16_AGREEMENT_TOLERANCE``). A non-tie divergence leaves
 ``tokens_per_second`` unset.
 
-The full command runs the Phase 0 matrix: batch 1/8/64/256, context 32/256/768, 128 decode
+The full command runs the whole matrix: batch 1/8/64/256, context 32/256/768, 128 decode
 tokens, two warmups, and ten measured iterations. ``focused`` keeps the full timing protocol at
 batch 1 and 8; ``smoke`` only checks the remote wiring.
 
@@ -62,7 +62,7 @@ MAX_NEW_TOKENS = 128
 WARMUPS = 2
 MEASURED_ITERS = 10
 VLLM_PYTHON = "/opt/vllm/bin/python"
-# The 2026-07-09 record used 0.24.0; keep it so reruns stay comparable with that record.
+# The version in assets/esme-vllm-same-host.json, so reruns stay comparable with that record.
 VLLM_VERSION = "0.24.0"
 ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "vllm")
 

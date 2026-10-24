@@ -1,8 +1,8 @@
 """Modal A100 technique gallery for Esme-214M-Chat: one gated experiment per technique.
 
 Runs every experiment in ``llm_infer/benchmarks/esme_gallery.py`` in ONE container, so each
-on/off comparison is same-GPU decision-grade (cross-container A100 variance is ±20% for
-this CPU-bound engine; see docs/benchmark.md). The engine rows run the headline
+on/off comparison is same-GPU decision-grade (cross-container A100 variance is about ±20%,
+docs/findings.md entry 1). The engine rows run the headline
 configuration — the default bf16 CUDA Esme attention backend — and every row is gated on the fp32
 ``PretrainBundleModel.logits()`` oracle with the audited tie-tolerant rule.
 
@@ -15,7 +15,7 @@ Workloads (chat template except where noted):
   chat template: the honest niche is repetitive continuations, which chat answers rarely are).
 
     modal run scripts/modal_esme_technique_gallery.py --command smoke   # tiny shapes
-    modal run scripts/modal_esme_technique_gallery.py --command gallery # the published run
+    modal run scripts/modal_esme_technique_gallery.py --command gallery # the full run
 """
 
 from __future__ import annotations

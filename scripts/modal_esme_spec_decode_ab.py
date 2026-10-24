@@ -1,7 +1,7 @@
 """Prompt-lookup speculative decoding on the CUDA engine: does it pay at batch 1?
 
 Speculation is off on CUDA (docs/findings.md entry 10): its one positive row was a single
-repetition-heavy request on the old flash-attn backend. A speculative step verifies a draft in one
+repetition-heavy request on the flash-attn backend. A speculative step verifies a draft in one
 multi-token forward but gives up the decode window and its graph path. This study measures that
 trade on two Dolly workloads at batch 1:
 

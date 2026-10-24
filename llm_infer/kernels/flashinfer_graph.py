@@ -18,12 +18,12 @@ class PlanCopyFence:
     """Keep FlashInfer's pinned plan-info buffer alive until the GPU has copied it.
 
     ``plan()`` writes its plan info into one pinned host buffer and queues an async copy to the
-    device. With device-side page metadata, ``plan()`` first read ``indptr`` back to the CPU,
-    which drained the GPU and so made the reuse safe. With host-side metadata a decode window
-    can run steps ahead, and the next ``plan()`` could overwrite the buffer before the queued
-    copy ran: a kernel then read another step's plan and never finished (docs/findings.md
-    entry 19). Waiting on an event recorded after the previous ``plan()`` waits only until the
-    GPU reaches that copy, not until it finishes the step.
+    device. The next ``plan()`` must not overwrite that buffer before the queued copy from the
+    previous ``plan()`` runs. Otherwise a kernel reads another step's plan and does not finish
+    (docs/findings.md entry 19). The risk exists because host-side page metadata lets a decode
+    window run steps ahead of the GPU without a sync. Waiting on an event recorded after the
+    previous ``plan()`` waits only until the GPU reaches that copy, not until it finishes the
+    step.
     """
 
     def __init__(self) -> None:

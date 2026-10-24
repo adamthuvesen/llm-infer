@@ -1,8 +1,8 @@
 """Modal A100 decode-overhead harness for Esme-214M-Chat: profile and oracle-gated bench.
 
-At 214M the engine is CPU-bound in decode: the GPU finishes each step's kernels in ~1-2 ms
-while Python orchestration takes tens of ms. This harness measures where that per-step wall
-time goes and tracks it across overhead-reduction changes. The main commands run the default
+At 214M a decode step's cost follows its kernel count, not its math (docs/findings.md
+entries 2 and 14). This harness measures where per-step wall time goes: GPU kernel time, idle
+gaps, and host-side dispatch. The main commands run the default
 bf16 CUDA Esme attention path, greedy, prefix caching off:
 
 * ``--command profile`` — diagnostic only, never a speed claim. Per batch size it reports
@@ -359,7 +359,7 @@ def _python_profile(runtime, num_requests: int, config: dict | None = None) -> d
 
 
 def _phase_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
-    """One diagnostic generation projected to the Phase 0 timing buckets."""
+    """One diagnostic generation projected to the ``TimingProfiler`` buckets."""
     import torch
 
     from llm_infer.profiling import TimingProfiler, attach_host_method_profile
@@ -514,10 +514,9 @@ def profile_sampled_decode(batch_sizes: list[int]) -> str:
     """Greedy-vs-sampled decode attribution per batch size, in one container.
 
     Sampled requests run the serving eval's phase0 settings (temperature 0.8, top-p 0.95,
-    top-k 32, seed 17), which today disable the deferred decode window and take the per-row
-    Python sampler. The greedy wall row anchors the comparison on the same GPU, so the
-    sampled-minus-greedy delta is the engine-side cost Phase 5 has to remove. Diagnostic
-    only, never a speed claim.
+    top-k 32, seed 17). The greedy wall row anchors the comparison on the same GPU, so the
+    sampled-minus-greedy delta is the engine-side cost of sampling. Diagnostic only, never a
+    speed claim.
     """
     import torch
 
@@ -996,7 +995,7 @@ def grouped_layer_ab(
     """A/B of piecewise decode versus one cache-owned grouped graph.
 
     ``correctness_only`` runs one batch-8 pair and records outputs without publishing a fresh
-    timing result. It exists to close a parity question in an older performance record.
+    timing result, for checking the two runners' token parity without a timed run.
     ``batch_sizes`` defaults to the exact low-batch protocol (1 and 8); pass larger sizes for
     the high-batch regression check that gates any serving adoption of the grouped runner.
     """

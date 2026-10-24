@@ -1,8 +1,9 @@
 """Modal A100 harness: validate Esme bundle serving against direct bundle logits.
 
-Esme currently loads from ``llm_pretrain_dense_v1`` export bundles and serves through the
-engine by full recompute. This check keeps that contract explicit: the engine path must match
-direct ``PretrainBundleModel.logits()`` greedy decode before any Esme benchmark number is useful.
+Esme loads from ``llm_pretrain_dense_v1`` export bundles and serves through the engine's paged
+KV path. This check keeps that contract explicit: the engine output must match direct
+``PretrainBundleModel.logits()`` full-recompute greedy decode before any Esme benchmark number is
+useful.
 
 The local entrypoint stages the serving bundle files into the repo-scoped Modal volume
 ``llm-infer-esme-bundles`` under ``/esme-214m-chat``. Set ``--bundle-path`` or

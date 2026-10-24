@@ -540,13 +540,13 @@ def phase0_http_workloads(
     return (
         HttpWorkload(
             name=f"phase0-http-greedy-b{request_count}",
-            description="Persistent streaming greedy Phase 0 serving measurement.",
+            description="Persistent streaming greedy serving measurement.",
             config=config,
             requests=requests("greedy", GREEDY),
         ),
         HttpWorkload(
             name=f"phase0-http-sampled-b{request_count}",
-            description="Persistent streaming sampled Phase 0 serving measurement.",
+            description="Persistent streaming sampled serving measurement.",
             config=config,
             requests=requests("sampled", sampled),
         ),
@@ -1314,7 +1314,7 @@ def _reference_summary(
     Sampled tokens are not stable across decode batch shapes (bf16 kernels produce slightly
     different logits per shape, and one flipped multinomial draw forks the continuation), so
     a batched sampled request cannot be required to reproduce the single-request stream.
-    What *is* required — the Phase 5 sampled-serving contract — is reproducibility: every
+    The sampled-serving contract requires reproducibility instead: every
     record of the same signature in the workload (all measured runs, all batchmates) must
     carry the identical token stream. A replay-consistent group that also matches the seeded
     single-request anchor is ``pass``; consistent but anchor-divergent is ``pass_replay``
@@ -1482,7 +1482,7 @@ def _reference_decode(
         )
 
     # Seeded sampled output is not stable across fp32 and bf16 logits, so the sampled anchor is
-    # one request through the same paged backend and dtype. Since 2026-07 it is *evidence*, not
+    # one request through the same paged backend and dtype. It is *evidence*, not
     # the gate: batched sampled records gate on same-shape replay consistency (see
     # _reference_summary), because bf16 batch-shape kernel differences legitimately fork a
     # seeded continuation. Greedy model math remains gated against the fp32 oracle above.

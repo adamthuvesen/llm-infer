@@ -170,7 +170,7 @@ class InferenceEngine(
                     "omit it for this backend"
                 )
             if grouped_layers is None:
-                # Four layers keeps raw-engine benchmarks comparable with earlier records.
+                # Four layers keeps raw-engine benchmarks comparable with the committed records.
                 # The HTTP server groups every layer, which measured faster (findings entry
                 # 21). Small test models group every layer.
                 grouped_layers = min(4, model.num_layers)

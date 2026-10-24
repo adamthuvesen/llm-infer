@@ -7,13 +7,14 @@ pool, up to 256 new tokens, greedy, prefix caching off) and the same gate: every
 row must agree with the fp32 ``PretrainBundleModel.logits()`` oracle under the audited
 reference policy v2; raw timing is retained while public tok/s stays gated.
 
-Same-container methodology (cross-container A100 variance is ±20% for this CPU-bound
-decode; see docs/benchmark.md): every llm_infer row and every HF floor row runs in ONE
+Same-container methodology (cross-container A100 variance is about ±20%, docs/findings.md
+entry 1): every llm_infer row and every HF floor row runs in ONE
 flash-image container, back to back, at every batch level. The floor's anchor level runs
 the full warmup+3-iteration protocol; the larger levels run one measured iteration each —
 one HF iteration at batch b is itself b sequential requests, and the anchor's iteration
-spread is under 1%. The vLLM ceiling rows exist in the harness for private measurement
-(``--skip-vllm`` omits them); they are not part of the published story.
+spread is under 1%. The optional vLLM ceiling rows (``--skip-vllm`` omits them) share this
+container. The vLLM comparison in README.md comes from the same-host harness
+``scripts/modal_esme_vllm_baseline.py``.
 
 The llm_infer batch-256 row also records peak KV-pool usage — the paged-KV evidence for
 how the right side of the curve fits in memory.
@@ -159,7 +160,7 @@ def sweep_baseline(
     warmup: int,
     iters: int,
 ) -> str:
-    """Reference-gated Phase 0 matrix with cold startup and persistent timing separated."""
+    """Reference-gated batch/context matrix with cold startup and persistent timing separated."""
     import math
     import statistics
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private benchmark-evidence checks for committed public numbers."""
+"""Checks committed benchmark records, public tables, figure regeneration, and A/B verdicts."""
 
 from __future__ import annotations
 

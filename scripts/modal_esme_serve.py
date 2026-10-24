@@ -3,7 +3,7 @@
 The same HTTP app as ``python -m llm_infer.serve``, launched on GPU instead of the local
 CPU — which backend the chat UI talks to is purely a matter of how you start it:
 
-    uv run python -m llm_infer.serve --bundle <path>     # local CPU, fp32 reference path
+    uv run python -m llm_infer.serve --bundle <path>     # local CPU, fp16 + torch_sdpa
     modal serve scripts/modal_esme_serve.py              # A100, bf16 FlashInfer + graphs
 
 ``modal serve`` prints a temporary ``*.modal.run`` URL (hot-reloads while running;
@@ -18,7 +18,7 @@ harness in this repo stages on run. If the volume is empty, stage it once:
 Cold start pays model load, FlashInfer warmup, and decode-graph capture (piecewise plus
 the grouped serving default) — roughly a minute on A100 with the default buckets. The
 container scales to zero after ``SCALEDOWN_WINDOW_S`` idle seconds, so an unused deploy
-costs nothing.
+holds no GPU.
 """
 
 from __future__ import annotations
