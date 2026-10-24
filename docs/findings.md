@@ -724,7 +724,7 @@ capture. Run B also carries a lesson: one container is not a result, even with b
 Records: [`assets/esme-serving-grouped-ab.json`](../assets/esme-serving-grouped-ab.json) (C),
 [`assets/esme-serving-grouped-ab-balanced-500w.json`](../assets/esme-serving-grouped-ab-balanced-500w.json)
 (B), and [`assets/esme-serving-grouped-ab-fixed-order.json`](../assets/esme-serving-grouped-ab-fixed-order.json)
-(A). All three drop per-token inter-token latencies; the full records keep them. Reproduce:
+(A). All three drop per-token inter-token latencies. Reproduce:
 `modal run scripts/modal_esme_serving_eval.py --batch-sizes 1,8,64 --measured-runs 5 --grouped-ab`.
 
 ## Open questions
