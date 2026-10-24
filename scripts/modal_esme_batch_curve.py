@@ -32,6 +32,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -1031,6 +1032,8 @@ def sweep_ladder(
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    # HF's sequential floor at large batch can run many minutes between progress points.
+    stall_guard.arm(limit_s=30 * 60)
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -1143,6 +1146,7 @@ def sweep_ladder(
         )
         rows.append(gated_row("hf_batched", size, requests, outputs, per_iter))
         print(f"[ladder] batch={size} hf_batched: median {statistics.median(per_iter):.3f} s")
+        stall_guard.progress()
 
         needed = sum(
             math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
@@ -1184,6 +1188,7 @@ def sweep_ladder(
                 if iteration >= warmup:
                     timings[name].append(time.perf_counter() - start)
                     rung_outputs[name] = result
+                stall_guard.progress()
 
         grouped_runner = engines["+grouped_graphs"][0].grouped_decode_runners[size]
         if grouped_runner.steps_handled == 0:

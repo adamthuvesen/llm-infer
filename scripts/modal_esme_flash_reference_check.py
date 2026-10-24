@@ -28,6 +28,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -72,6 +73,7 @@ def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
 
     flash_runtime = load_model_runtime(
         "esme",
