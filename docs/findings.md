@@ -28,14 +28,14 @@ Two rules apply to every entry:
 | 5 | What should the next experiment target? | Serial prefill: 67–84% of profile wall at batch 64–256 | Build ragged batched prefill |
 | 6 | Does batched prefill pay? | Batch-64 TTFT 11.2x–65.6x; end-to-end 3.65x–5.32x | On by default |
 | 7 | Do attention-inclusive graphs pay? | +18% to +30% at batch 1, but only while the batch holds its size | Server default; engine opt-in |
-| 8 | Is op fusion worth it now? | Declined on a wrong premise; entry 14 corrects it | Reopened by 14 |
+| 8 | Is op fusion worth it now? | Declined on a wrong premise; entry 14 corrects it | Reopened by 14; entry 15 tested it |
 | 9 | What is the right sampled-output contract? | Same-shape seeded replay, not cross-shape exact tokens | Contract changed; sampled serving 3–5x faster |
 | 10 | Do chunked prefill, prefix caching, preemption, and speculation work? | Mixed; see the entry | Defaults follow the measurements |
 | 11 | Is the 0.1-logit bf16 bound measured? | No: it is an audited acceptance bound | Open; listed below |
 | 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
 | 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
-| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; wall does not (b1 +9%, b8 −10%) | Not shipped; the host is the next wall |
+| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; wall does not (b1 +9%, b8 −10%) | Not shipped; trace inter-node gaps next |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -471,7 +471,7 @@ once at the A100's 2.039 TB/s spec bandwidth: 427.9 MB of bf16 weights, plus the
 itself, RoPE with the QK norm, SiLU with the gate multiply) ran as a few kernels instead of
 dozens, most of the 3.7 ms would go. If "other" fell to about 0.7 ms, a batch-1 step would take
 about 2.5 ms, about 400 tok/s against vLLM's 563. That number is an estimate from this profile,
-not a measurement. Entry 15 tested it: the kernel count halved, but the step did not get faster.
+not a measurement. Entry 15 tested it: the kernel count halved, but batch 1 did not get faster.
 
 There is evidence against the easy route. Entry 4's `torch.compile` runner did not lower GPU
 work: 59.9 ms of GPU busy time per pass against 55.2 ms for manual graphs. So Inductor, as
@@ -479,7 +479,8 @@ configured then, did not fuse these chains in a way that saved device time. Why 
 record is not in the repository.
 
 **Decision.** Reopen fusion (entry 8). The next experiment counts kernels before it times
-anything. It first tests whether a candidate actually cuts the per-step kernel count and device
+anything. (Entry 15 ran it: fewer kernels did not mean a faster step, so kernel count alone is not
+the whole bottleneck.) It first tests whether a candidate actually cuts the per-step kernel count and device
 time: compiled segments captured inside the manual graphs, or a fused RMSNorm and residual add.
 Only a candidate that does goes on to the usual gate: fp32 reference, then a same-container A/B.
 
@@ -493,8 +494,10 @@ small kernels and bring batch-1 decode near 400 tok/s. Does it?
 
 **Method.** Two arms in one container, each measured with the entry-14 roofline protocol. The
 `eager` arm is the default path. The `compiled` arm replaces `rms_norm` and `apply_rope` with
-`torch.compile` versions (no compiler CUDA graphs), compiles every decode shape on the eager path
-first, then captures the usual manual piecewise graphs around the compiled kernels. Both arms are
+`torch.compile` versions (no compiler CUDA graphs), runs them once on the eager decode path, then
+captures the usual manual piecewise graphs around the compiled kernels. Capture took 19.3 s
+against 9.4 s for the eager arm, so some compilation likely continued during the capture warmup;
+capture safety relies on that warmup, which runs every segment before recording it. Both arms are
 gated against the fp32 oracle, which runs with the original functions. A second batch-1 run adds
 host-side counters: graph launches, kernel launches, and the most expensive host operations.
 
@@ -516,21 +519,22 @@ parity is `review_required`, not exact.
   54% and kernel time by 45%. RMSNorm becomes one fused Triton reduction instead of about eight
   kernels.
 - **The wall-time prediction fails.** Batch 1 is 9% slower; a repeat run measured 17% slower.
-  Batch 8 is 10% faster. The idle gap grows by as much as the kernel time falls.
-- **The host did not do more work.** Both arms replay the same 31 graphs and issue the same 156
-  ordinary kernel launches per step, with the same host operations on top. The CPU cost of
-  `cudaGraphLaunch` halves (3.29 to 1.58 ms per step under the profiler), because a graph with
-  fewer nodes is cheaper to launch.
-- **So the GPU was hiding a second wall.** In the eager arm, GPU time (5.0 ms) and host time are
-  nearly balanced, and the GPU is slightly longer. Remove half the GPU time and the step waits on
-  something else. These counters cannot say whether that is host dispatch (the eager attention
-  region, KV-write index math, graph launches) or gaps between graph nodes on the GPU. A timeline
-  trace (Nsight Systems) can separate the two.
+  Batch 8 is 10% faster. The idle gap grows by 2.7 ms at batch 1 and 2.0 ms at batch 8.
+- **Both host and GPU cost fell, so the compiled arm added time somewhere else.** Both arms replay
+  the same 31 graphs and issue the same 156 ordinary kernel launches per step, with the same host
+  operations on top. The CPU cost of `cudaGraphLaunch` halves (3.29 to 1.58 ms per step under the
+  profiler), because a graph with fewer nodes is cheaper to launch. If the step were simply the
+  longer of host time and GPU time, it would have got faster. It did not, so the compiled arm
+  adds a cost that neither counter sees.
+- **The unexcluded suspect is GPU-side gaps between graph nodes around the Triton kernels.** Every
+  compiled call runs inside a graph segment, so it adds no host work at replay. The profiler's
+  host times are inflated (the top host operations sum to more than the uninstrumented wall), so
+  they cannot rank host against GPU. A timeline trace (Nsight Systems) of one eager and one
+  compiled step can show where the extra time sits.
 
 **Decision.** Do not ship the compiled path. Entry 14's 400 tok/s estimate assumed the step would
-shrink with GPU time; this probe disproves that assumption. The next measurement is a timeline
-of one eager and one compiled step. Fusion pays only after the second wall moves, and the best
-candidate is the eager per-layer attention region, which holds most of the host operations above.
+shrink with GPU time; this probe disproves that assumption. The next measurement is that timeline
+trace, and the next fusion attempt depends on what it shows.
 
 Records: [`assets/esme-decode-fusion-probe.json`](../assets/esme-decode-fusion-probe.json)
 (batches 1 and 8) and
@@ -540,8 +544,8 @@ Records: [`assets/esme-decode-fusion-probe.json`](../assets/esme-decode-fusion-p
 
 ## Open questions
 
-- After fusion, is the second wall host dispatch or gaps between graph nodes? A timeline trace of
-  one eager and one compiled step answers it.
+- Where does the compiled arm's extra time sit: between graph nodes around the Triton kernels, or
+  somewhere the counters miss? A timeline trace of one eager and one compiled step answers it.
 - Do grouped graphs still pay anywhere? Entries 12 and 13 show no gain on the current engine. The
   HTTP serving A/B that justified the server default predates PR #27.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
