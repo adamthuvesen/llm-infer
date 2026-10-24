@@ -95,7 +95,7 @@ class PretrainBundleModel:
         self.tokenizer_path = tokenizer_path
         self.backend = backend
         # Resolve the native-paged capability once. The Protocol is runtime_checkable, so
-        # ``isinstance`` scans attributes on py3.11 — too costly to repeat per layer per decode
+        # ``isinstance`` scans every protocol attribute — too costly to repeat per layer per decode
         # step. The backend never changes after construction, so cache the narrowed reference.
         self._paged_backend: PagedDecodeAttentionBackend | None = (
             backend if isinstance(backend, PagedDecodeAttentionBackend) else None

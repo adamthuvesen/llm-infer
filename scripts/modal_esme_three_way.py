@@ -58,7 +58,7 @@ esme_image = FLASH_IMAGE
 # vLLM image: vLLM pulls its own torch + CUDA, so it must not share the flash env. Same two env
 # pins for the vLLM ceiling run: spawn the engine core, native sampler, no nvcc JIT.
 vllm_image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.debian_slim(python_version="3.13")
     .pip_install("vllm")
     .env(
         {

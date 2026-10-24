@@ -71,7 +71,7 @@ benchmark migration into a reason to rerun otherwise settled experiments. See
 
 ## Development
 
-Managed with [`uv`](https://docs.astral.sh/uv/). Python 3.11+.
+Managed with [`uv`](https://docs.astral.sh/uv/). Python 3.13+.
 
 ```bash
 uv sync --extra dev --extra serving   # dev tests + HTTP server deps

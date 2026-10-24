@@ -58,7 +58,7 @@ app = modal.App("llm-infer-esme-batch-curve")
 # Same vLLM image recipe as scripts/modal_esme_three_way.py: vLLM pulls its own torch/CUDA
 # stack, so it cannot share the flash image (and therefore cannot share its container).
 vllm_image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.debian_slim(python_version="3.13")
     .pip_install("vllm")
     .env(
         {

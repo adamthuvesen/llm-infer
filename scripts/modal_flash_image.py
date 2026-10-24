@@ -41,7 +41,7 @@ TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 FLASH_ATTN_VERSION = "2.8.3.post1"
 FLASH_ATTN_WHEEL_URL = (
     "https://github.com/Dao-AILab/flash-attention/releases/download/"
-    "v{ver}/flash_attn-{ver}+cu12torch2.8cxx11abi{abi}-cp311-cp311-linux_x86_64.whl"
+    "v{ver}/flash_attn-{ver}+cu12torch2.8cxx11abi{abi}-cp313-cp313-linux_x86_64.whl"
 )
 
 IGNORE = [
@@ -95,7 +95,7 @@ def build_flash_image() -> modal.Image:
 
 def _build_flash_base(*, cuda_image: str = CUDA_IMAGE) -> modal.Image:
     return (
-        modal.Image.from_registry(cuda_image, add_python="3.11")
+        modal.Image.from_registry(cuda_image, add_python="3.13")
         .apt_install("git", "build-essential")
         .pip_install(f"torch=={TORCH_VERSION}", extra_options=f"--index-url {TORCH_CUDA_INDEX}")
         .run_commands(_INSTALL_FLASH_ATTN, _GUARD_FLASH_ATTN)

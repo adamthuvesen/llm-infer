@@ -3,10 +3,12 @@ name = "llm-infer"
 version = "0.1.0"
 description = "A small paged LLM inference engine with pluggable model backends."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = "MIT"
 dependencies = [
-    "torch>=2.2",
+    # Pinned to the Modal GPU image's torch (scripts/modal_flash_image.py), so CPU tests
+    # and GPU benchmarks run one stack. flash-attn 2.x ships wheels only up to torch 2.8.
+    "torch==2.8.0",
     "transformers>=4.43",
 ]
 
@@ -35,13 +37,13 @@ packages = ["llm_infer"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 files = ["llm_infer"]
 check_untyped_defs = true
 disallow_incomplete_defs = true
