@@ -39,7 +39,7 @@ Two rules apply to every entry:
 | 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
-| 19 | What does removing the per-step `plan()` sync buy? | Pending; predictions registered before the run | — |
+| 19 | What does removing the per-step `plan()` sync buy? | Rule failed as written (underpowered); grouped faster in all 6 pilot rows; the first version raced a FlashInfer buffer | Confirmatory run registered |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -759,7 +759,69 @@ each in the compiled arm.
 is slower by more than 2%. A gain counts as a qualified relative result only with exact direct
 parity.
 
-**Result.** Pending.
+**Result.** The decision rule failed as written, so the fix stays on its branch. The first two
+attempts hung the GPU at batch 64, and the third and fourth ran in two containers, not one.
+
+- **The first version raced a FlashInfer buffer.** `plan()` writes its plan info into one pinned
+  host buffer and queues an async copy to the device. The device-to-host read this entry removes
+  had drained the GPU first, which made reusing that buffer safe. Without it, a decode window
+  runs steps ahead, the next `plan()` overwrites the buffer before the copy runs, and a batch-64
+  kernel reads another step's plan and never finishes. A stall guard's thread dump found it: the
+  host was blocked on an ordinary kernel launch behind a stuck queue. The fix now waits, before
+  each `plan()`, on an event recorded after the previous one. That waits until the GPU reaches the
+  copy, not until it finishes the step. Removing a hidden sync can hand its job to a race.
+- **Parity is exact in all 18 rows,** with 0 non-tie divergences against the fp32 oracle.
+- **Three rows were slower by more than 2%:** piecewise batch 8 (+2.4%, SXM4), piecewise batch 1
+  (+3.7%, PCIe), and compiled batch 64 (+3.4%, PCIe). Their per-round walls spread 5%, 22%, and
+  13% within one arm. A 2% band on a median of five rounds cannot resolve that, so the rule was
+  underpowered for the piecewise and compiled arms.
+- **Grouped, the HTTP-server default, was faster in all six rows** on both containers, with tight
+  per-round walls.
+- **The predictions were partly wrong.** Compiled batch 1 showed no 5–12% gain, so entry 17's
+  host-bound model did not transfer. Two batch-64 gains exceeded the predicted 3%.
+
+| Config | Batch | A100-SXM4 (400 W) | A100 PCIe (300 W) |
+| --- | ---: | ---: | ---: |
+| Piecewise | 1 | −0.7% | +3.7% |
+| Piecewise | 8 | +2.4% | −3.8% |
+| Piecewise | 64 | +0.4% | −8.7% |
+| Grouped | 1 | −2.4% | −3.1% |
+| Grouped | 8 | −3.2% | −1.9% |
+| Grouped | 64 | −11.4% | −3.6% |
+| Compiled | 1 | −1.0% | −2.0% |
+| Compiled | 8 | −0.0% | +0.7% |
+| Compiled | 64 | −0.3% | +3.4% |
+
+(Host against device metadata, median ms per step over five rounds; negative is faster.)
+
+**Exploratory, not a result:** paired by round, with a bootstrap interval
+(`llm_infer/benchmarks/paired_change.py`), all three failing rows have medians between −1.2% and
++0.4% and intervals that include zero. All six grouped intervals sit below zero. These two runs are
+the pilot for the confirmatory test below. No speed claim is made from them.
+
+**Confirmatory run (registered before the run).** Two A100 containers, the same method, 11
+measured rounds per row that alternate arm order. For each row and container, host and device are
+paired by round: `d_i = (host_i − device_i) / median(device)`, in percent. The statistic is the
+median of `d`, and its 95% interval is a percentile bootstrap over the 11 pairs (10,000
+resamples, seed 0), from `llm_infer/benchmarks/paired_change.py`. `scripts/judge_host_plan_ab.py`
+applies the rule to both records, so no row is judged by eye.
+
+- **Merge gate:** parity is exact in every row on both containers, and no row regresses. A row
+  regresses if its interval's lower bound is above 0 and its median is above +2%. A row whose
+  interval half-width exceeds 3% is reported as inconclusive. It cannot pass the gate on its own,
+  but it still must not regress.
+- **Relative result:** a grouped row is a qualified gain only if its interval's upper bound is
+  below 0 on both containers. The headline is the smaller of the two medians, with both
+  reported. Piecewise and compiled rows are reported, not claimed.
+- **No third container:** if the two containers disagree on a grouped row's sign, that row is not
+  confirmed, and it is not rerun.
+- **Predictions:** grouped batch 1 and 8 gain 2–4%, and grouped batch 64 gains 3–12%, depending on
+  host speed. Every piecewise and compiled interval includes 0.
+
+**Confirmatory result.** Pending.
+
+Records (pilot): [`assets/esme-decode-host-plan-ab-pilot-sxm4.json`](../assets/esme-decode-host-plan-ab-pilot-sxm4.json),
+[`assets/esme-decode-host-plan-ab-pilot-pcie.json`](../assets/esme-decode-host-plan-ab-pilot-pcie.json).
 
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-ab --batch-sizes
 1,8,64`.

@@ -2498,7 +2498,8 @@ def host_timeline(batch_sizes: list[int]) -> str:
     )
 
 
-HOST_PLAN_ROUNDS = 5
+# The entry-19 pilot ran 5 rounds; the confirmatory run registered after it runs 11.
+HOST_PLAN_ROUNDS = 11
 HOST_PLAN_METADATA = ("device", "host")
 
 
