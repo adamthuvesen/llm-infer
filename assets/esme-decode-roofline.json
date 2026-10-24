@@ -10,7 +10,6 @@
         0.7050535539999885
       ],
       "wall_ms_per_token_step": 5.509076330708725,
-      "tokens_per_second": 181.51863215722648,
       "kernel_ms_per_token_step": {
         "gemm": 1.1341655590552135,
         "attention": 0.19091746456693862,
@@ -146,7 +145,10 @@
         }
       ],
       "idle_gap_ms_per_token_step": 0.5052688425197465,
-      "distinct_kernel_names": 35
+      "distinct_kernel_names": 35,
+      "raw_tokens_per_second": 181.51863215722648,
+      "headline_eligible": false,
+      "tokens_per_second": null
     },
     {
       "batch_size": 8,
@@ -157,7 +159,6 @@
         0.877150926000013
       ],
       "wall_ms_per_token_step": 6.876867362204911,
-      "tokens_per_second": 1163.3203868330802,
       "kernel_ms_per_token_step": {
         "gemm": 1.7592859842520514,
         "attention": 0.20192822834648727,
@@ -293,7 +294,10 @@
         }
       ],
       "idle_gap_ms_per_token_step": 0.5256918031501074,
-      "distinct_kernel_names": 36
+      "distinct_kernel_names": 36,
+      "raw_tokens_per_second": 1163.3203868330802,
+      "headline_eligible": false,
+      "tokens_per_second": null
     },
     {
       "batch_size": 64,
@@ -304,7 +308,6 @@
         0.9998318840000024
       ],
       "wall_ms_per_token_step": 7.742097834645704,
-      "tokens_per_second": 8266.493315752421,
       "kernel_ms_per_token_step": {
         "gemm": 1.6378632283463195,
         "attention": 0.3030205196850657,
@@ -440,7 +443,10 @@
         }
       ],
       "idle_gap_ms_per_token_step": 1.2617926614175667,
-      "distinct_kernel_names": 38
+      "distinct_kernel_names": 38,
+      "raw_tokens_per_second": 8266.493315752421,
+      "headline_eligible": false,
+      "tokens_per_second": null
     }
   ],
   "weight_bytes": 427920384,

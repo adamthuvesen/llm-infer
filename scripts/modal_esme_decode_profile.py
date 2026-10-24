@@ -1844,7 +1844,11 @@ def roofline_report(batch_sizes: list[int]) -> str:
                 "decode_token_steps": token_steps,
                 "measured_walls_s": walls,
                 "wall_ms_per_token_step": wall_ms,
-                "tokens_per_second": size * token_steps / wall_s,
+                # Fixed-length decode is never checked against the fp32 oracle here, so the
+                # rate stays raw diagnostic timing and is never a public tok/s.
+                "raw_tokens_per_second": size * token_steps / wall_s,
+                "headline_eligible": False,
+                "tokens_per_second": None,
                 "kernel_ms_per_token_step": per_step,
                 "kernel_total_ms_per_token_step": kernel_ms,
                 "idle_gap_ms_per_token_step": wall_ms - kernel_ms,
