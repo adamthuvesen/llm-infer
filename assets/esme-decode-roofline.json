@@ -17,14 +17,12 @@
         "other": 3.6787244645668262
       },
       "kernel_total_ms_per_token_step": 5.003807488188978,
-      "host_gap_ms_per_token_step": 0.5052688425197465,
       "gpu_busy_fraction": 0.9082842908341505,
       "bytes_per_token_step": 430408704.0,
       "hbm_floor_ms_per_token_step": 0.21108813339872484,
       "wall_over_floor": 26.09846532823623,
       "gemm_achieved_bytes_per_s": 377299751860.27313,
       "gemm_fraction_of_peak_bandwidth": 0.18504156540474406,
-      "kernel_count": 35,
       "top_kernels": [
         {
           "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float>)",
@@ -146,7 +144,9 @@
           "calls": 3810,
           "device_ms": 6.261053999995809
         }
-      ]
+      ],
+      "idle_gap_ms_per_token_step": 0.5052688425197465,
+      "distinct_kernel_names": 35
     },
     {
       "batch_size": 8,
@@ -164,14 +164,12 @@
         "other": 4.389961346456265
       },
       "kernel_total_ms_per_token_step": 6.351175559054804,
-      "host_gap_ms_per_token_step": 0.5256918031501074,
       "gpu_busy_fraction": 0.9235565010255548,
       "bytes_per_token_step": 447826944.0,
       "hbm_floor_ms_per_token_step": 0.21963067385973517,
       "wall_over_floor": 31.311051600181997,
       "gemm_achieved_bytes_per_s": 243235260117.14774,
       "gemm_fraction_of_peak_bandwidth": 0.11929144684509453,
-      "kernel_count": 36,
       "top_kernels": [
         {
           "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_64x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_64x6_tn_align8::Params)",
@@ -293,7 +291,9 @@
           "calls": 3810,
           "device_ms": 8.880776999995845
         }
-      ]
+      ],
+      "idle_gap_ms_per_token_step": 0.5256918031501074,
+      "distinct_kernel_names": 36
     },
     {
       "batch_size": 64,
@@ -311,14 +311,12 @@
         "other": 4.539421425196752
       },
       "kernel_total_ms_per_token_step": 6.480305173228137,
-      "host_gap_ms_per_token_step": 1.2617926614175667,
       "gpu_busy_fraction": 0.8370218656019723,
       "bytes_per_token_step": 587172864.0,
       "hbm_floor_ms_per_token_step": 0.2879709975478175,
       "wall_over_floor": 26.884991546275874,
       "gemm_achieved_bytes_per_s": 261267471296.7657,
       "gemm_fraction_of_peak_bandwidth": 0.12813510117546134,
-      "kernel_count": 38,
       "top_kernels": [
         {
           "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn",
@@ -440,7 +438,9 @@
           "calls": 3810,
           "device_ms": 10.332151999995837
         }
-      ]
+      ],
+      "idle_gap_ms_per_token_step": 1.2617926614175667,
+      "distinct_kernel_names": 38
     }
   ],
   "weight_bytes": 427920384,
@@ -485,7 +485,7 @@
       64
     ],
     "max_new_tokens": 128,
-    "warmup": 1,
+    "warmup": 2,
     "iters": 3,
     "backend": "FlashInferPagedAttention (bf16)",
     "reference": "none (diagnostic attribution only, never a speed claim)",

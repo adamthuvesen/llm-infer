@@ -1749,9 +1749,10 @@ def roofline_report(batch_sizes: list[int]) -> str:
     Runs the default CUDA path (bf16, FlashInfer, piecewise decode graphs, decode window 8) on a
     persistent engine with a fixed output length, so the batch never shrinks. Per batch size:
     an uninstrumented timed run gives wall per token-step; a separate ``torch.profiler`` run
-    gives kernel time by category. ``host_gap`` is wall minus kernel time: the time the GPU sits
-    idle while the host issues work. Kernel times inside graph replays come from CUPTI device
-    records, so they are exact; the profiled run's own wall is not used.
+    gives kernel time by category. ``idle_gap`` is wall minus kernel time: every moment no kernel
+    runs, which covers host dispatch and the gaps between graph nodes during a replay. Kernel
+    times inside graph replays come from CUPTI device records; the profiled run's own wall is
+    not used.
     """
     import torch
 
@@ -1846,7 +1847,7 @@ def roofline_report(batch_sizes: list[int]) -> str:
                 "tokens_per_second": size * token_steps / wall_s,
                 "kernel_ms_per_token_step": per_step,
                 "kernel_total_ms_per_token_step": kernel_ms,
-                "host_gap_ms_per_token_step": wall_ms - kernel_ms,
+                "idle_gap_ms_per_token_step": wall_ms - kernel_ms,
                 "gpu_busy_fraction": kernel_ms / wall_ms,
                 "bytes_per_token_step": step_bytes,
                 "hbm_floor_ms_per_token_step": floor_ms,
@@ -1855,7 +1856,7 @@ def roofline_report(batch_sizes: list[int]) -> str:
                 "gemm_fraction_of_peak_bandwidth": (
                     weight_bytes / (per_step["gemm"] / 1000.0) / peak_bytes_per_s
                 ),
-                "kernel_count": len(kernels),
+                "distinct_kernel_names": len(kernels),
                 "top_kernels": [
                     {
                         "name": evt.key,
@@ -2107,7 +2108,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else 0
             if command == "four-layer-parity"
             else 2
-            if command in ("two-layer-group-ab", "four-layer-group-ab", "bucket-policy")
+            if command in ("two-layer-group-ab", "four-layer-group-ab", "bucket-policy", "roofline")
             else WARMUP_ITERS
         ),
         "iters": (

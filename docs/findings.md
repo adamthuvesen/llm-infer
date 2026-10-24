@@ -28,7 +28,7 @@ Two rules apply to every entry:
 | 5 | What should the next experiment target? | Serial prefill: 67–84% of profile wall at batch 64–256 | Build ragged batched prefill |
 | 6 | Does batched prefill pay? | Batch-64 TTFT 11.2x–65.6x; end-to-end 3.65x–5.32x | On by default |
 | 7 | Do attention-inclusive graphs pay? | +18% to +30% at batch 1, but only while the batch holds its size | Server default; engine opt-in |
-| 8 | Is op fusion worth it now? | GPU kernels are about 1–2 ms of a 5.5 ms step | Declined |
+| 8 | Is op fusion worth it now? | Declined on a wrong premise; entry 14 corrects it | Reopened by 14 |
 | 9 | What is the right sampled-output contract? | Same-shape seeded replay, not cross-shape exact tokens | Contract changed; sampled serving 3–5x faster |
 | 10 | Do chunked prefill, prefix caching, preemption, and speculation work? | Mixed; see the entry | Defaults follow the measurements |
 | 11 | Is the 0.1-logit bf16 bound measured? | No: it is an audited acceptance bound | Open; listed below |
@@ -443,7 +443,7 @@ once at the A100's 2.039 TB/s spec bandwidth: 427.9 MB of bf16 weights, plus the
 
 **Result** (ms per token step):
 
-| Batch | Wall | GEMM | Attention | Other kernels | Host gap | GPU busy | HBM floor | Wall / floor |
+| Batch | Wall | GEMM | Attention | Other kernels | Idle gap | GPU busy | HBM floor | Wall / floor |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 5.51 | 1.13 | 0.19 | 3.68 | 0.51 | 91% | 0.21 | 26x |
 | 8 | 6.88 | 1.76 | 0.20 | 4.39 | 0.53 | 92% | 0.22 | 31x |
@@ -452,10 +452,12 @@ once at the A100's 2.039 TB/s spec bandwidth: 427.9 MB of bf16 weights, plus the
 **Findings.**
 
 - **The step is GPU-bound, not host-bound.** With graphs on, the GPU is busy 84–92% of each
-  step. The host-dispatch story of entries 2–4 was true before graphs. It is not the current
+  step. The idle gap is wall time minus kernel time, so it also holds the gaps between graph nodes;
+  host dispatch is at most that 0.5 ms at batch 1. The host-dispatch story of entries 2–4 was true before graphs. It is not the current
   bottleneck.
 - **Kernel count is the bottleneck.** At least 1,870 kernels run per token step at every batch
-  size (the 20 largest kernel types alone), about 2.6 µs each on average. "Other" kernels take 67% of the batch-1 step: RMSNorm as separate
+  size (counting only the 20 largest kernel types). That gives an upper bound of 2.6–3.5 µs of
+  device time per kernel. "Other" kernels take 67% of the batch-1 step: RMSNorm as separate
   mean, pow, rsqrt, multiply, and cast kernels (121 norm calls per step), residual adds, dtype
   copies, index gathers, and small memory copies. Graphs remove the CPU cost of
   a launch, but each kernel still costs GPU time to start and drain.
@@ -464,15 +466,21 @@ once at the A100's 2.039 TB/s spec bandwidth: 427.9 MB of bf16 weights, plus the
 - **The whole step is 26x the HBM floor.** Even vLLM, at about 1.8 ms per step, is near 8x the
   floor. At 214M parameters, decode latency is set by kernel count and size, not by bytes moved.
 
-**What this predicts.** Fusing each layer's elementwise chain (residual add with RMSNorm, the
-norm itself, RoPE with the QK norm, SiLU with the gate multiply) to a few kernels would cut most
-of the 3.7 ms. If "other" fell to about 0.7 ms, a batch-1 step would take about 2.5 ms, about
-400 tok/s against vLLM's 563. That number is an estimate from this profile, not a measurement.
+**What this predicts.** If each layer's elementwise chain (residual add with RMSNorm, the norm
+itself, RoPE with the QK norm, SiLU with the gate multiply) ran as a few kernels instead of
+dozens, most of the 3.7 ms would go. If "other" fell to about 0.7 ms, a batch-1 step would take
+about 2.5 ms, about 400 tok/s against vLLM's 563. That number is an estimate from this profile,
+not a measurement.
 
-**Decision.** Reopen fusion (entry 8). `torch.compile` lost in entry 4 on host overhead from its
-own cudagraph runtime. Compiling only the elementwise segments and capturing the result inside the
-existing manual graphs avoids that cost. That is the next experiment, gated like every other
-change: fp32 reference first, then a same-container A/B.
+There is evidence against the easy route. Entry 4's `torch.compile` runner did not lower GPU
+work: 59.9 ms of GPU busy time per pass against 55.2 ms for manual graphs. So Inductor, as
+configured then, did not fuse these chains in a way that saved device time. Why is unknown; that
+record is not in the repository.
+
+**Decision.** Reopen fusion (entry 8). The next experiment counts kernels before it times
+anything. It first tests whether a candidate actually cuts the per-step kernel count and device
+time: compiled segments captured inside the manual graphs, or a fused RMSNorm and residual add.
+Only a candidate that does goes on to the usual gate: fp32 reference, then a same-container A/B.
 
 Record: [`assets/esme-decode-roofline.json`](../assets/esme-decode-roofline.json).
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8,64`.
