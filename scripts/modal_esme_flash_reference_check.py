@@ -123,7 +123,9 @@ def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
         return engine.run()
 
     flash_outputs = decode_all(flash_runtime)
+    stall_guard.progress()
     naive_outputs = decode_all(naive_runtime)
+    stall_guard.progress()
 
     exact = 0
     failures: list[str] = []
