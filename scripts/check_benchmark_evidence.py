@@ -17,6 +17,43 @@ VLLM_RECORD = ROOT / "assets" / "esme-vllm-same-host.json"
 PUBLIC_BENCHMARK_DOC = ROOT / "docs" / "benchmark.md"
 README = ROOT / "README.md"
 PLOT_SCRIPT = ROOT / "scripts" / "plot_benchmark_curve.py"
+JUDGE_SCRIPT = ROOT / "scripts" / "judge_paired_ab.py"
+# The verdict docs/findings.md reports for each registered paired A/B: the judge's exit code and
+# its claim and gate lines, which pin every claimed row's number.
+AB_VERDICTS = (
+    (
+        "entry 19",
+        ("esme-decode-host-plan-ab-confirm-1.json", "esme-decode-host-plan-ab-confirm-2.json"),
+        0,
+        (
+            "grouped b1: qualified gain -2.5%",
+            "grouped b8: qualified gain -1.6%",
+            "grouped b64: qualified gain -3.8%",
+            "merge gate: PASS",
+        ),
+    ),
+    (
+        "entry 21",
+        ("esme-full-step-ab-1.json", "esme-full-step-ab-2.json"),
+        0,
+        (
+            "grouped b1: qualified gain -2.9%",
+            "grouped b8: qualified gain -4.6%",
+            "grouped b64: qualified gain -4.2%",
+            "merge gate: PASS",
+        ),
+    ),
+    (
+        "entry 22",
+        ("esme-spec-decode-ab-1.json", "esme-spec-decode-ab-2.json"),
+        1,
+        (
+            "open b1: not confirmed (parity not exact)",
+            "grounded b1: not confirmed (parity not exact)",
+            "merge gate: FAIL",
+        ),
+    ),
+)
 EXPECTED_BATCHES = (8, 16, 32, 64, 128, 256)
 PLOTTED_SYSTEMS = ("llm_infer", "hf_sequential")
 QUALIFIED_REFERENCE_STATUSES = frozenset({"exact", "accepted_numerical"})
@@ -71,6 +108,7 @@ def _failures() -> list[str]:
     errors.extend(_doc_table_errors(by_system))
     errors.extend(_headline_table_errors())
     errors.extend(_figure_regeneration_errors())
+    errors.extend(_ab_verdict_errors())
     return errors
 
 
@@ -207,13 +245,40 @@ def _figure_regeneration_errors() -> list[str]:
         ]
 
 
+def _ab_verdict_errors() -> list[str]:
+    errors: list[str] = []
+    for entry, records, expected_exit, expected_lines in AB_VERDICTS:
+        result = subprocess.run(
+            ["uv", "run", str(JUDGE_SCRIPT), *(str(ROOT / "assets" / name) for name in records)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        lines = tuple(
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith("merge gate: ") or re.match(r"\w+ b\d+: ", line)
+        )
+        if result.returncode != expected_exit or lines != expected_lines:
+            detail = result.stderr.strip() or "\n".join(lines)
+            errors.append(
+                f"{JUDGE_SCRIPT} on {entry}: expected exit {expected_exit} with "
+                f"{expected_lines}, got exit {result.returncode}: {detail}"
+            )
+    return errors
+
+
 def main() -> int:
     errors = _failures()
     if errors:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
         return 1
-    print("benchmark evidence: committed records, public tables, and figure regen are consistent")
+    print(
+        "benchmark evidence: committed records, public tables, figure regen, and A/B verdicts "
+        "are consistent"
+    )
     return 0
 
 
