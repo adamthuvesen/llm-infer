@@ -16,6 +16,7 @@ from types import ModuleType
 import torch
 
 from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
+from llm_infer.kernels.flashinfer_graph import PlanCopyFence
 from llm_infer.kv_cache.paged_kv_cache import KVPagePlan
 
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -40,6 +41,7 @@ class FlashInferPagedAttention:
         self.backend = backend
         self._workspace: torch.Tensor | None = None
         self._wrapper: object | None = None
+        self._plan_fence = PlanCopyFence()
         # The (batch, num_qo_heads, head_dim) the live wrapper plan was built for, or None
         # before the first plan. FlashInfer's wrapper holds shape-specific metadata, so a decode
         # run against a different query shape without re-planning would read stale layout.
@@ -89,10 +91,17 @@ class FlashInferPagedAttention:
                 f"FlashInferPagedAttention needs a fp16/bf16 paged KV cache; got {dtype}"
             )
         wrapper = self._ensure_wrapper(page_plan.indptr.device)
+        # Host copies keep FlashInfer's planner from syncing the GPU to read them back; the
+        # fence then guards the planner's pinned buffer that the sync used to protect.
+        self._plan_fence.before_plan()
         wrapper.plan(
-            page_plan.indptr,
+            page_plan.indptr_host if page_plan.indptr_host is not None else page_plan.indptr,
             page_plan.indices,
-            page_plan.last_page_len,
+            (
+                page_plan.last_page_len_host
+                if page_plan.last_page_len_host is not None
+                else page_plan.last_page_len
+            ),
             num_qo_heads,
             num_kv_heads,
             head_dim,
@@ -103,6 +112,7 @@ class FlashInferPagedAttention:
             o_data_type=dtype,
             sm_scale=1.0 / math.sqrt(head_dim),
         )
+        self._plan_fence.after_plan(page_plan.indptr.device)
         batch = int(page_plan.indptr.numel()) - 1
         self._planned_shape = (batch, num_qo_heads, head_dim)
 

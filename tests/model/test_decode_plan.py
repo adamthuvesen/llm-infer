@@ -93,6 +93,13 @@ def test_native_page_metadata_matches_classic_without_packed_indices() -> None:
         assert read_plan.page_plan.indptr.tolist() == expected.indptr.tolist()
         assert read_plan.page_plan.indices.tolist() == expected.indices.tolist()
         assert read_plan.page_plan.last_page_len.tolist() == expected.last_page_len.tolist()
+        # FlashInfer's planner reads these on the host; device-only copies force a GPU sync.
+        for page_plan in (read_plan.page_plan, expected):
+            assert page_plan.indptr_host is not None
+            assert page_plan.last_page_len_host is not None
+            assert page_plan.indptr_host.device.type == "cpu"
+            assert page_plan.indptr_host.tolist() == expected.indptr.tolist()
+            assert page_plan.last_page_len_host.tolist() == expected.last_page_len.tolist()
         plan.complete_step()
 
 

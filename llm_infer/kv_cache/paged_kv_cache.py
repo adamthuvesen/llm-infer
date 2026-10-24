@@ -26,6 +26,11 @@ class KVPagePlan:
     indices: torch.Tensor
     last_page_len: torch.Tensor
     page_size: int
+    # CPU copies of ``indptr`` and ``last_page_len``. FlashInfer's planner reads both on the
+    # host; handing it device tensors makes it copy them back with a blocking device-to-host
+    # transfer, a full host-GPU sync on every decode step.
+    indptr_host: torch.Tensor | None = None
+    last_page_len_host: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -266,11 +271,15 @@ class PagedKVCache:
             last_page_len_host.append(((length - 1) % self.block_size) + 1)
 
         device = self.kv.device
+        indptr_cpu = torch.tensor(indptr_host, dtype=torch.int32)
+        last_page_len_cpu = torch.tensor(last_page_len_host, dtype=torch.int32)
         return KVPagePlan(
-            indptr=torch.tensor(indptr_host, dtype=torch.int32, device=device),
+            indptr=indptr_cpu.to(device),
             indices=torch.tensor(indices_host, dtype=torch.int32, device=device),
-            last_page_len=torch.tensor(last_page_len_host, dtype=torch.int32, device=device),
+            last_page_len=last_page_len_cpu.to(device),
             page_size=self.block_size,
+            indptr_host=indptr_cpu,
+            last_page_len_host=last_page_len_cpu,
         )
 
     def read_many_plan(self, layer: int, plan: KVReadPlan) -> tuple[torch.Tensor, torch.Tensor]:

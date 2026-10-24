@@ -23,6 +23,7 @@ import torch
 from llm_infer.kernels.flashinfer_graph import (
     FlashInferDecodeShape,
     FlashInferPageMetadata,
+    PlanCopyFence,
     build_graph_wrapper,
     plan_wrapper,
     run_wrapper_into,
@@ -96,6 +97,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._static_write_slots = torch.zeros(batch_size, dtype=torch.long, device=model.device)
         self._group_graph: torch.cuda.CUDAGraph | None = None
         self._graph_wrapper = None
+        self._plan_fence = PlanCopyFence()
         self._graph_shape: FlashInferDecodeShape | None = None
         self._graph_workspace: torch.Tensor | None = None
         self._fixed_metadata: FlashInferPageMetadata | None = None
@@ -270,15 +272,25 @@ class EngineOwnedGroupedDecodeGraphRunner:
     def _plan_group_wrapper(self, read_plan: KVReadPlan) -> None:
         if self._graph_wrapper is None or self._graph_shape is None or read_plan.page_plan is None:
             raise RuntimeError("grouped graph wrapper cannot plan this read metadata")
+        self._plan_fence.before_plan()
         plan_wrapper(
             self._graph_wrapper,
             FlashInferPageMetadata(
-                indptr=read_plan.page_plan.indptr,
+                indptr=(
+                    read_plan.page_plan.indptr_host
+                    if read_plan.page_plan.indptr_host is not None
+                    else read_plan.page_plan.indptr
+                ),
                 indices=read_plan.page_plan.indices,
-                last_page_len=read_plan.page_plan.last_page_len,
+                last_page_len=(
+                    read_plan.page_plan.last_page_len_host
+                    if read_plan.page_plan.last_page_len_host is not None
+                    else read_plan.page_plan.last_page_len
+                ),
             ),
             self._graph_shape,
         )
+        self._plan_fence.after_plan(read_plan.page_plan.indices.device)
 
 
 def build_engine_grouped_runners(
