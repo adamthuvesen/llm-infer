@@ -37,6 +37,7 @@ check.
   Responses subset.
 - Prometheus-style metrics and a local KV trace visualizer.
 
+For a two-page account of what the experiments found, see [docs/writeup.md](docs/writeup.md).
 For the longer architecture map, see [docs/architecture.md](docs/architecture.md).
 For what each experiment measured and decided, including the negative results, see
 [docs/findings.md](docs/findings.md).
@@ -175,7 +176,8 @@ serve larger batches from graphs.
 
 Method, the batch-scaling curve, and every row's reference status are in
 [docs/benchmark.md](docs/benchmark.md). The experiments behind these numbers, including the
-negative results, are in [docs/findings.md](docs/findings.md).
+negative results, are in [docs/findings.md](docs/findings.md). `make reproduce` needs no GPU: it
+checks the committed records against these tables and reruns each registered A/B verdict.
 
 ## KV Trace Visualizer
 
@@ -185,6 +187,7 @@ See [visualizer/README.md](visualizer/README.md).
 
 ## Where To Look
 
+- [docs/writeup.md](docs/writeup.md) - two-page account of the experiments and what they decided.
 - [docs/findings.md](docs/findings.md) - research log: each experiment's question, measurement, and decision, including negative results.
 - [docs/scoping.md](docs/scoping.md) - scope, non-goals, and the reference-before-speed rule.
 - [docs/architecture.md](docs/architecture.md) - runtime flows and module ownership.

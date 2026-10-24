@@ -59,7 +59,7 @@ Negative results stay in the log, because they explain the design.
 - **Operator fusion** halved the kernel count but did not make the step faster [14, 15]. The
   timeline trace meant to explain why was inconclusive, because the tracer itself changed the
   timing [16].
-- **Prompt-lookup speculation** was about 3.5x slower per request on CUDA [22]. A verify step
+- **Prompt-lookup speculation** was 3.5x to 4.2x slower per request on CUDA [22]. A verify step
   runs eager, outside the decode window and its graphs. It cost about ten graphed decode steps
   and emitted two tokens. Speculation stays on only for local CPU serving.
 - **A gain from arm order.** A server A/B that ran every piecewise row first showed grouped
