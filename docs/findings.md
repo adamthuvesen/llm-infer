@@ -42,8 +42,6 @@ Two rules apply to every entry:
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
 | 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound unchanged; options proposed |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
-||||||| parent of 85a5c95 (feat(bench): prompt-lookup speculation A/B on CUDA, predictions registered)
-| 21 | Does grouping all 30 layers beat the server's four-layer group? | Pending; predictions registered before the run | — |
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: about 3.5x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
 
 ## 1. Cross-container variance sets the comparison rule
@@ -1108,8 +1106,6 @@ Records: [`assets/esme-spec-decode-ab-1.json`](../assets/esme-spec-decode-ab-1.j
 - Can a graphed, planned multi-token verify step make speculation pay on CUDA (entry 22)?
 - Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
   The entry-17 method is cheap enough to run there.
-- How much does capturing attention in graphs buy on top of removing the `plan()` sync (entries
-  17 and 19)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
 - Should the bf16 tie bound stay at 0.1 or move to the measured 0.25 (entry 20)?
 - Does the cached path add error of its own, or only a different rounding order (entry 20)? It
