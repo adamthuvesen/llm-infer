@@ -29,7 +29,7 @@ check.
   work.
 - Prefix caching for sibling prompts with shared prompt blocks.
 - Prompt-lookup speculative decoding with a greedy verifier. Local CPU serving turns it on; CUDA
-  keeps it off, because it measured about 3.5x slower per request there
+  keeps it off, because it measured 3.5x to 4.2x slower per request there
   ([findings entry 22](docs/findings.md)).
 - Request preemption under KV pressure: free KV, keep generated tokens, then resume by
   recompute.

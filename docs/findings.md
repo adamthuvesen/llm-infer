@@ -42,7 +42,7 @@ Two rules apply to every entry:
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
 | 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound unchanged; options proposed |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
-| 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: about 3.5x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
+| 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1065,9 +1065,9 @@ that workload is a qualified gain: exact direct parity on both containers, and a
 bound below 0 on both. Otherwise it stays off, and the timing is reported as raw. The
 identical-stream subset is reported, never claimed.
 
-**Result.** The gate failed, and speculation stays off on CUDA. It is about 3.5x slower per
-request on both workloads, in two A100 PCIe (300 W) containers on different host classes (AMD
-family 25 and Intel family 6, model 106).
+**Result.** The gate failed, and speculation stays off on CUDA. Requests take about 4.1x as long
+on the open workload and about 3.5x as long on the grounded workload. Two A100 PCIe (300 W)
+containers ran on different host classes (AMD family 25 and Intel family 6, model 106).
 
 | Workload | Container 1 | Container 2 | Tokens per verify step | Identical streams |
 | --- | ---: | ---: | ---: | ---: |
