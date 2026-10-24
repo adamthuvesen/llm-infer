@@ -20,6 +20,9 @@ REGRESSION_MEDIAN_PCT = 2.0
 INCONCLUSIVE_HALF_WIDTH_PCT = 3.0
 CLAIMED_CONFIG = "grouped"
 REGISTERED_ROUNDS = 11
+REGISTERED_ROWS = frozenset(
+    (config, batch) for config in ("piecewise", "grouped", "compiled") for batch in (1, 8, 64)
+)
 
 
 def _changes(record: dict) -> dict[tuple[str, int], tuple[PairedChange, str]]:
@@ -51,8 +54,8 @@ def main() -> int:
         print(f"error: the registered run has {REGISTERED_ROUNDS} rounds per row", file=sys.stderr)
         return 2
     changes = [_changes(record) for record in records]
-    if changes[0].keys() != changes[1].keys():
-        print("error: the two records cover different rows", file=sys.stderr)
+    if any(container.keys() != REGISTERED_ROWS for container in changes):
+        print("error: a record does not cover exactly the registered rows", file=sys.stderr)
         return 2
 
     gate_passes = True
@@ -94,7 +97,7 @@ def main() -> int:
     for row, claim in claims.items():
         print(f"{row}: {claim}")
     print(f"\nmerge gate: {'PASS' if gate_passes else 'FAIL'}")
-    return 0
+    return 0 if gate_passes else 1
 
 
 if __name__ == "__main__":
