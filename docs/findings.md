@@ -42,7 +42,7 @@ Two rules apply to every entry:
 | 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound stays at 0.1; reviews of near-ties cite entry 20 |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
-| 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Yes: 37–44% less time per step at batch 1–64; full depth adds no meaningful startup time | Next batch-1 lever; a default needs parity review first |
+| 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Yes: 37–44% less time per step at batch 1–64; full depth costs the same startup time and memory as four layers | Next batch-1 lever; a default needs parity review first |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1192,12 +1192,21 @@ intervals. Negative is faster.)
 - **Batch-1 decode is now about 377 tokens per second per stream** (1,000 / 2.65 ms). The vLLM
   comparison in entry 12 used a different harness, so this does not yet move the 3.1x gap. A
   same-host rerun with fusion is the measurement that can.
-- **Startup (held).** A cold `build_app_from_runtime` took 74.1 s on an A100-SXM4, including the
-  FlashInfer warmup, piecewise capture, and grouped capture at five buckets. Warm grouped capture
-  for all five buckets took 1.5–1.6 s at full depth and 1.1–1.2 s at four layers, a ratio of 1.35x.
-  Each engine build took about 30 s at either depth, so capture is a small part of it. The
-  allocator delta measured 41 MiB of graph memory on the first capture and 0 MiB on repeats,
-  because the caching allocator reuses freed blocks, so that number is a lower bound only.
+- **Startup: full depth costs no more than four layers (held), and the cold build missed its
+  prediction (failed).** A fresh A100-SXM4 container (400 W, AMD family 25, model 1) ran each
+  warm engine twice at the server's cache settings (64-token blocks, 512 blocks) and buckets.
+
+  | Engine | Build | Graph capture | Reserved memory over no grouped graphs |
+  | --- | ---: | ---: | ---: |
+  | No grouped graphs | under 0.1 s | — | — (960 MiB, mostly the KV cache) |
+  | Four layers | 35.8–45.0 s | 1.2–1.7 s | +138 to +348 MiB |
+  | All 30 layers | 41.3–43.8 s | 1.9–2.1 s | +138 to +338 MiB |
+
+  Full-depth capture takes about 1.4x the four-layer time (medians 2.0 s and 1.45 s), within the
+  predicted 1.5x, and its graph memory is the same, so no serve doc needs a change. Capture is a small part of each build. Most of the 36–45 s goes
+  elsewhere in building the grouped runners, and this run does not break it down. The cold
+  `build_app_from_runtime` took 95.3 s, above the predicted 90 s. An earlier run with a smaller
+  cache took 74.1 s, so the cold build moves with the host and the cache settings.
 - **Limit:** the fused arm's compile cost is not measured on its own. Compilation runs inside its
   first engine build, which took 17–23 s against 21–31 s for the plain arm's first build, but the
   plain arm built first and paid FlashInfer's first-use setup.
@@ -1205,12 +1214,12 @@ intervals. Negative is faster.)
 **Decision.** By the registered rule, fusion is the next batch-1 lever and stays off for now.
 Making it a default needs three things first: a review of the batch-1 and batch-8 direct-parity
 divergences under the entry-20 precedent, a measured compile cost at server startup, and a
-same-host vLLM rerun to update the headline gap. Full-depth grouping costs no meaningful startup
-time, so the serve docs need no change.
+same-host vLLM rerun to update the headline gap. Full-depth grouping costs the same startup time
+and memory as four layers, so the serve docs need no change.
 
 Records: [`assets/esme-fusion-ab-1.json`](../assets/esme-fusion-ab-1.json),
 [`assets/esme-fusion-ab-2.json`](../assets/esme-fusion-ab-2.json), and
-[`assets/esme-server-startup.json`](../assets/esme-server-startup.json).
+[`assets/esme-server-startup.json`](../assets/esme-server-startup.json) (the server-settings run).
 
 ## Open questions
 

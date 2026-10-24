@@ -1,9 +1,9 @@
 {
   "probe": "server-startup",
-  "container_id": "ta-01M5QXP09KXX35J79YVT6E9PER",
+  "container_id": "ta-01M5QZ3PWE1V6K09B4NTX24P6R",
   "cold": {
-    "model_load_s": 24.627634672,
-    "build_app_s": 74.12264733500001,
+    "model_load_s": 25.303084370999997,
+    "build_app_s": 95.329121418,
     "build_app_reserved_bytes": 1319108608,
     "buckets": [
       1,
@@ -14,28 +14,40 @@
     ]
   },
   "warm_grouped_capture": {
-    "grouped4": [
+    "none": [
       {
-        "engine_build_s": 31.963810538000004,
-        "capture_s": 1.2283726910000041,
-        "group_memory_bytes": 42600276
+        "engine_build_s": 0.012234607000010556,
+        "capture_s": 0,
+        "reserved_bytes": 1006632960
       },
       {
-        "engine_build_s": 30.28136387699999,
-        "capture_s": 1.1157250290000604,
-        "group_memory_bytes": 1876
+        "engine_build_s": 0.002038955999978498,
+        "capture_s": 0,
+        "reserved_bytes": 1006632960
+      }
+    ],
+    "grouped4": [
+      {
+        "engine_build_s": 44.970662065,
+        "capture_s": 1.668421713000015,
+        "reserved_bytes": 1371537408
+      },
+      {
+        "engine_build_s": 35.81227018300001,
+        "capture_s": 1.2136166749999688,
+        "reserved_bytes": 1151336448
       }
     ],
     "full_step": [
       {
-        "engine_build_s": 30.456667748,
-        "capture_s": 1.5848824130000025,
-        "group_memory_bytes": 42600276
+        "engine_build_s": 43.840931071,
+        "capture_s": 1.8919777830000157,
+        "reserved_bytes": 1361051648
       },
       {
-        "engine_build_s": 29.103575855999992,
-        "capture_s": 1.5307314659999918,
-        "group_memory_bytes": 1876
+        "engine_build_s": 41.32342381999999,
+        "capture_s": 2.110071262000048,
+        "reserved_bytes": 1151336448
       }
     ]
   },
@@ -45,7 +57,7 @@
     "clocks_max_sm": "1410 MHz",
     "power_limit": "400.00 W",
     "memory_total": "81920 MiB",
-    "host_cpu": "model name=unknown; vendor_id=AuthenticAMD; cpu family=25; model=1; cpu MHz=3249.362",
+    "host_cpu": "model name=unknown; vendor_id=AuthenticAMD; cpu family=25; model=1; cpu MHz=3249.901",
     "host_cpu_count": 17
   },
   "versions": {
