@@ -107,6 +107,7 @@ def measure_serving(
             # Alternate which arm runs first from cell to cell, so container drift or a
             # second-run warmup benefit cannot land on one arm only.
             order = arms if (batch_index + workload_index) % 2 == 0 else arms[::-1]
+            cell_rows: list[dict[str, object]] = []
             for arm_grouped in order:
                 workload = workloads_by_arm[arm_grouped][workload_index]
                 reference_runtime = (
@@ -129,6 +130,7 @@ def measure_serving(
                 result["grouped"] = arm_grouped
                 result["run_order"] = order.index(arm_grouped)
                 rows.append(result)
+                cell_rows.append(result)
                 metrics = result["metrics"]
                 reference = result["reference"]
                 print(
@@ -138,6 +140,20 @@ def measure_serving(
                     f"TTFT p50/p95={metrics['ttft_p50_s']}/{metrics['ttft_p95_s']} "
                     f"ITL p50/p95={metrics['itl_p50_s']}/{metrics['itl_p95_s']}"
                 )
+            if len(cell_rows) == 2:
+                # Direct parity: a throughput delta is an A/B result only when both arms
+                # emitted the same token streams, not merely each passed its own gate.
+                baseline, candidate = (row["output_digests"] for row in cell_rows)
+                parity = (
+                    "failed"
+                    if set(baseline) != set(candidate)
+                    else "exact"
+                    if baseline == candidate
+                    else "review_required"
+                )
+                for row in cell_rows:
+                    row["parity_status"] = parity
+                print(f"[serving] batch {batch_size} workload {workload_index}: parity {parity}")
     return json.dumps(
         {
             "rows": rows,

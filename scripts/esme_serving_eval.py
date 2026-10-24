@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -1179,6 +1180,14 @@ def _workload_result(
         "policy_version": 2,
         "reference_status": reference_policy_status,
         "parity_status": "not_applicable",
+        # One short digest of each request's EOS-normalized tokens, so an A/B can check that
+        # both arms emitted the same streams without storing every token id.
+        "output_digests": {
+            record.request_id: hashlib.sha256(
+                json.dumps(normalize_at_eos(record.token_ids, runtime.eos_token_ids)).encode()
+            ).hexdigest()[:16]
+            for record in observed
+        },
         "headline_eligible": (
             speed_status == "reported" and throughput is not None and throughput > 0
         ),
