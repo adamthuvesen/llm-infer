@@ -63,8 +63,10 @@ preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/load
 
 The single-request unit path must produce exact token ids. Esme policy-v2 statuses are `exact`,
 `accepted_numerical`, `review_required`, and `failed`; direct parity also allows `not_applicable`.
-The 0.1-logit bf16 boundary is automatic acceptance, not a measured error distribution. Larger
-numerical differences need a durable review. Missing/extra output and confirmed bugs fail. Keep raw
+The 0.1-logit bf16 boundary is automatic acceptance. It stays below the measured bf16 error
+(p99.9 shrink 0.25, `docs/findings.md` entry 20) so the gate can still see a bug. Larger
+numerical differences need a durable review. Entry 20 lists when that review may cite it.
+Missing/extra output and confirmed bugs fail. Keep raw
 timing in all measured rows, gate public tok/s with `headline_eligible`, and do not turn historical
 benchmark migration into a reason to rerun otherwise settled experiments. See
 `docs/internal/reference-policy-retro-audit.md` (maintainer-local notes, untracked).

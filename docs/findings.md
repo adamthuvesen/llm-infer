@@ -31,7 +31,7 @@ Two rules apply to every entry:
 | 8 | Is op fusion worth it now? | Declined on a wrong premise; entry 14 corrects it | Reopened by 14; entry 15 tested it |
 | 9 | What is the right sampled-output contract? | Same-shape seeded replay, not cross-shape exact tokens | Contract changed; sampled serving 3–5x faster |
 | 10 | Do chunked prefill, prefix caching, preemption, and speculation work? | Mixed; see the entry | Defaults follow the measurements |
-| 11 | Is the 0.1-logit bf16 bound measured? | No: it is an audited acceptance bound | Open; listed below |
+| 11 | Is the 0.1-logit bf16 bound measured? | No: it is an audited acceptance bound | Measured in entry 20 |
 | 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
 | 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
@@ -40,7 +40,7 @@ Two rules apply to every entry:
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
-| 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound unchanged; options proposed |
+| 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound stays at 0.1; reviews of near-ties cite entry 20 |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
 
@@ -954,15 +954,27 @@ Engine flips by the fp32 top-two margin:
   policy v2 accepts it. At most 7 prompts in 1,024 (0.7%) would reach `review_required` from a
   decode step; the prefill token is not measured.
 
-**Proposal for the maintainer (not adopted).** The data supports either option below. Choosing one
-is a policy change, so this entry does not make it.
+**Decision (maintainer).** The automatic bound stays at 0.1 logits. The two options considered were
+keeping 0.1 or raising it to 0.25, the measured 99.9th-percentile shrink. A gate at 0.25 sits at
+the ceiling of normal bf16 error, so it could not tell that error from a kernel bug that moves
+logits by 0.2. Keeping 0.1 costs little: at most 0.7% of requests reach `review_required` from a
+decode step, and every observed case was a near-tie (engine fp32 gap at most 0.135).
 
-- **Keep 0.1.** At most 0.7% of requests would need review from their decode steps, and every observed
-  review case would be a measured near-tie (fp32 gap at most 0.135 on the engine).
-- **Raise the bound to 0.25,** the measured 99.9th-percentile shrink. It would accept all 807
-  observed engine flips and all 767 recompute flips. The cost: a real kernel bug whose error stays
-  below 0.25 logits would also pass. The other half of the rule still holds, that both tokens must
-  sit within the tolerance of the fp32 maximum.
+This entry is the precedent for those reviews. A `review_required` divergence is a known bf16
+near-tie, and its review may cite this entry instead of a new analysis, when all three hold:
+
+1. The fp32 gap at the first divergence is at most 0.25. No flip occurred at a margin of 0.3 or
+   more across 113,729 positions.
+2. The change under test did not cause it. An A/B row needs exact direct candidate/baseline
+   parity. A standalone row needs the `torch_naive` reference backend to choose the same token as
+   the fast path, the check entry 11 used for `esme-001`.
+3. The divergence is at a decode step. This run never saw the prefill token, so a prefill
+   divergence gets a full review.
+
+The row stays `review_required` and gets no public tok/s until the review is written. The harness
+keeps one threshold (`BF16_AGREEMENT_TOLERANCE = 0.1` in `llm_infer/benchmarks/esme_three_way.py`).
+The envelope comes from 1,024 short Dolly prompts with the Esme chat bundle on A100. Another
+bundle, a long-context workload, or a gap above 0.25 is outside it and gets a full review.
 
 Record: [`assets/esme-bf16-error.json`](../assets/esme-bf16-error.json). It stores the Dolly line
 indices and a hash, not the prompt text.
@@ -1112,6 +1124,5 @@ Records: [`assets/esme-spec-decode-ab-1.json`](../assets/esme-spec-decode-ab-1.j
 - Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
   The entry-17 method is cheap enough to run there.
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
-- Should the bf16 tie bound stay at 0.1 or move to the measured 0.25 (entry 20)?
 - Does the cached path add error of its own, or only a different rounding order (entry 20)? It
   needs a control, for example the engine against itself with a perturbed reduction order.
