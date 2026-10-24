@@ -35,7 +35,7 @@ Two rules apply to every entry:
 | 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
 | 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
-| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; wall does not (b1 +9%, b8 −10%) | Not shipped; trace inter-node gaps next |
+| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; raw wall does not follow | Not shipped; trace inter-node gaps next |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -510,16 +510,20 @@ host-side counters: graph launches, kernel launches, and the most expensive host
 | eager | 8 | 2,099 | 6.39 | 4.41 | 0.21 | 6.60 |
 | compiled | 8 | 1,012 | 3.70 | 1.75 | 2.24 | 5.94 |
 
-Both arms have zero non-tie divergences. They resolve some bf16 ties differently, so direct
-parity is `review_required`, not exact.
+Both arms have zero non-tie divergences against fp32, and both decode the same fixed number of
+tokens. They resolve some bf16 ties differently, so direct parity is `review_required`, not
+exact. Under the reference policy that withholds any qualified relative speed claim: the wall
+times above stay raw diagnostic timing, and the percentages below describe raw timing only.
 
 **Findings.**
 
 - **The kernel-level prediction holds.** Compiling two functions cuts kernel launches per step by
   54% and kernel time by 45%. RMSNorm becomes one fused Triton reduction instead of about eight
   kernels.
-- **The wall-time prediction fails.** Batch 1 is 9% slower; a repeat run measured 17% slower.
-  Batch 8 is 10% faster. The idle gap grows by 2.7 ms at batch 1 and 2.0 ms at batch 8.
+- **The wall-time prediction fails on raw timing.** Raw batch-1 wall is 9% higher; a repeat run
+  measured 17% higher. Raw batch-8 wall is 10% lower. The idle gap grows by 2.7 ms at batch 1
+  and 2.0 ms at batch 8. None of these is a qualified A/B result until the parity mismatches are
+  reviewed; the decision below does not depend on one.
 - **Both host and GPU cost fell, so the compiled arm added time somewhere else.** Both arms replay
   the same 31 graphs and issue the same 156 ordinary kernel launches per step, with the same host
   operations on top. The CPU cost of `cudaGraphLaunch` halves (3.29 to 1.58 ms per step under the
