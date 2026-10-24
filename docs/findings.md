@@ -40,7 +40,7 @@ Two rules apply to every entry:
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
-| 21 | Does grouping all 30 layers beat the server's four-layer group? | Pending; predictions registered before the run | — |
+| 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -893,7 +893,33 @@ both containers, and the headline is the smaller of the two medians. If the gate
 batch 1 is a qualified gain, full-depth grouping becomes the HTTP-server default in a separate
 change. Otherwise the default stays at four layers.
 
-**Result.** Pending.
+**Result.** The gate passed, and full-depth grouping is a qualified gain at every batch. Two A100
+PCIe (300 W) containers, both on the same host class (AMD family 25, model 1). Parity is exact in
+all 6 rows, with 0 non-tie divergences against the fp32 oracle in either arm.
+
+| Batch | Container 1 | Container 2 | Verdict |
+| ---: | ---: | ---: | --- |
+| 1 | −3.7% [−3.7, −3.7] | −2.9% [−3.0, −2.9] | Qualified gain, **−2.9%** |
+| 8 | −4.9% [−4.9, −4.8] | −4.6% [−4.7, −4.6] | Qualified gain, **−4.6%** |
+| 64 | −4.4% [−4.5, −4.4] | −4.2% [−4.2, −4.0] | Qualified gain, **−4.2%** |
+
+(Median paired change in ms per step, `full_step` against `grouped4`, with 95% bootstrap
+intervals; negative is faster.)
+
+- **Parity, batch 1, and batch 8 held.** The gains (2.9% and 4.6%) fall in their predicted ranges.
+- **Batch 64 beat its prediction.** It gained 4.2% against a predicted 0–4%. Removing the 26 eager
+  attention regions still pays when the GPU does more work per step.
+- **Capture cost did not grow (failed).** Engine build took about 6 s per arm at every batch. The
+  one larger number, 16–17 s for `grouped4` at batch 1, is the first engine built in each
+  container, so it includes FlashInfer's first-use setup.
+- **Limit:** both containers ran on one host class. Entry 18 found that host speed changes how
+  much grouped graphs pay, so the gain on another host may differ.
+
+**Decision.** By the registered rule, full-depth grouping becomes the HTTP-server default, in a
+separate change.
+
+Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json),
+[`assets/esme-full-step-ab-2.json`](../assets/esme-full-step-ab-2.json).
 
 ## Open questions
 
