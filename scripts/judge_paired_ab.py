@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Apply entry 19's registered confirmatory rule to two host-plan-ab records.
+"""Apply a registered paired-A/B rule to two containers' records of one experiment.
 
-Usage: uv run scripts/judge_host_plan_ab.py RECORD_A.json RECORD_B.json
+Usage: uv run scripts/judge_paired_ab.py RECORD_A.json RECORD_B.json
 
 Rows are judged by this script, not by eye, so the verdict follows the rule registered in
-docs/findings.md entry 19 before the run.
+docs/findings.md before the run. Each experiment's rule is keyed by the record's ``probe``.
 """
 
 from __future__ import annotations
@@ -12,23 +12,52 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from llm_infer.benchmarks.paired_change import PairedChange, paired_change
 
 REGRESSION_MEDIAN_PCT = 2.0
 INCONCLUSIVE_HALF_WIDTH_PCT = 3.0
-CLAIMED_CONFIG = "grouped"
-REGISTERED_ROUNDS = 11
-REGISTERED_ROWS = frozenset(
-    (config, batch) for config in ("piecewise", "grouped", "compiled") for batch in (1, 8, 64)
-)
 
 
-def _changes(record: dict) -> dict[tuple[str, int], tuple[PairedChange, str]]:
+@dataclass(frozen=True)
+class Rule:
+    """One experiment's registered rule: which arms, rows, and rounds, and what may be claimed."""
+
+    baseline: str
+    candidate: str
+    rows: frozenset[tuple[str, int]]
+    claimed_config: str
+    rounds: int = 11
+
+
+RULES = {
+    # docs/findings.md entry 19.
+    "decode-host-plan-ab": Rule(
+        baseline="device",
+        candidate="host",
+        rows=frozenset(
+            (config, batch)
+            for config in ("piecewise", "grouped", "compiled")
+            for batch in (1, 8, 64)
+        ),
+        claimed_config="grouped",
+    ),
+    # docs/findings.md entry 21.
+    "decode-full-step-ab": Rule(
+        baseline="grouped4",
+        candidate="full_step",
+        rows=frozenset(("grouped", batch) for batch in (1, 8, 64)),
+        claimed_config="grouped",
+    ),
+}
+
+
+def _changes(record: dict, rule: Rule) -> dict[tuple[str, int], tuple[PairedChange, str]]:
     return {
         (config, row["batch_size"]): (
-            paired_change(row["device"]["walls_s"], row["host"]["walls_s"]),
+            paired_change(row[rule.baseline]["walls_s"], row[rule.candidate]["walls_s"]),
             row["parity_status"],
         )
         for config, rows in record["configs"].items()
@@ -39,7 +68,7 @@ def _changes(record: dict) -> dict[tuple[str, int], tuple[PairedChange, str]]:
 def main() -> int:
     if len(sys.argv) != 3:
         print(
-            "usage: uv run scripts/judge_host_plan_ab.py RECORD_A.json RECORD_B.json",
+            "usage: uv run scripts/judge_paired_ab.py RECORD_A.json RECORD_B.json",
             file=sys.stderr,
         )
         return 2
@@ -50,11 +79,16 @@ def main() -> int:
     if hashlib.sha256(raw[0]).digest() == hashlib.sha256(raw[1]).digest() or same_container:
         print("error: the rule needs records from two different containers", file=sys.stderr)
         return 2
-    if any(record["rounds"] != REGISTERED_ROUNDS for record in records):
-        print(f"error: the registered run has {REGISTERED_ROUNDS} rounds per row", file=sys.stderr)
+    probes = {record.get("probe") for record in records}
+    if len(probes) != 1 or (probe := probes.pop()) not in RULES:
+        print(f"error: both records must come from one of {sorted(RULES)}", file=sys.stderr)
         return 2
-    changes = [_changes(record) for record in records]
-    if any(container.keys() != REGISTERED_ROWS for container in changes):
+    rule = RULES[probe]
+    if any(record["rounds"] != rule.rounds for record in records):
+        print(f"error: the registered run has {rule.rounds} rounds per row", file=sys.stderr)
+        return 2
+    changes = [_changes(record, rule) for record in records]
+    if any(container.keys() != rule.rows for container in changes):
         print("error: a record does not cover exactly the registered rows", file=sys.stderr)
         return 2
 
@@ -80,7 +114,7 @@ def main() -> int:
                 f"{change.median_pct:+.1f}% [{change.ci_low_pct:+.1f}, {change.ci_high_pct:+.1f}] "
                 f"{status}, parity {parity}"
             )
-        if config == CLAIMED_CONFIG:
+        if config == rule.claimed_config:
             first, second = (container[key][0] for container in changes)
             both_exact = all(container[key][1] == "exact" for container in changes)
             if not both_exact:
