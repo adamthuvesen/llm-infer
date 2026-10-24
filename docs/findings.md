@@ -35,7 +35,8 @@ Two rules apply to every entry:
 | 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
 | 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
-| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; raw wall does not follow | Not shipped; trace inter-node gaps next |
+| 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; raw wall does not follow | Not shipped; see 16 |
+| 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -538,7 +539,7 @@ times above stay raw diagnostic timing, and the percentages below describe raw t
 
 **Decision.** Do not ship the compiled path. Entry 14's 400 tok/s estimate assumed the step would
 shrink with GPU time; this probe disproves that assumption. The next measurement is that timeline
-trace, and the next fusion attempt depends on what it shows.
+trace, and the next fusion attempt depends on what it shows. Entry 16 ran the trace.
 
 Records: [`assets/esme-decode-fusion-probe.json`](../assets/esme-decode-fusion-probe.json)
 (batches 1 and 8) and
@@ -546,10 +547,59 @@ Records: [`assets/esme-decode-fusion-probe.json`](../assets/esme-decode-fusion-p
 (batch 1 with host counters). Reproduce:
 `modal run scripts/modal_esme_decode_profile.py --command fusion-probe --batch-sizes 1,8`.
 
+## 16. Timeline trace: inconclusive, and why
+
+**Question.** Entry 15's compiled arm halved kernel time but not wall time. Where does its extra
+idle time sit?
+
+**Method.** One A100 80GB PCIe container. Each arm runs a fresh batch-1 process under Nsight
+Systems 2024.6 with CUDA graph node tracing, so every kernel inside a graph replay appears on the
+timeline. The trace covers only 63 decode steps after warmup. Every GPU activity carries the
+correlation id of the host API call that issued it, which lets the analysis split each idle gap
+by cause.
+
+**Result** (ms per token step, under tracing):
+
+| Arm | GPU activities | GPU busy | Total idle | Span under tracing | Uninstrumented wall (entry 15) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| eager | 2,004 | 4.91 | 5.50 | 10.41 | 5.06 |
+| compiled | 917 | 2.67 | 4.97 | 7.64 | 5.51 |
+
+**Findings.**
+
+- **The trace does not reproduce the effect.** Uninstrumented, the compiled arm is slower than
+  eager. Under node tracing it is faster, with less total idle time. A trace that reverses the
+  effect cannot explain it.
+- **Tracing cost sits on the host.** GPU busy time matches the uninstrumented kernel time in both
+  arms (4.91 against 5.04 ms, 2.67 against 2.73 ms), and gaps inside a graph replay average about
+  55 ns. The extra 4–5 ms per step lands at launch boundaries: about 226 per step (31 graph
+  launches, 156 eager kernel launches, and the host copies), about 22–24 µs each. Node tracing
+  therefore makes both arms host-bound on the tracer itself.
+- **A first reading of this trace was wrong.** It read the rise in GPU time spent waiting on eager
+  `cudaLaunchKernel` calls (0.14 to 1.88 ms per step) as the cause. That metric counted only the
+  time before each API call started, so time spent inside a long `cudaGraphLaunch` counted as
+  launch latency, which fell by about the same amount (4.49 to 2.25 ms). The shift is relabeled
+  host time, not a new cost. The analysis now splits each gap into time before the call, time
+  inside the call, and the remainder; the committed record predates that split. The same reading
+  also claimed host waits were lower bounds. That is backwards: tracing slows the host, so it
+  inflates them.
+
+**Decision.** Stop tracing this question with CUPTI. Any CUPTI trace adds host cost at every
+launch, the quantity under test. The discriminating measurement is uninstrumented: time from the
+start of a decode step until the host issues its last launch. If that host issue time is close to
+the compiled arm's 5.5 ms wall, the step is host-bound and some host cost that no CUDA counter
+sees has grown. If it is far below the wall, the idle time is on the GPU side. The predictions
+for each case are written down before that run.
+
+Record: [`assets/esme-decode-timeline.json`](../assets/esme-decode-timeline.json) (gap buckets
+use the earlier metric). Reproduce:
+`modal run scripts/modal_esme_decode_profile.py --command timeline --batch-sizes 1`.
+
 ## Open questions
 
-- Where does the compiled arm's extra time sit: between graph nodes around the Triton kernels, or
-  somewhere the counters miss? A timeline trace of one eager and one compiled step answers it.
+- Why is the compiled arm's uninstrumented step slower when both its host and GPU costs fell?
+  An uninstrumented measurement of host issue time per step separates a host-side cause from a
+  GPU-side one (entry 16).
 - Do grouped graphs still pay anywhere? Entries 12 and 13 show no gain on the current engine. The
   HTTP serving A/B that justified the server default predates PR #27.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts

@@ -1,0 +1,87 @@
+{
+  "probe": "decode-timeline",
+  "rows": [
+    {
+      "arm": "eager",
+      "batch_size": 1,
+      "token_steps": 63,
+      "gpu_activities": 126264,
+      "gpu_activities_per_token_step": 2004.1904761904761,
+      "idle_gaps_per_token_step": 2002.1746031746031,
+      "span_ms_per_token_step": 10.412129301587301,
+      "busy_ms_per_token_step": 4.913705809523809,
+      "busy_ms_by_category_per_token_step": {
+        "gemm": 0.03768706349206348,
+        "attention": 0.14805165079364968,
+        "other": 4.728249507936938
+      },
+      "idle_ms_per_token_step": {
+        "graph_internal": 0.09911280952380952,
+        "host_wait": 0.9064109841269842,
+        "launch_latency": 4.492899698412699,
+        "unattributed": 0.0
+      },
+      "host_wait_ms_by_api_per_token_step": {
+        "cudaMemcpyAsync_v3020": 0.48030814285714285,
+        "cudaGraphLaunch_v10000": 0.2888614603174603,
+        "cudaLaunchKernel_v7000": 0.13724138095238095
+      }
+    },
+    {
+      "arm": "compiled",
+      "batch_size": 1,
+      "token_steps": 63,
+      "gpu_activities": 57783,
+      "gpu_activities_per_token_step": 917.1904761904761,
+      "idle_gaps_per_token_step": 915.1746031746031,
+      "span_ms_per_token_step": 7.638991761904762,
+      "busy_ms_per_token_step": 2.6704082063492063,
+      "busy_ms_by_category_per_token_step": {
+        "gemm": 0.03694544444444444,
+        "attention": 0.1504918412698408,
+        "other": 2.483252317460381
+      },
+      "idle_ms_per_token_step": {
+        "graph_internal": 0.04090331746031746,
+        "host_wait": 2.6788912857142857,
+        "launch_latency": 2.2487889523809526,
+        "unattributed": 0.0
+      },
+      "host_wait_ms_by_api_per_token_step": {
+        "cudaLaunchKernel_v7000": 1.880216365079365,
+        "cudaMemcpyAsync_v3020": 0.5241057936507937,
+        "cudaGraphLaunch_v10000": 0.274569126984127
+      }
+    }
+  ],
+  "nsys_version": "NVIDIA Nsight Systems version 2024.6.2.225-246235244400v0",
+  "new_tokens": 64,
+  "gpu": {
+    "name": "NVIDIA A100 80GB PCIe",
+    "clocks_sm": "1410 MHz",
+    "clocks_max_sm": "1410 MHz",
+    "power_limit": "300.00 W",
+    "memory_total": "81920 MiB"
+  },
+  "versions": {
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "transformers": "5.13.0",
+    "flash_attn": "2.8.3.post1",
+    "vllm": "absent",
+    "numpy": "2.4.6"
+  },
+  "config": {
+    "command": "timeline",
+    "model": "Esme-214M-Chat",
+    "batch_sizes": [
+      1
+    ],
+    "max_new_tokens": 64,
+    "warmup": 1,
+    "iters": 3,
+    "backend": "comparison (bf16)",
+    "reference": "none (diagnostic attribution only, never a speed claim)",
+    "repro_command": "modal run scripts/modal_esme_decode_profile.py --command timeline --batch-sizes 1"
+  }
+}
