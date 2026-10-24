@@ -1215,8 +1215,8 @@ Records: [`assets/esme-fusion-ab-1.json`](../assets/esme-fusion-ab-1.json),
 ## Open questions
 
 - Can a graphed, planned multi-token verify step make speculation pay on CUDA (entry 22)?
-- Does entry 15's compiled slowdown on A100 PCIe hold without the per-step `plan()` sync? Entry 17
-  saw the compiled arm faster on A100-SXM4.
+- How much of the batch-1 gap to vLLM does fusion close on the same host, and what does it cost to
+  compile at server startup (entry 23)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots record the CPU.
 - Does the cached path add error of its own, or only a different rounding order (entry 20)? It
   needs a control, for example the engine against itself with a perturbed reduction order.

@@ -6,7 +6,7 @@ serving path: paged KV cache, continuous batching, batched prefill, CUDA graphs,
 attention, and an OpenAI-compatible server. On one A100 it serves 3.1x the tokens per second of
 batched HuggingFace `generate()`. vLLM on the same host is 1.9x to 3.1x faster than `llm-infer`.
 
-This page tells the story of the 22 experiments in [findings.md](findings.md). Each entry there
+This page tells the story of the 23 experiments in [findings.md](findings.md). Each entry there
 has the full method and the numbers. Entries 12 to 22 cite records committed in `assets/`.
 Entries 1 to 11 name raw records that stay outside the repository. Entry numbers appear below in
 brackets.
@@ -23,8 +23,8 @@ full-recompute oracle on the same prompts. Numerical ties are the only allowed d
 [1]. So every A/B runs both arms in one container, in alternating order where possible, and a
 ratio never crosses containers.
 
-**Predictions before the run.** Entries 17 and 19 to 22 committed their predictions and decision
-rule before any GPU time was spent. For the paired A/Bs (entries 19, 21, and 22), a script,
+**Predictions before the run.** Entries 17 and 19 to 23 committed their predictions and decision
+rule before any GPU time was spent. For the paired A/Bs (entries 19, 21, 22, and 23), a script,
 `scripts/judge_paired_ab.py`, applies the rule to the records from two containers. The statistic is the median paired change per round,
 with a 95% bootstrap interval [19]. A claim needs exact output parity and an interval below zero
 in both containers.
@@ -57,9 +57,6 @@ number of kernels, not FLOPs. Most of the gains came from launching less.
 Negative results stay in the log, because they explain the design.
 
 - **Chunked prefill** was about 21% slower, with no stall it could fix at this size [10].
-- **Operator fusion** halved the kernel count but did not make the step faster [14, 15]. The
-  timeline trace meant to explain why was inconclusive, because the tracer itself changed the
-  timing [16].
 - **Prompt-lookup speculation** was 3.5x to 4.2x slower per request on CUDA [22]. A verify step
   runs eager, outside the decode window and its graphs. It cost about ten graphed decode steps
   and emitted two tokens. Speculation stays on only for local CPU serving.
@@ -88,8 +85,10 @@ valid target under bf16. The contract became same-shape seeded replay, and sampl
 
 ## What is open
 
-- The batch-1 gap to vLLM is still 3.1x [12]. Small non-GEMM kernels take 67% of a batch-1 step
-  [14], so they are the next target.
+- **Fused elementwise kernels** cut 37% to 44% of each decode step on the full-depth graphs [23].
+  The same fusion halved the kernels but did not speed up the step while `plan()` still synced
+  every step [15, 16]. Making it the default needs a review of its bf16 near-tie differences and
+  a measured compile cost. A same-host vLLM rerun can then update the 3.1x batch-1 gap [12].
 - A graphed, planned multi-token verify step could change the speculation result [22].
 
 ## Check it yourself
