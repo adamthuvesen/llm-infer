@@ -20,8 +20,8 @@ full-recompute oracle on the same prompts. Numerical ties are the only allowed d
 ([scoping.md](scoping.md)). A fast path that changes the output is a bug.
 
 **Same-container comparisons only.** Identical code moved about ±20% between Modal containers
-[1]. So every A/B runs both arms in one container, in alternating order, and a ratio never
-crosses containers.
+[1]. So every A/B runs both arms in one container, in alternating order where possible, and a
+ratio never crosses containers.
 
 **Predictions before the run.** Entries 17 and 19 to 22 committed their predictions and decision
 rule before any GPU time was spent. For the paired A/Bs (entries 19, 21, and 22), a script,
