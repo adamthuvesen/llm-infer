@@ -2497,6 +2497,223 @@ def host_timeline(batch_sizes: list[int]) -> str:
     )
 
 
+HOST_PLAN_ROUNDS = 5
+HOST_PLAN_METADATA = ("device", "host")
+
+
+@contextlib.contextmanager
+def _device_page_metadata() -> Iterator[None]:
+    """Give FlashInfer's planner device-only page metadata, as the engine did before the fix.
+
+    Both planner call sites (the piecewise backend and the grouped-graph runner) see the same
+    page values without their host copies, so FlashInfer reads them back with a blocking
+    device-to-host copy on every decode step.
+    """
+    import llm_infer.kernels.flashinfer_paged as paged_module
+    import llm_infer.model.grouped_decode_graph as grouped_module
+
+    backend_class = paged_module.FlashInferPagedAttention
+    runner_class = grouped_module.EngineOwnedGroupedDecodeGraphRunner
+    original_plan = backend_class.plan_decode_batch_paged
+    original_group_plan = runner_class._plan_group_wrapper
+
+    def strip(page_plan):
+        return dataclasses.replace(page_plan, indptr_host=None, last_page_len_host=None)
+
+    def plan(self, page_plan, *args, **kwargs):
+        return original_plan(self, strip(page_plan), *args, **kwargs)
+
+    def plan_group(self, read_plan):
+        if read_plan.page_plan is not None:
+            read_plan = dataclasses.replace(read_plan, page_plan=strip(read_plan.page_plan))
+        return original_group_plan(self, read_plan)
+
+    backend_class.plan_decode_batch_paged = plan
+    runner_class._plan_group_wrapper = plan_group
+    try:
+        yield
+    finally:
+        backend_class.plan_decode_batch_paged = original_plan
+        runner_class._plan_group_wrapper = original_group_plan
+
+
+def _host_plan_rows(
+    runtime, batch_sizes: list[int], *, grouped: bool
+) -> tuple[list[dict], dict[str, dict[int, dict[str, list[int]]]]]:
+    """Device vs host page metadata on one persistent engine per batch size.
+
+    Each round runs one decode per metadata arm, alternating which goes first, so drift over
+    the run lands on both arms. Wall per token step is the median over rounds.
+    """
+    import statistics
+
+    import torch
+
+    from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.serving import InferenceEngine, Request
+
+    token_steps = ROOFLINE_NEW_TOKENS - 1
+    rows: list[dict] = []
+    outputs: dict[str, dict[int, dict[str, list[int]]]] = {arm: {} for arm in HOST_PLAN_METADATA}
+    for size in batch_sizes:
+        requests = build_requests(runtime.tokenizer, size)
+        needed = sum(
+            math.ceil((len(req.prompt_ids) + ROOFLINE_NEW_TOKENS) / BLOCK_SIZE) for req in requests
+        )
+        grouped_kwargs: dict[str, object] = (
+            {"grouped_decode_graphs": True, "grouped_capture_sizes": (size,)} if grouped else {}
+        )
+        engine = InferenceEngine(
+            runtime.model,
+            block_size=BLOCK_SIZE,
+            num_blocks=needed + max(4, size),
+            device="cuda",
+            capabilities=runtime.capabilities,
+            **grouped_kwargs,
+        )
+        if grouped and size not in engine.grouped_decode_runners:
+            raise AssertionError(f"no grouped runner captured for batch {size}")
+
+        def decode(arm: str, engine=engine, requests=requests) -> float:
+            for req in requests:
+                engine.add_request(
+                    Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
+                )
+            with _device_page_metadata() if arm == "device" else contextlib.nullcontext():
+                engine.step()
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                while engine.scheduler.has_work():
+                    engine.step()
+                torch.cuda.synchronize()
+                return time.perf_counter() - start
+
+        for arm in HOST_PLAN_METADATA * 2:
+            decode(arm)
+        walls: dict[str, list[float]] = {arm: [] for arm in HOST_PLAN_METADATA}
+        for round_index in range(HOST_PLAN_ROUNDS):
+            order = HOST_PLAN_METADATA if round_index % 2 == 0 else HOST_PLAN_METADATA[::-1]
+            for arm in order:
+                walls[arm].append(decode(arm))
+        for arm in HOST_PLAN_METADATA:
+            for req in requests:
+                engine.add_request(
+                    Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
+                )
+            with _device_page_metadata() if arm == "device" else contextlib.nullcontext():
+                outputs[arm][size] = engine.run()
+        row: dict[str, object] = {"batch_size": size}
+        for arm in HOST_PLAN_METADATA:
+            wall_ms = statistics.median(walls[arm]) * 1000.0 / token_steps
+            row[arm] = {
+                "walls_s": walls[arm],
+                "wall_ms_per_token_step": wall_ms,
+                "raw_tokens_per_second": size * 1000.0 / wall_ms,
+            }
+        rows.append(row)
+        print(
+            f"[host-plan] {'grouped' if grouped else 'piecewise'} b{size}: device "
+            f"{row['device']['wall_ms_per_token_step']:.3f} -> host "
+            f"{row['host']['wall_ms_per_token_step']:.3f} ms/step"
+        )
+        del engine
+        torch.cuda.empty_cache()
+    return rows, outputs
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def host_plan_ab(batch_sizes: list[int]) -> str:
+    """Does handing FlashInfer host-side page metadata, which drops a per-step sync, pay?
+
+    Three engine configurations, each with both metadata arms on the same engine and graphs:
+    ``piecewise`` (the raw-engine default), ``grouped`` (the HTTP-server CUDA default), and
+    ``compiled`` (piecewise with ``torch.compile`` elementwise chains, the host-bound case from
+    entry 17). Fixed 128-token greedy output, EOS ignored. Every arm gates against the fp32
+    oracle, and the record stores direct device/host parity per configuration and batch.
+    """
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import normalized_outputs_match
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.runtime import load_model_runtime
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    capture_sizes = tuple(sorted(set(batch_sizes)))
+
+    configs: dict[str, list[dict]] = {}
+    outputs: dict[str, dict[str, dict[int, dict[str, list[int]]]]] = {}
+    runtime, _ = _load_bf16_with_graphs(capture_sizes, warm=False)
+    for name, grouped in (("piecewise", False), ("grouped", True)):
+        configs[name], outputs[name] = _host_plan_rows(runtime, batch_sizes, grouped=grouped)
+    tokenizer = runtime.tokenizer
+    del runtime
+    torch.cuda.empty_cache()
+    with _compiled_elementwise():
+        runtime, _ = _load_bf16_with_graphs(capture_sizes, warm=True)
+        configs["compiled"], outputs["compiled"] = _host_plan_rows(
+            runtime, batch_sizes, grouped=False
+        )
+        del runtime
+        torch.cuda.empty_cache()
+
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    for size in batch_sizes:
+        requests = build_requests(tokenizer, size)
+        reference = {
+            req.request_id: greedy_decode(
+                oracle_runtime.model,
+                list(req.prompt_ids),
+                max_new_tokens=ROOFLINE_NEW_TOKENS,
+                eos_token_ids=set(),
+            )
+            for req in requests
+        }
+        for name, rows in configs.items():
+            row = next(r for r in rows if r["batch_size"] == size)
+            for arm in HOST_PLAN_METADATA:
+                agreement = tie_tolerant_agreement(
+                    oracle_runtime.model, requests, outputs[name][arm][size], reference, frozenset()
+                )
+                row[arm]["agreement"] = dataclasses.asdict(agreement)
+            device_outputs, host_outputs = (
+                outputs[name]["device"][size],
+                outputs[name]["host"][size],
+            )
+            row["parity_status"] = (
+                "failed"
+                if set(device_outputs) != set(host_outputs)
+                else "exact"
+                if normalized_outputs_match(device_outputs, host_outputs, frozenset())
+                else "review_required"
+            )
+            print(
+                f"[host-plan] {name} b{size}: parity {row['parity_status']}, nontie "
+                f"{row['device']['agreement']['nontie']}/{row['host']['agreement']['nontie']}"
+            )
+
+    return json.dumps(
+        {
+            "probe": "decode-host-plan-ab",
+            "configs": configs,
+            "rounds": HOST_PLAN_ROUNDS,
+            "capture_sizes": list(capture_sizes),
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -2633,12 +2850,13 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "fusion-probe",
         "timeline",
         "host-timeline",
+        "host-plan-ab",
     ):
         raise ValueError(
             "command must be 'profile', 'sampled-profile', 'bench', 'ablate', 'capture', "
             "'sync', 'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
             "'four-layer-group-ab', 'four-layer-parity', 'bucket-policy', 'roofline', "
-            "'fusion-probe', 'timeline', or 'host-timeline', "
+            "'fusion-probe', 'timeline', 'host-timeline', or 'host-plan-ab', "
             f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
@@ -2693,6 +2911,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     elif command == "host-timeline":
         print(f"[esme-decode] host timeline: batches {sizes}, eager vs compiled, no CUPTI")
         record = json.loads(host_timeline.remote(sizes))
+    elif command == "host-plan-ab":
+        print(f"[esme-decode] host-plan A/B: batches {sizes}, device vs host page metadata")
+        record = json.loads(host_plan_ab.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
@@ -2718,6 +2939,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 "roofline",
                 "fusion-probe",
                 "host-timeline",
+                "host-plan-ab",
             )
             else MAX_NEW_TOKENS
         ),
@@ -2735,6 +2957,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 "roofline",
                 "fusion-probe",
                 "host-timeline",
+                "host-plan-ab",
             )
             else WARMUP_ITERS
         ),
@@ -2745,6 +2968,8 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             if command in ("two-layer-group-ab", "four-layer-group-ab")
             else 6
             if command == "bucket-policy"
+            else HOST_PLAN_ROUNDS
+            if command == "host-plan-ab"
             else MEASURED_ITERS
         ),
         "backend": (
@@ -2766,6 +2991,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant, plus direct "
             "eager/compiled parity"
             if command == "fusion-probe"
+            else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant, plus direct "
+            "device/host page-metadata parity"
+            if command == "host-plan-ab"
             else "none (diagnostic attribution only, never a speed claim)"
             if command in ("roofline", "timeline", "host-timeline")
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"

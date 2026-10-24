@@ -39,6 +39,7 @@ Two rules apply to every entry:
 | 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
+| 19 | What does removing the per-step `plan()` sync buy? | Pending; predictions registered before the run | — |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -727,12 +728,48 @@ Records: [`assets/esme-serving-grouped-ab.json`](../assets/esme-serving-grouped-
 (A). All three drop per-token inter-token latencies. Reproduce:
 `modal run scripts/modal_esme_serving_eval.py --batch-sizes 1,8,64 --measured-runs 5 --grouped-ab`.
 
+## 19. Host-side page metadata for FlashInfer's planner (predictions registered before the run)
+
+**Question.** Entry 17 found that FlashInfer's `plan()` blocks on a device-to-host copy on every
+decode step. The engine now passes CPU copies of `indptr` and `last_page_len` (built from the host
+lists it already has), and keeps `indices` on the device. What does removing that sync buy?
+
+**Method.** One A100 container, batch 1, 8, and 64, fixed 128-token greedy output with EOS
+ignored. Three engine configurations: `piecewise` (raw-engine default), `grouped` (HTTP-server
+CUDA default), and `compiled` (piecewise with `torch.compile` elementwise chains, entry 17's
+host-bound case). Each configuration runs both metadata arms on one persistent engine with the
+same graphs: `device` restores the old behavior by removing the host copies at both planner call
+sites, and `host` is the fix. Two warmup rounds, then five measured rounds that alternate which
+arm goes first. Every arm gates against the fp32 oracle, and the record stores direct
+device/host parity.
+
+**Predictions (written before the run).** The arithmetic uses entry 17's batch-1 numbers: about
+2.8 ms of host issue time per eager step against about 4.6 ms of GPU time, and about 2.7 ms of
+each in the compiled arm.
+
+- **Parity:** exact in every configuration and batch. The planner sees the same values, so any
+  other result is a bug.
+- **Piecewise and grouped, batch 1:** the GPU is the bottleneck, so the sync costs only the gap
+  before the next step's first kernel. Gain below 5%.
+- **Compiled, batch 1:** host and GPU time are about equal, so overlap pays most here. Wall falls
+  from about 3.1 ms toward 2.8 ms: a gain of 5–12%.
+- **Batch 8 and 64:** GPU time per step grows, so the fixed sync cost matters less. Gain below 3%.
+
+**Decision rule (set before the run).** Keep the fix if parity is exact in every row and no row
+is slower by more than 2%. A gain counts as a qualified relative result only with exact direct
+parity.
+
+**Result.** Pending.
+
+Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-ab --batch-sizes
+1,8,64`.
+
 ## Open questions
 
 - Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
   The entry-17 method is cheap enough to run there.
-- How much does removing the per-step `plan()` sync buy, and how much does capturing attention
-  in graphs buy on top (entry 17)?
+- How much does capturing attention in graphs buy on top of removing the `plan()` sync (entries
+  17 and 19)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
   than the 8 in the headline pool.
