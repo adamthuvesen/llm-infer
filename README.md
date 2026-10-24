@@ -155,8 +155,8 @@ shows where the remaining gain comes from:
 
 ![Esme ablation ladder: tok/s added by each engine technique](assets/fig-esme-ablation-ladder.svg)
 
-**Against vLLM.** `2026-10-24`, vLLM 0.24.0 and `llm_infer` (the HTTP server's CUDA configuration)
-on one reserved A100-SXM4-80GB host,
+**Against vLLM.** `2026-10-24`, vLLM 0.24.0 and `llm_infer` (grouped and piecewise CUDA graphs
+captured at each measured batch size) on one reserved A100-SXM4-80GB host,
 256 cached prompt tokens, 128 new tokens per request, EOS ignored, median of 10 runs:
 
 | Concurrent requests | `llm_infer` tok/s | vLLM tok/s | vLLM / `llm_infer` |
@@ -166,8 +166,10 @@ on one reserved A100-SXM4-80GB host,
 | 64 | 7,858.5 | 20,000.4 | 2.55x |
 | 256 | 18,911.1 | 35,181.0 | 1.86x |
 
-The high-batch gap was 8–12x on this table in July. Batched prefill closed most of it. The 3.1x
-batch-1 gap has not moved and is the main open question.
+Batched prefill closed most of the high-batch gap since July (findings entry 12 has that
+comparison). The 3.1x batch-1 gap has not moved and is the main open question. The HTTP server
+captures graphs only up to 16 concurrent requests by default; pass `--decode-graph-buckets` to
+serve larger batches from graphs.
 
 Method, the batch-scaling curve, and every row's reference status are in
 [docs/benchmark.md](docs/benchmark.md). The experiments behind these numbers, including the

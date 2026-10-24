@@ -7,7 +7,7 @@ while the parent keeps the host reservation. Hostname and GPU UUID are recorded 
 the fp32 oracle, and both engine children and must match before a result is accepted.
 
 Three engine arms run: ``llm_infer`` with the raw-engine defaults (piecewise decode graphs),
-``llm_infer_grouped`` with exact-batch grouped decode graphs (the HTTP-server CUDA default), and
+``llm_infer_grouped`` with exact-batch grouped decode graphs (as the HTTP server runs on CUDA), and
 vLLM. vLLM is pinned to ``VLLM_VERSION`` so a rerun measures engine changes, not a vLLM upgrade.
 
 Every speed row is gated against the fp32 ``PretrainBundleModel.logits()`` oracle. Exact output

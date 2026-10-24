@@ -193,8 +193,7 @@ def _series(rows: list[dict]) -> tuple[list[int], list[float]]:
 
 
 def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
-    """The engine curve against the naive-HF floor — the repo's claim is distance from
-    the naive baseline, so nothing else is drawn."""
+    """The engine curve against the naive-HF floor: batch-scaling evidence, not the headline."""
     llm_x, llm_y = _series(by_system["llm_infer"])
     hf_x, hf_y = _series(by_system["hf_sequential"])
     hf_by_batch = dict(zip(hf_x, hf_y, strict=True))

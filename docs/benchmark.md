@@ -43,9 +43,10 @@ The engine rungs add one technique at a time on the same requests:
 
 ![Esme ablation ladder: tok/s added by each engine technique](../assets/fig-esme-ablation-ladder.svg)
 
-CUDA graphs are the largest step (2.2–2.5x). Without graphs or batched prefill, paged KV with
-continuous batching runs below HF batched at 64 and 256 requests: at 214M the decode step waits
-on kernel launches, and paging buys capacity, not speed. See
+CUDA graphs are the largest step: 2.2–2.5x by median wall time. The first engine rung prefills
+requests one at a time and syncs every decode step, and it runs below HF batched at 64 and 256
+requests. Adding batched prefill alone brings it level with HF batched, so that deficit is serial
+prefill. See
 [findings entry 13](findings.md#13-ablation-ladder-what-each-technique-buys-on-one-gpu).
 
 ### Against vLLM: same host
@@ -53,7 +54,9 @@ on kernel launches, and paging buys capacity, not speed. See
 Run `2026-10-24`, one reserved A100-SXM4-80GB host. The fp32 oracle, `llm_infer`, and vLLM 0.24.0
 ran as sequential child processes with matching hostname and GPU UUID. Each request has 256 cached
 prompt tokens and generates 128 tokens with EOS ignored; two warmups, median of 10 runs. The
-`llm_infer` column is the HTTP server's CUDA configuration (grouped decode graphs on). All rows are
+`llm_infer` column has grouped and piecewise CUDA graphs captured at each measured batch size.
+The HTTP server's default graph buckets stop at 16, so it needs `--decode-graph-buckets` to match
+these rows at 64 and 256 requests. All rows are
 headline-eligible. Record: [`assets/esme-vllm-same-host.json`](../assets/esme-vllm-same-host.json),
 which also holds contexts 32 and 768 and the piecewise-only arm.
 
@@ -64,8 +67,9 @@ which also holds contexts 32 and 768 and the piecewise-only arm.
 | 64 | 7,858.5 | 20,000.4 | 2.55x |
 | 256 | 18,911.1 | 35,181.0 | 1.86x |
 
-vLLM stays faster at every batch size. The July run of the same harness measured an 8.1x and 11.8x
-gap at 64 and 256 requests; batched prefill closed most of it. The batch-1 gap (3.1x) is
+vLLM stays faster at every batch size. The July run of the same harness, on an A100 PCIe host
+and recorded in a local, uncommitted file, measured an 8.1x and 11.8x gap at 64 and 256 requests;
+batched prefill closed most of it. The batch-1 gap (3.1x) is
 unchanged, so it is not a batching effect. The two systems use different dependency stacks
 (Torch 2.8 / CUDA 12.8 against Torch 2.11 / CUDA 13.0). See
 [findings entry 12](findings.md#12-the-comparison-that-matters-vllm-on-the-same-host).

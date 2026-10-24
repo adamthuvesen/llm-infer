@@ -6,7 +6,9 @@ negative results, because they explain the current design as much as the wins do
 Each entry has four parts: the question, the method, the result, and the decision. Numbers come
 from Modal A100-80GB runs of `Esme-214M-Chat` unless an entry says otherwise. Raw JSON records
 live in the gitignored `bench-results/` directory. Each entry names its record so a maintainer can
-find it. The committed public curve is [`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json).
+find it. The committed public records are [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json),
+[`assets/esme-vllm-same-host.json`](../assets/esme-vllm-same-host.json), and
+[`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json).
 
 Two rules apply to every entry:
 
@@ -314,7 +316,8 @@ Findings so far:
 **Method.** One reserved A100-80GB host per run. The fp32 oracle, two `llm_infer` arms, and vLLM
 0.24.0 ran as sequential child processes, with matching hostname and GPU UUID checked. The
 `llm_infer` arm uses the raw-engine defaults (piecewise graphs). The `llm_infer_grouped` arm adds
-exact-batch grouped graphs, the HTTP-server CUDA default. Each row generated 128 tokens per
+exact-batch grouped graphs, as the HTTP server does on CUDA. Both arms capture graphs at every
+measured batch size; the server's default buckets stop at 16. Each row generated 128 tokens per
 request with EOS ignored, after two warmups, as the median of ten runs.
 
 **Result** (2026-10-24, A100-SXM4-80GB). All 36 rows are headline-eligible with zero non-tie
@@ -394,10 +397,11 @@ zero non-tie divergences.
 
 - **Against an honest baseline, the engine is about 3x, not 610x.** Most of the old headline
   multiple was plain batching: HF batched alone is 4.2x faster than HF sequential at batch 8.
-- **Paging alone is not a speedup at this size.** Without graphs or batched prefill, the paged
-  engine runs at 0.77x of HF batched at batch 64 and 0.52x at batch 256. Paged KV buys memory
-  capacity (entry 10, and the KV evidence in the public curve); speed comes from the techniques
-  above it.
+- **Serial prefill, not paging, is the first rung's deficit.** That rung prefills one request at
+  a time and syncs every decode step. It runs at 0.77x of HF batched at batch 64 and 0.52x at
+  batch 256. Adding batched prefill alone brings it level (1.00x and 1.06x). Paged KV buys memory
+  capacity (entry 10, and the KV evidence in the batch-scaling curve); speed comes from the
+  techniques above it.
 - **CUDA graphs are the largest single lever: 2.53x / 2.44x / 2.24x.** This is the launch-bound
   diagnosis of entry 2, measured on the full current stack.
 - **Batched prefill scales with batch: 1.05x / 1.30x / 2.03x.** That is the shape entry 5
@@ -408,9 +412,13 @@ zero non-tie divergences.
 - **The naive-HF floor is host-sensitive:** 59.9 tok/s here, 22.1 tok/s in the July headline run.
   A multiple over that floor mostly measures the host CPU.
 
-**Limits.** Different rungs resolve bf16 ties differently, so output lengths differ by up to 4%
-(1,263 to 1,318 tokens at batch 8). The adjacent-rung speedups above are median wall-time ratios at batch 8 / 64 / 256.
-Exact parity holds for 5 of the 12 rung transitions; the record stores both forms.
+**Limits.** Different rungs resolve bf16 ties differently, so output lengths differ by up to 4.4%
+(1,263 to 1,318 tokens at batch 8). The adjacent-rung speedups above are raw median wall-time
+ratios at batch 8 / 64 / 256. Exact output parity holds for only 5 of the 12 rung transitions, so
+the record withholds the parity-qualified ratio for the other 7; the figure plots tok/s, which
+differs from the wall-time ratio by the token-count difference. HF batched runs before the
+engine rungs, outside their rotation, so the engine-over-HF ratio is not drift-controlled the
+way adjacent rungs are.
 
 Record: [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json).
 Reproduce: `modal run scripts/modal_esme_batch_curve.py --command ladder`.
