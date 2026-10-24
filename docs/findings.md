@@ -916,8 +916,8 @@ comparison on one A100-SXM4, with the row-to-request mapping checked on every ba
 
 In the third column the reference is the bf16 recompute, so its margins and gaps are measured
 against that, not fp32. Its flip count may also include exact top-two ties in the bf16 reference,
-which the record counted as flips with a gap of 0. The code now counts a flip only when the gap
-is above 0.
+counted as flips with a gap of 0. The fp32 columns are unaffected, and so is every count above
+0.1.
 
 Engine flips by the fp32 top-two margin:
 
@@ -932,11 +932,13 @@ Engine flips by the fp32 top-two margin:
 - **The tail passes 0.1 (held).** The median shrink is 0.039, and 7.3% of positions move a
   competitor by more than 0.1 relative to the winner. A flip needs the fp32 margin to be small as
   well, which is why only 7 of 807 flips sit above the bound.
-- **The error is whole-model bf16, not the cached path (held).** Bf16 full recompute against fp32
-  matches the engine's distribution to within 1% at the 99th percentile. The paged KV, FlashInfer,
-  and CUDA-graph path adds no error of its own beyond a different rounding order: engine against
-  bf16 recompute has the same size of error as either against fp32. This turns entry 11's
-  conclusion from a few rows into a distribution.
+- **The cached path does not make the error larger (held for the distribution).** Bf16 full
+  recompute against fp32 matches the engine's distribution to within 1% at the 99th percentile.
+  So paged KV, FlashInfer, and CUDA graphs do not widen the error that the tie rule must cover.
+  They do change individual logits: engine against bf16 recompute shows an error as large as
+  either against fp32. A different rounding order would do that, but this run has no control
+  that separates a rounding-order effect from a small error of the cached path's own. That
+  attribution stays open.
 - **Flips stay near ties (held).** No flip has an fp32 gap above 0.25, and no flip occurs where
   the fp32 margin is 0.3 or more, across 113,729 such positions.
 - **Output rounding does not set the floor (failed).** The median bf16 spacing at the top logit is
@@ -971,3 +973,5 @@ Reproduce: `modal run scripts/modal_esme_bf16_error.py`. A CPU wiring check runs
   17 and 19)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
 - Should the bf16 tie bound stay at 0.1 or move to the measured 0.25 (entry 20)?
+- Does the cached path add error of its own, or only a different rounding order (entry 20)? It
+  needs a control, for example the engine against itself with a perturbed reduction order.

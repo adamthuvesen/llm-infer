@@ -50,12 +50,3 @@ def test_summary_bins_flips_by_fp32_margin_and_counts_review_rows() -> None:
 def test_mismatched_shapes_are_rejected() -> None:
     with pytest.raises(ValueError, match="matching"):
         position_errors(torch.zeros(2, 4), torch.zeros(2, 5))
-
-
-def test_exact_reference_tie_is_not_a_flip() -> None:
-    reference = _rows((2.0, 2.0))
-    candidate = reference.clone()
-    candidate[0, 7] += 0.01  # the candidate picks the other tied token
-    errors = position_errors(reference, candidate)
-    assert errors.flipped.tolist() == [False]
-    assert errors.flip_gap.tolist() == [0.0]
