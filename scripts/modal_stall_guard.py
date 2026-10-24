@@ -1,9 +1,9 @@
 """Fail a Modal GPU run loudly when it stops making progress.
 
-A run that hangs inside CUDA, a lock, or a network read prints nothing and keeps billing until the
-function timeout. On 2026-10-24 two runs sat silent for 50 minutes that way. ``arm`` dumps every
-thread's stack and exits the process once ``limit_s`` passes without a ``progress()`` call, so a
-stall fails the Modal call within minutes and leaves its stacks in the log.
+A run that hangs inside CUDA, a lock, or a network read prints nothing until the function
+timeout. ``arm`` dumps every thread's stack and exits the process once ``limit_s`` passes without
+a ``progress()`` call, so a stall fails the Modal call within minutes and leaves its stacks in the
+log.
 """
 
 from __future__ import annotations

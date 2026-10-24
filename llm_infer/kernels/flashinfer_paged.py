@@ -91,8 +91,8 @@ class FlashInferPagedAttention:
                 f"FlashInferPagedAttention needs a fp16/bf16 paged KV cache; got {dtype}"
             )
         wrapper = self._ensure_wrapper(page_plan.indptr.device)
-        # Host copies keep FlashInfer's planner from syncing the GPU to read them back; the
-        # fence then guards the planner's pinned buffer that the sync used to protect.
+        # Host copies keep FlashInfer's planner from syncing the GPU to read them back. The
+        # fence keeps the pinned plan buffer intact until the GPU has copied it.
         self._plan_fence.before_plan()
         wrapper.plan(
             page_plan.indptr_host if page_plan.indptr_host is not None else page_plan.indptr,

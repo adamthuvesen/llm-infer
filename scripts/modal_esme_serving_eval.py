@@ -56,7 +56,7 @@ def measure_serving(
     """Run greedy and sampled HTTP rows in one A100 process.
 
     ``grouped_ab`` measures every row twice in this same container, with piecewise-only
-    engines and with the exact-batch grouped runner, so the old-default versus new-default
+    engines and with the exact-batch grouped runner, so the piecewise versus grouped
     comparison is like-for-like on one GPU. The arm that runs first alternates from cell to
     cell. Each row carries a ``grouped`` field naming its arm and a ``run_order`` (0 first).
     """

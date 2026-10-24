@@ -51,10 +51,10 @@ def test_golden_strict_prefix_of_fast_fails() -> None:
 
 
 def test_small_top2_gap_does_not_excuse_a_far_off_fast_token() -> None:
-    """The hardened rule: a near-tie between the top two does NOT bless a third, far-down token.
+    """A near-tie between the top two does NOT bless a third, far-down token.
 
-    Regression for a check that accepted any divergence whenever the reference top-2 gap was
-    within tolerance, without checking the token the fast kernel actually chose. Here tokens 0
+    A small reference top-2 gap is not enough. The rule also checks the token the fast kernel
+    actually chose. Here tokens 0
     and 1 are tied (gap 1e-4), but the fast kernel picked token 5, a full 5 logits below the
     winner — a real bug, not a tie.
     """

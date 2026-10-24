@@ -46,12 +46,11 @@ number of kernels, not FLOPs. Most of the gains came from launching less.
   of the high-batch gap to vLLM, from 6.6–13.7x down to 1.7–2.6x [12].
 - **Attention inside the graph.** Grouped graphs capture KV writes and FlashInfer attention too.
   They pay only while the batch holds its captured size [7]. Grouping all 30 layers beat the
-  four-layer group by 2.9% to 4.6% per step, with exact parity, so the server now groups every
-  layer [21].
+  four-layer group by 2.9% to 4.6% per step, with exact parity, so the server groups every layer
+  [21].
 - **A hidden sync.** FlashInfer's `plan()` copied page metadata to the CPU on every step [17].
-  Passing host copies removed the sync and made grouped decode 1.6% to 3.8% faster [19]. The sync
-  had also hidden a race on a pinned buffer. The race stalled two runs silently, and a stack dump
-  from a new stall guard found it. A CUDA event now fences the buffer.
+  Passing host copies removed the sync and made grouped decode 1.6% to 3.8% faster [19]. Without
+  the sync, a CUDA event must keep the planner's pinned buffer intact until the GPU has copied it.
 
 ## What did not
 

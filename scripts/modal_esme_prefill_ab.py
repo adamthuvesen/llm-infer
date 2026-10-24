@@ -20,9 +20,9 @@ completed cells and append the rest to the same log.
 The ``prefill-divergence`` command reruns a single offending cell (batch 8, ragged, 64 output
 tokens) outside the timed path with extra recording — per-attempt first-divergence step/tokens,
 serial-vs-packed KV closeness per layer, and bf16 vs fp32-oracle logit margins — so a row the
-0.1-logit rule labeled "diverged" can be characterized before batched prefill is enabled by
-default. It writes its own ``bench-results/esme-prefill-divergence-<timestamp>.json`` and does
-not touch the rows-log / resume machinery.
+0.1-logit rule labeled "diverged" can be characterized. It writes its own
+``bench-results/esme-prefill-divergence-<timestamp>.json`` and does not touch the rows-log /
+resume machinery.
 
     modal run scripts/modal_esme_prefill_ab.py --command prefill-divergence
 """
@@ -342,7 +342,7 @@ def aggregate_mixed_load(
 ) -> dict[str, object]:
     """Median each mode's per-run scalars across pairs, then compare candidate to baseline.
 
-    ``candidate_vs_baseline`` reports the two decision ratios the roadmap turns on: whether
+    ``candidate_vs_baseline`` reports the two decision ratios for batched prefill: whether
     batched prefill lengthens or shortens the burst-spanning decode stall, and its effect on
     burst TTFT. Both are candidate-over-baseline, so above 1.0 means batched prefill is worse.
     """
@@ -700,7 +700,7 @@ def benchmark_mixed_load(
     Each ``engine.step()`` is bracketed by ``torch.cuda.synchronize()`` so per-step wall time is
     real host time, and ``decode_window_size=1`` keeps one decode token per step so a steady
     decoder's inter-token latency is exactly the wall time of the step that produced its token.
-    The gap that straddles the burst step is the decode-tail stall the roadmap asks about.
+    The gap that straddles the burst step is the decode-tail stall under test.
 
     Yields one ``meta`` event, then one ``row`` event per workload cell not already in
     ``completed``. Timing is reported for every mode regardless of the fp32-oracle verdict.

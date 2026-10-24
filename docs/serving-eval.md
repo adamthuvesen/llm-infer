@@ -1,8 +1,12 @@
 # Esme Serving Evaluation
 
-This harness shows how the Esme serving path behaves when scheduler features interact under
-load. It is not a replacement for the A100 benchmark in [../benchmark.md](benchmark.md). Any
-`tok/s` field is reported only when the workload passes the local reference gate.
+`scripts/esme_serving_eval.py` runs eight workloads against the Esme serving path. Each workload
+stresses scheduler features together: prefix caching, chunked prefill, preemption, speculative
+decode, streaming, and sampling. The harness records TTFT, queue time, preemption count, and KV
+utilization per workload. It reports `tok/s` only when the workload passes the reference gate.
+
+The harness runs on CPU by default (`--device cpu`). The A100 benchmark is in
+[benchmark.md](benchmark.md).
 
 ## Run Locally
 
@@ -103,50 +107,46 @@ Per-request HTTP controls:
 - `preemption_count`: sampled from the local engine or `/metrics` in external mode.
 - `kv_utilization_peak` / `kv_utilization_final`: used KV blocks divided by total blocks.
 - `reference.status`: `pass`, `fail`, `review` (a sampled replay group disagreed with
-  itself — see below), `partial` for mixed greedy/sampled rows, `skipped` for all sampled
+  itself, see below), `partial` for mixed greedy/sampled rows, `skipped` for all sampled
   rows, or `unavailable` for external HTTP.
 
-## Sampled reference: same-shape seeded replay (2026-07-11)
+## Sampled reference: same-shape seeded replay
 
-Greedy rows gate against the fp32 full-recompute reference with traced bf16 ties, unchanged.
-Sampled rows gate on **same-shape seeded replay**: every observed record of one request
-signature (same prompt, sampling params, and seed — all measured runs and all batchmates)
-must carry the identical token stream.
+Greedy rows gate against the fp32 full-recompute reference with traced bf16 ties.
+Sampled rows gate on **same-shape seeded replay**. Every observed record of one request
+signature must carry the identical token stream. A signature is the same prompt, sampling
+params, and seed, across all measured runs and all batchmates.
 
-Why the old gate was wrong: until 2026-07-10 a sampled record had to reproduce the seeded
-*single-request* stream exactly. That is a cross-shape exactness requirement, and bf16
-decode kernels legitimately produce slightly different logits per batch shape; one flipped
-multinomial draw then forks the whole continuation. The phase0 `sampled-b8`/`sampled-b64`
-rows failed this gate from their first run (2026-07-09, both grouped A/B arms) while every
-batchmate agreed token-for-token with every other batchmate and every measured run — the
-signature of shape numerics, not an RNG bug. The per-request seeded generator design is
-separately pinned by CPU tests (`test_sampling_batch_equivalence`, `test_decode_window`).
+Exact sampled tokens across batch shapes are not a valid target under bf16. bf16 decode
+kernels produce slightly different logits per batch shape. Near a tie, that difference flips
+one multinomial draw, and the flipped draw forks the whole continuation. RNG state stays
+identical per request, so the divergence is shape numerics and not an RNG bug. See
+[findings entry 9](findings.md) for the A100 probes behind this contract. CPU tests
+(`test_sampling_batch_equivalence`, `test_decode_window`) pin the per-request seeded
+generator design.
 
 Status mapping under reference policy v2:
 
-- replay-consistent and equal to the seeded single-request anchor → record `pass`, row
-  `exact`;
-- replay-consistent but anchor-divergent → record `pass_replay`, row `accepted_numerical`,
-  with the anchor's first mismatch stored as evidence (`replay_anchor_note`);
-- any disagreement inside a replay group → `replay_divergent`, row `review_required`,
-  throughput withheld (`not_reported_reference_review_required`). Admission-composition
-  drift (a straggler admitted a step late decodes under different shapes) and real
-  nondeterminism both land here; neither may pass silently.
+- replay-consistent and equal to the seeded single-request anchor: record `pass`, row
+  `exact`.
+- replay-consistent but anchor-divergent: record `pass_replay`, row `accepted_numerical`.
+  The record stores the anchor's first mismatch as evidence (`replay_anchor_note`).
+- any disagreement inside a replay group: `replay_divergent`, row `review_required`, and
+  throughput is withheld (`not_reported_reference_review_required`). Admission-composition
+  drift lands here, for example a straggler admitted a step late that decodes under different
+  shapes. Real nondeterminism lands here too. Neither can pass silently.
 
-Cross-shape exact sampled tokens are explicitly **not** required (performance roadmap,
-Phase 5 correctness checks). Sampling semantics (seeds, penalties, top-k, top-p) are pinned
-by the sampler unit tests, and greedy rows in the same record keep the fp32 gate, so model
-math regressions still fail loudly.
+The sampler unit tests pin sampling semantics (seeds, penalties, top-k, top-p). Greedy rows in
+the same record keep the fp32 gate, so model math regressions still fail loudly.
 
 ## What the harness demonstrates
 
-Local CPU runs of the full workload set (last checked `2026-06-30`, before the decode
-window became the engine default, so absolute latencies from that run are not current) show
-the public serving path can force and count real preemptions, preserve reference
-agreement, expose prefix caching, distinguish reference-gated rows from sampled rows, and
-report queue time, stream token counts, and KV utilization. The published per-technique
-GPU numbers live in [../benchmark.md](benchmark.md)'s technique gallery; this harness is
-the local, no-spend way to observe the same techniques interacting.
+The full workload set shows that the public serving path can force and count real
+preemptions and keep reference agreement. It also exposes prefix caching, separates
+reference-gated rows from sampled rows, and reports queue time, stream token counts, and KV
+utilization. This harness observes the techniques interacting on a local CPU. It does not
+publish latency numbers. The per-technique GPU numbers are in
+[findings entry 10](findings.md), and current throughput is in [findings entry 13](findings.md).
 
 ## Machine-Readable Output
 
@@ -155,4 +155,4 @@ The JSON summary contains one object per workload under `workloads[]`, with `met
 record per line with its workload and surface.
 
 Raw outputs should stay under `bench-results/`, which is git-ignored. Curated findings belong
-in this document or [../benchmark.md](benchmark.md).
+in this document or [benchmark.md](benchmark.md).

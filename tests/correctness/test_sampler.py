@@ -82,8 +82,8 @@ def test_top_p_one_is_a_no_op_full_softmax() -> None:
 def test_top_p_drops_the_redundant_token_at_an_exact_boundary() -> None:
     """When the prefix mass reaches exactly top_p, the next token is redundant and is dropped.
 
-    Regression for a ``>`` boundary that kept an extra token when the mass *before* it equalled
-    top_p exactly: the nucleus must be the minimal set whose cumulative mass reaches top_p.
+    The nucleus is the minimal set whose cumulative mass reaches top_p, so a token whose
+    preceding mass already equals top_p is excluded.
     """
     probs = torch.tensor([0.6, 0.4])  # token0 alone reaches top_p=0.6 exactly
     kept = _apply_top_p(probs, top_p=0.6)

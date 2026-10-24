@@ -224,8 +224,9 @@ def resolve_runtime_defaults(
       opt-in for larger bundles where the tradeoff may flip.
     * dtype ``None`` -> fp16 on cpu/mps (~12% faster than fp32, byte-identical on that bench;
       the startup line labels any non-fp32 config experimental and ``--dtype float32``
-      restores the reference config), fp32 on CUDA so GPU behavior does not move. bf16
-      measured slower than fp32 on this CPU and is never picked automatically.
+      restores the reference config). CUDA keeps the fp32 reference dtype, and GPU runs pass
+      ``--dtype bfloat16`` or ``--dtype float16`` to select FlashInfer. bf16 measured slower
+      than fp32 on this CPU and is never picked automatically.
     * attention ``auto`` -> ``torch_sdpa`` for non-CUDA bundle backends (the fused local
       path); CUDA ``auto`` still means FlashInfer inside the loader, and non-bundle backends
       pass through unchanged.
@@ -260,9 +261,10 @@ def resolve_engine_defaults(
 ) -> EngineDefaults:
     """Resolve the tri-state speculative/prefix-cache flags; explicit values win.
 
-    Both default on for non-CUDA serving where the backend supports them, and off on CUDA:
-    speculative decode would disable the deferred window and grouped graphs there, and the
-    settled GPU serving config must not move. An explicit ``True`` on an unsupported backend
+    Both default on for non-CUDA serving where the backend supports them, and off on CUDA.
+    On CUDA a speculative verify step gives up the deferred decode window and grouped graphs,
+    and it measured 3.5x to 4.2x slower per request at batch 1 (docs/findings.md entry 22).
+    The prefix cache stays opt-in there. An explicit ``True`` on an unsupported backend
     is left on so the engine raises a clear error rather than silently ignoring the request.
     """
     local = torch.device(device).type != "cuda"
@@ -379,14 +381,15 @@ def main() -> None:
     parser.add_argument(
         "--device",
         default="auto",
-        help="Torch device. auto resolves to mps on Apple silicon, else cpu; cpu/mps/cuda are "
-        "explicit.",
+        help="Torch device. auto resolves to cpu, because mps measured slower on the 214M "
+        "bundle. Pass cpu, mps, or cuda to choose explicitly.",
     )
     parser.add_argument(
         "--dtype",
         type=_dtype,
         default=None,
-        help="Model dtype. Default is auto: fp16 on MPS, fp32 otherwise; an explicit value wins.",
+        help="Model dtype. Default is auto: fp16 on cpu and mps, fp32 on cuda. An explicit "
+        "value wins.",
     )
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
     parser.add_argument("--num-blocks", type=int, default=DEFAULT_NUM_BLOCKS)

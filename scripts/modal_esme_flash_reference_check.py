@@ -1,17 +1,15 @@
 """Modal A100 harness: validate the Esme flash-attn KERNEL at equal dtype (bf16 vs bf16).
 
-Esme had only ever been validated on the ``torch_naive`` backend; ``FlashAttnPagedAttention`` is
-GPU-only and was never exercised on Esme weights (``tests/correctness/test_flash_attn_paged.py`` is
-Qwen-only). To validate flash for Esme, compare the **flash kernel against torch_naive at the same
-dtype** — both bf16, through the same engine paged path. That isolates the kernel: any difference
-is the flash kernel alone, not dtype.
+``FlashAttnPagedAttention`` is GPU-only, and ``tests/correctness/test_flash_attn_paged.py``
+covers it on Qwen only. This check covers it on Esme weights. It compares the **flash kernel
+against torch_naive at the same dtype**: both bf16, through the same engine paged path. That
+isolates the kernel, so any difference comes from the flash kernel alone, not from dtype.
 
-The corrected contract compares bf16 flash against bf16 ``torch_naive``. An earlier version used
-the **fp32** oracle, so kernel behavior and whole-model bf16 rounding were mixed. Genuine near-ties
-were flipped on Esme's thin-margin QK-norm logits (esme-001 step 22: fp32 gap 0.0119), which made
-that comparison unsuitable for checking the kernel. The recorded step-22 investigation found
-exact agreement between bf16 flash and bf16 ``torch_naive`` (gap 0.0000). Exact token parity is
-therefore required at equal dtype. A divergence is treated as a flash-kernel bug.
+The oracle is bf16 ``torch_naive``, not the fp32 oracle. Against fp32, whole-model bf16 rounding
+flips genuine near-ties on Esme's thin-margin QK-norm logits (esme-001 step 22: fp32 gap 0.0119),
+which hides kernel behavior. At step 22, bf16 flash and bf16 ``torch_naive`` agree exactly (gap
+0.0000). Exact token parity is therefore required at equal dtype. A divergence is treated as a
+flash-kernel bug.
 
 This mirrors the Qwen flash gate (``tests/correctness/test_flash_attn_paged.py``), which compares
 bf16 flash to a bf16 golden, and ``scripts/modal_esme_reference_check.py`` (the Esme torch_naive

@@ -105,13 +105,13 @@ def test_preemption_with_chunked_prefill_stays_token_exact() -> None:
 def test_prefill_skips_a_request_preempted_mid_step() -> None:
     """A request evicted while an earlier one prefills must not be prefilled out of the queue.
 
-    Regression for a stale running-set snapshot: ``_prefill_requests`` / ``_resume_requests`` once
-    captured the running set *before* the loop, so a candidate that ``_ensure_pool_room`` preempted
-    partway through (to free blocks for an earlier request) still passed the membership check and
-    got prefilled while sitting in ``waiting`` — double-allocating its KV and stalling forward
-    progress. With chunked prefill over a tight pool the eviction lands inside the prefill loop. We
-    step the engine and assert the invariant that a waiting request never holds cache state, then
-    that every output still matches the uninterrupted run token-for-token.
+    ``_prefill_requests`` / ``_resume_requests`` must check running-set membership per candidate,
+    not against a snapshot taken before the loop. Otherwise a candidate that ``_ensure_pool_room``
+    preempts partway through (to free blocks for an earlier request) gets prefilled while sitting
+    in ``waiting``, double-allocating its KV and stalling forward progress. With chunked prefill
+    over a tight pool the eviction lands inside the prefill loop. We step the engine and assert
+    the invariant that a waiting request never holds cache state, then that every output still
+    matches the uninterrupted run token-for-token.
     """
     model = _tiny_qwen()
     requests = [
@@ -212,10 +212,10 @@ def test_shared_prefix_group_under_preemption_is_uncorrupted_and_exact() -> None
 def test_finishers_under_pressure_do_not_crash_and_stay_exact() -> None:
     """A request that finishes mid-step must never be hit by a same-step preemption.
 
-    Regression: a 1-token request finishes during prefill but lingered in the running set until
-    the end-of-step sweep, so a later preemption that step could select it as the LIFO victim —
-    and recompute raises on a finished request, killing the step (and the serving engine thread).
-    The fix releases finishers right after each prefill/decode op and skips finished victims. We
+    A 1-token request finishes during prefill. If it stayed in the running set until the
+    end-of-step sweep, a later preemption that step could select it as the LIFO victim, and
+    recompute raises on a finished request, killing the step and the serving engine thread. The
+    engine releases finishers right after each prefill/decode op and skips finished victims. We
     interleave 1-token finishers with longer growers under a tight pool, assert no step raises and
     that no finished request is ever left in the running set, then that outputs stay token-exact.
     """

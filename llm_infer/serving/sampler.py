@@ -120,7 +120,7 @@ def sample_rows(
     """Select one token per row of ``(B, vocab)`` logits, each row under its own request.
 
     The filtering surface (penalties → temperature → top-k → top-p) runs **batched** over the
-    sampled rows, so its kernel count no longer grows with the batch; each disabled stage is an
+    sampled rows, so its kernel count is constant in batch size. Each disabled stage is an
     exact no-op on its row, matching :func:`sample_row`. The final draw stays one
     ``torch.multinomial`` per row from that row's own generator — the per-request RNG stream
     (seed, draw count, consumption order) is identical to sampling the rows one at a time, so

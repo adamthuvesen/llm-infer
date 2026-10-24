@@ -45,12 +45,12 @@ artifact byte-stable so it can be regression-checked.
   physically held right now, with the scheduler's `reserved_blocks` shown as fainter headroom
 - logical cache footprint from observed cached/generated token counts
 
-Block allocation/free is emitted clearly from the allocator boundary: a `block_allocated`
+The allocator boundary emits block allocation and free events: a `block_allocated`
 fires only when a block leaves the free pool (copy-on-write included), a `block_freed` fires only
 when a block truly returns (refcount-0), and a prefix-shared block retained by a sibling is freed
 once, by its last owner.
 
-Speculative traces are rendered clearly when present: if one `decode_step` has one
+Speculative traces are rendered when present: if one `decode_step` has one
 `request_id` and multiple `token_ids`, the viewer keeps those tokens together as a burst on
 that request lane. The committed fixture is non-speculative.
 
