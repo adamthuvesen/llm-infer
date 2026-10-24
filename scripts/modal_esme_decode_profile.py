@@ -19,6 +19,7 @@ bf16 CUDA Esme attention path, greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command bench --batch-sizes 8,32,128
     modal run scripts/modal_esme_decode_profile.py --command capture --batch-sizes 8,64,256
     modal run scripts/modal_esme_decode_profile.py --command serve-smoke
+    modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8
 
 ``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
 probe, launch counts, and the oracle-gated same-GPU ablation across the eager window and
@@ -1719,6 +1720,183 @@ def serve_smoke() -> str:
     )
 
 
+# Spec HBM bandwidth per A100 SKU (NVIDIA A100 datasheet): the floor for one decode step that
+# must stream every weight once.
+A100_PEAK_BYTES_PER_S = {"NVIDIA A100-SXM4-80GB": 2.039e12, "NVIDIA A100 80GB PCIe": 1.935e12}
+ROOFLINE_NEW_TOKENS = 128
+GEMM_KERNEL_MARKERS = ("gemm", "cutlass", "xmma", "cublas")
+ATTENTION_KERNEL_MARKERS = ("flashinfer", "batchdecode", "batchprefill", "flash_fwd")
+
+
+def _kernel_category(name: str) -> str:
+    lowered = name.lower()
+    if any(marker in lowered for marker in GEMM_KERNEL_MARKERS):
+        return "gemm"
+    if any(marker in lowered for marker in ATTENTION_KERNEL_MARKERS):
+        return "attention"
+    return "other"
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def roofline_report(batch_sizes: list[int]) -> str:
+    """Where one decode token-step goes, against the HBM floor of streaming the weights once.
+
+    Runs the default CUDA path (bf16, FlashInfer, piecewise decode graphs, decode window 8) on a
+    persistent engine with a fixed output length, so the batch never shrinks. Per batch size:
+    an uninstrumented timed run gives wall per token-step; a separate ``torch.profiler`` run
+    gives kernel time by category. ``idle_gap`` is wall minus kernel time: every moment no kernel
+    runs, which covers host dispatch and the gaps between graph nodes during a replay. Kernel
+    times inside graph replays come from CUPTI device records; the profiled run's own wall is
+    not used.
+    """
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    model = runtime.model
+    capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
+    gpu = gpu_snapshot()
+    peak_bytes_per_s = A100_PEAK_BYTES_PER_S.get(str(gpu.get("name")))
+    if peak_bytes_per_s is None:
+        raise RuntimeError(f"no spec HBM bandwidth recorded for GPU {gpu.get('name')!r}")
+    weight_bytes = sum(tensor.numel() * tensor.element_size() for tensor in model.w.values())
+    kv_bytes_per_token = (
+        model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
+    )
+
+    rows: list[dict] = []
+    for size in batch_sizes:
+        requests = build_requests(runtime.tokenizer, size)
+        needed = sum(
+            math.ceil((len(req.prompt_ids) + ROOFLINE_NEW_TOKENS) / BLOCK_SIZE) for req in requests
+        )
+        engine = InferenceEngine(
+            model,
+            block_size=BLOCK_SIZE,
+            num_blocks=needed + max(4, size),
+            device="cuda",
+            capabilities=runtime.capabilities,
+        )
+
+        def prefill(engine=engine, requests=requests) -> None:
+            for req in requests:
+                engine.add_request(
+                    Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
+                )
+            engine.step()
+            torch.cuda.synchronize()
+
+        def decode(engine=engine) -> float:
+            start = time.perf_counter()
+            while engine.scheduler.has_work():
+                engine.step()
+            torch.cuda.synchronize()
+            return time.perf_counter() - start
+
+        walls: list[float] = []
+        for iteration in range(2 + MEASURED_ITERS):
+            prefill()
+            wall = decode()
+            if iteration >= 2:
+                walls.append(wall)
+        walls.sort()
+        wall_s = walls[len(walls) // 2]
+        token_steps = ROOFLINE_NEW_TOKENS - 1
+
+        prefill()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+        ) as prof:
+            decode()
+        kernels = [
+            evt
+            for evt in prof.key_averages()
+            if evt.device_type == torch.autograd.DeviceType.CUDA and evt.self_device_time_total > 0
+        ]
+        by_category = {"gemm": 0.0, "attention": 0.0, "other": 0.0}
+        for evt in kernels:
+            by_category[_kernel_category(evt.key)] += evt.self_device_time_total / 1000.0
+        per_step = {name: ms / token_steps for name, ms in by_category.items()}
+        kernel_ms = sum(per_step.values())
+        wall_ms = wall_s * 1000.0 / token_steps
+        context_tokens = (
+            sum(len(req.prompt_ids) for req in requests) / size + ROOFLINE_NEW_TOKENS / 2
+        )
+        step_bytes = weight_bytes + kv_bytes_per_token * context_tokens * size
+        floor_ms = step_bytes / peak_bytes_per_s * 1000.0
+        rows.append(
+            {
+                "batch_size": size,
+                "decode_token_steps": token_steps,
+                "measured_walls_s": walls,
+                "wall_ms_per_token_step": wall_ms,
+                # Fixed-length decode is never checked against the fp32 oracle here, so the
+                # rate stays raw diagnostic timing and is never a public tok/s.
+                "raw_tokens_per_second": size * token_steps / wall_s,
+                "headline_eligible": False,
+                "tokens_per_second": None,
+                "kernel_ms_per_token_step": per_step,
+                "kernel_total_ms_per_token_step": kernel_ms,
+                "idle_gap_ms_per_token_step": wall_ms - kernel_ms,
+                "gpu_busy_fraction": kernel_ms / wall_ms,
+                "bytes_per_token_step": step_bytes,
+                "hbm_floor_ms_per_token_step": floor_ms,
+                "wall_over_floor": wall_ms / floor_ms,
+                "gemm_achieved_bytes_per_s": weight_bytes / (per_step["gemm"] / 1000.0),
+                "gemm_fraction_of_peak_bandwidth": (
+                    weight_bytes / (per_step["gemm"] / 1000.0) / peak_bytes_per_s
+                ),
+                "distinct_kernel_names": len(kernels),
+                "top_kernels": [
+                    {
+                        "name": evt.key,
+                        "category": _kernel_category(evt.key),
+                        "calls": evt.count,
+                        "device_ms": evt.self_device_time_total / 1000.0,
+                    }
+                    for evt in sorted(
+                        kernels, key=lambda e: e.self_device_time_total, reverse=True
+                    )[:20]
+                ],
+            }
+        )
+        print(
+            f"[roofline] batch={size}: wall {wall_ms:.3f} ms/step, kernels {kernel_ms:.3f} "
+            f"(gemm {per_step['gemm']:.3f}, attn {per_step['attention']:.3f}, other "
+            f"{per_step['other']:.3f}), floor {floor_ms:.3f} ms"
+        )
+        del engine
+        torch.cuda.empty_cache()
+
+    return json.dumps(
+        {
+            "probe": "decode-roofline",
+            "rows": rows,
+            "weight_bytes": weight_bytes,
+            "kv_bytes_per_token": kv_bytes_per_token,
+            "peak_hbm_bytes_per_s": peak_bytes_per_s,
+            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
+            "attention_backend": type(model.backend).__name__,
+            "gpu": gpu,
+            "versions": library_versions(),
+        }
+    )
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -1851,11 +2029,12 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "four-layer-group-ab",
         "four-layer-parity",
         "bucket-policy",
+        "roofline",
     ):
         raise ValueError(
             "command must be 'profile', 'sampled-profile', 'bench', 'ablate', 'capture', "
             "'sync', 'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
-            "'four-layer-group-ab', 'four-layer-parity', or 'bucket-policy', "
+            "'four-layer-group-ab', 'four-layer-parity', 'bucket-policy', or 'roofline', "
             f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
@@ -1898,6 +2077,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         record = json.loads(sync_report.remote(sizes))
     elif command == "serve-smoke":
         record = json.loads(serve_smoke.remote())
+    elif command == "roofline":
+        print(f"[esme-decode] roofline: batches {sizes}, {ROOFLINE_NEW_TOKENS} fixed new tokens")
+        record = json.loads(roofline_report.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
@@ -1915,7 +2097,13 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             if command == "flashinfer-graph-probe"
             else 128
             if command
-            in ("two-layer-group-ab", "four-layer-group-ab", "four-layer-parity", "bucket-policy")
+            in (
+                "two-layer-group-ab",
+                "four-layer-group-ab",
+                "four-layer-parity",
+                "bucket-policy",
+                "roofline",
+            )
             else MAX_NEW_TOKENS
         ),
         "warmup": (
@@ -1924,7 +2112,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else 0
             if command == "four-layer-parity"
             else 2
-            if command in ("two-layer-group-ab", "four-layer-group-ab", "bucket-policy")
+            if command in ("two-layer-group-ab", "four-layer-group-ab", "bucket-policy", "roofline")
             else WARMUP_ITERS
         ),
         "iters": (
@@ -1951,7 +2139,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             "fresh ordinary FlashInfer wrapper planned for the exact page metadata"
             if command == "flashinfer-graph-probe"
             else "none (diagnostic attribution only, never a speed claim)"
-            if command == "sampled-profile"
+            if command in ("sampled-profile", "roofline")
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"
         ),
         "repro_command": (
