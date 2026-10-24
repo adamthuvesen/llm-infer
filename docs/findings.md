@@ -40,6 +40,7 @@ Two rules apply to every entry:
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
+| 21 | Does grouping all 30 layers beat the server's four-layer group? | Pending; predictions registered before the run | — |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -803,7 +804,7 @@ the pilot for the confirmatory test below. No speed claim is made from them.
 measured rounds per row that alternate arm order. For each row and container, host and device are
 paired by round: `d_i = (host_i − device_i) / median(device)`, in percent. The statistic is the
 median of `d`, and its 95% interval is a percentile bootstrap over the 11 pairs (10,000
-resamples, seed 0), from `llm_infer/benchmarks/paired_change.py`. `scripts/judge_host_plan_ab.py`
+resamples, seed 0), from `llm_infer/benchmarks/paired_change.py`. `scripts/judge_paired_ab.py`
 applies the rule to both records, so no row is judged by eye.
 
 - **Merge gate:** parity is exact in every row on both containers, and no row regresses. A row
@@ -819,7 +820,7 @@ applies the rule to both records, so no row is judged by eye.
   host speed. Every piecewise and compiled interval includes 0.
 
 **Confirmatory result.** The merge gate passed, so the fix ships. Two A100 PCIe (300 W)
-containers, 11 rounds per row, judged by `scripts/judge_host_plan_ab.py`. Parity is exact in all 18
+containers, 11 rounds per row, judged by `scripts/judge_paired_ab.py`. Parity is exact in all 18
 rows, no row regresses, and no interval is wide enough to count as inconclusive.
 
 | Config | Batch | Container 1 | Container 2 | Verdict |
@@ -859,6 +860,40 @@ Records (pilot): [`assets/esme-decode-host-plan-ab-pilot-sxm4.json`](../assets/e
 
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-ab --batch-sizes
 1,8,64`.
+
+## 21. Full-step decode graphs (predictions registered before the run)
+
+**Question.** The HTTP server's CUDA default groups the first four layers, with their KV writes
+and FlashInfer attention, into one graph per exact batch. The other 26 layers replay piecewise
+graphs, with KV writes and attention running eagerly between them. In July, grouping 4 layers
+beat grouping 2 by about twice the margin, and nobody tried all of them. Does grouping all 30
+layers, so that a token step is one graph launch plus its `plan()`, beat the four-layer default?
+
+**Method.** `scripts/modal_esme_full_step_ab.py`. One persistent engine per arm and batch size:
+`grouped4` (the server default) and `full_step` (`grouped_layers=30`). Batch 1, 8, and 64, fixed
+128-token greedy output with EOS ignored, two warmup rounds, and 11 measured rounds that
+alternate which arm goes first. Every arm gates against the fp32 oracle, and the record stores
+direct `grouped4`/`full_step` token parity. Two A100 containers. `scripts/judge_paired_ab.py`
+applies the rule below, with entry 19's statistic: the median paired per-round change, with a
+95% percentile bootstrap interval over the 11 pairs.
+
+**Predictions (written before the run).** Entry 14 measured a batch-1 step as 91% GPU-busy, so
+at most about 9% of it is idle time that a single graph could reclaim.
+
+- **Parity:** exact at every batch. Capture changes when kernels launch, not what they compute.
+- **Batch 1:** `full_step` is 2–8% faster.
+- **Batch 8:** 1–6% faster.
+- **Batch 64:** 0–4% faster. GPU time per step grows with batch, so the host gaps matter less.
+- **Engine build:** `full_step` capture takes longer than `grouped4`, still within seconds.
+
+**Decision rule (set before the run).** The gate passes when parity is exact in every row on both
+containers and no row regresses: a row regresses if its interval's lower bound is above 0 and its
+median is above +2%. A row is a qualified gain only if its interval's upper bound is below 0 on
+both containers, and the headline is the smaller of the two medians. If the gate passes and
+batch 1 is a qualified gain, full-depth grouping becomes the HTTP-server default in a separate
+change. Otherwise the default stays at four layers.
+
+**Result.** Pending.
 
 ## Open questions
 
