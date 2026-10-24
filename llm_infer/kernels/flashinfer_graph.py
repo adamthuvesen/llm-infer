@@ -35,8 +35,10 @@ class PlanCopyFence:
 
     def after_plan(self, device: torch.device) -> None:
         if device.type == "cuda":
-            self._copied = torch.cuda.Event()
-            self._copied.record()
+            # The copy is queued on the metadata device's stream, which need not be current.
+            with torch.cuda.device(device):
+                self._copied = torch.cuda.Event()
+                self._copied.record(torch.cuda.current_stream(device))
 
 
 @dataclass(frozen=True)
