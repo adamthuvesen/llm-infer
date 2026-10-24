@@ -273,9 +273,17 @@ class EngineOwnedGroupedDecodeGraphRunner:
         plan_wrapper(
             self._graph_wrapper,
             FlashInferPageMetadata(
-                indptr=read_plan.page_plan.indptr,
+                indptr=(
+                    read_plan.page_plan.indptr_host
+                    if read_plan.page_plan.indptr_host is not None
+                    else read_plan.page_plan.indptr
+                ),
                 indices=read_plan.page_plan.indices,
-                last_page_len=read_plan.page_plan.last_page_len,
+                last_page_len=(
+                    read_plan.page_plan.last_page_len_host
+                    if read_plan.page_plan.last_page_len_host is not None
+                    else read_plan.page_plan.last_page_len
+                ),
             ),
             self._graph_shape,
         )

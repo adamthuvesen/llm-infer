@@ -58,6 +58,9 @@ class DecodeWindowPlan:
     page_indptr_matrix: torch.Tensor | None
     page_indices_matrix: torch.Tensor | None
     page_last_page_len_matrix: torch.Tensor | None
+    # CPU twins of the indptr and last-page-length matrices, for planners that read on the host.
+    page_indptr_host_matrix: torch.Tensor | None
+    page_last_page_len_host_matrix: torch.Tensor | None
     page_totals: list[int] | None
     page_indptr: torch.Tensor | None
     native_page_indices: torch.Tensor | None
@@ -152,6 +155,16 @@ class DecodeWindowPlan:
             indices=self.native_page_indices[:total_pages],
             last_page_len=self.page_last_page_len,
             page_size=self.block_size,
+            indptr_host=(
+                self.page_indptr_host_matrix[step]
+                if self.page_indptr_host_matrix is not None
+                else None
+            ),
+            last_page_len_host=(
+                self.page_last_page_len_host_matrix[step]
+                if self.page_last_page_len_host_matrix is not None
+                else None
+            ),
         )
 
 
@@ -264,6 +277,14 @@ def build_decode_window_plan(
         ),
         page_last_page_len_matrix=(
             upload(page_last_rows, torch.int32) if page_last_rows is not None else None
+        ),
+        page_indptr_host_matrix=(
+            torch.tensor(page_indptr_rows, dtype=torch.int32)
+            if page_indptr_rows is not None
+            else None
+        ),
+        page_last_page_len_host_matrix=(
+            torch.tensor(page_last_rows, dtype=torch.int32) if page_last_rows is not None else None
         ),
         page_totals=page_totals,
         page_indptr=(
