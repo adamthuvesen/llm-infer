@@ -69,16 +69,12 @@ class EngineOwnedGroupedDecodeGraphRunner:
             raise ValueError(f"mode must be 'eager' or 'graph'; got {mode!r}")
         if batch_size < 1:
             raise ValueError(f"batch_size must be positive; got {batch_size}")
-        if grouped_layers not in (2, 4):
-            raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
-        if model.num_layers < grouped_layers:
+        if not 1 <= grouped_layers <= model.num_layers:
             raise ValueError(
-                f"grouped runner needs {grouped_layers} layers; got {model.num_layers}"
+                f"grouped_layers must be between 1 and {model.num_layers}; got {grouped_layers}"
             )
         if mode == "graph" and capture_plan is None:
             raise ValueError("graph mode needs a prefilled capture plan")
-        if mode == "graph" and model.num_layers == grouped_layers:
-            raise ValueError("graph mode needs a following layer after the grouped tranche")
         self.model = model
         self.cache = cache
         self.batch_size = batch_size
@@ -114,7 +110,11 @@ class EngineOwnedGroupedDecodeGraphRunner:
     def window_step(
         self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
     ) -> torch.Tensor | None:
-        """Run one exact-batch step with the configured leading layers grouped."""
+        """Run one exact-batch step with the configured leading layers grouped.
+
+        With every layer grouped, the graph's last segment writes the logits and nothing runs
+        after the replay: the whole token step is one graph launch plus its ``plan()``.
+        """
         if len(plan.tables) != self.batch_size:
             return None
         if cache is not self.cache or cache.kv.data_ptr() != self._cache_kv_pointer:
