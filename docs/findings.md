@@ -847,6 +847,9 @@ negative is faster.)
   points, against pilot intervals of up to 28 points from five rounds.
 - **Limit:** both containers landed on the same host class (Intel family 6, model 106). The
   result does not cover other host classes.
+- **Known bias, in the claim's favor:** only the `device` arm runs the wrapper that strips the
+  host copies. It adds one or two `dataclasses.replace` calls per step, an estimated 0.1–0.2% of
+  a step (not measured). That is well below the smallest claimed gain of 1.6%.
 
 Records: [`assets/esme-decode-host-plan-ab-confirm-1.json`](../assets/esme-decode-host-plan-ab-confirm-1.json),
 [`assets/esme-decode-host-plan-ab-confirm-2.json`](../assets/esme-decode-host-plan-ab-confirm-2.json).

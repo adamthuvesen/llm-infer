@@ -18,6 +18,7 @@ from llm_infer.benchmarks.paired_change import PairedChange, paired_change
 REGRESSION_MEDIAN_PCT = 2.0
 INCONCLUSIVE_HALF_WIDTH_PCT = 3.0
 CLAIMED_CONFIG = "grouped"
+REGISTERED_ROUNDS = 11
 
 
 def _changes(record: dict) -> dict[tuple[str, int], tuple[PairedChange, str]]:
@@ -38,7 +39,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    records = [json.loads(Path(path).read_text(encoding="utf-8")) for path in sys.argv[1:]]
+    paths = [Path(path).resolve() for path in sys.argv[1:]]
+    if paths[0] == paths[1]:
+        print("error: the rule needs two different containers' records", file=sys.stderr)
+        return 2
+    records = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    if any(record["rounds"] != REGISTERED_ROUNDS for record in records):
+        print(f"error: the registered run has {REGISTERED_ROUNDS} rounds per row", file=sys.stderr)
+        return 2
     changes = [_changes(record) for record in records]
     if changes[0].keys() != changes[1].keys():
         print("error: the two records cover different rows", file=sys.stderr)
@@ -59,6 +67,8 @@ def main() -> int:
                 if change.ci_half_width_pct > INCONCLUSIVE_HALF_WIDTH_PCT
                 else "ok"
             )
+            # An inconclusive row is only labeled: under the rule it cannot fail the gate unless
+            # it also regresses, and it cannot support a claim (the claim below needs CI < 0).
             gate_passes &= parity == "exact" and not regresses
             cells.append(
                 f"{change.median_pct:+.1f}% [{change.ci_low_pct:+.1f}, {change.ci_high_pct:+.1f}] "
@@ -66,7 +76,10 @@ def main() -> int:
             )
         if config == CLAIMED_CONFIG:
             first, second = (container[key][0] for container in changes)
-            if first.ci_high_pct < 0 and second.ci_high_pct < 0:
+            both_exact = all(container[key][1] == "exact" for container in changes)
+            if not both_exact:
+                claims[f"{config} b{batch}"] = "not confirmed (parity not exact)"
+            elif first.ci_high_pct < 0 and second.ci_high_pct < 0:
                 smaller = min(first.median_pct, second.median_pct, key=abs)
                 claims[f"{config} b{batch}"] = f"qualified gain {smaller:+.1f}%"
             elif (first.median_pct < 0) != (second.median_pct < 0):
