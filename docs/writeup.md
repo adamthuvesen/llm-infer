@@ -77,9 +77,11 @@ was an audited choice, not a measurement. Entry 20 measured the error on 1,024 p
 statistic is the competitor shrink: how much bf16 error closes the fp32 gap between the winning
 token and a competitor. Its 99.9th percentile was 0.25 logits. 7 of 807 flips had an fp32 gap
 above 0.1, and no flip occurred where the gap was 0.3 or more. The bound stays at 0.1. At 0.25 it
-would sit at the ceiling of normal bf16 error and could not see a bug of that size. A divergence
-with an fp32 gap of at most 0.25 and exact direct parity is a known near-tie. It still gets a
-written review, and the review cites entry 20.
+would sit at the ceiling of normal bf16 error and could not see a bug of that size. A decode-step
+divergence with an fp32 gap of at most 0.25 and exact direct parity is a known near-tie, within
+the envelope entry 20 measured (Esme chat bundle, short Dolly prompts, A100). It still gets a
+written review, and the review cites entry 20. A prefill divergence, or one outside that
+envelope, gets a full review.
 
 Sampled output had its own contract error. Exact sampled tokens across batch shapes are not a
 valid target under bf16. The contract became same-shape seeded replay, and sampled serving became
