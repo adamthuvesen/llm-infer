@@ -46,7 +46,8 @@ _IGNORE = [
 
 image = (
     modal.Image.from_registry(CUDA_IMAGE, add_python="3.13")
-    .pip_install("torch>=2.2", "transformers>=4.43", "numpy>=1.26")
+    # Same torch as pyproject.toml and the flash image; --no-deps below cannot correct it later.
+    .pip_install("torch==2.8.0", "transformers>=4.43", "numpy>=1.26")
     .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
     .workdir(REMOTE_ROOT)
     .run_commands("pip install --no-deps -e .")

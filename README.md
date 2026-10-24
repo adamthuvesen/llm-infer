@@ -1,6 +1,6 @@
 # llm-infer
 
-![License](https://img.shields.io/github/license/adamthuvesen/llm-infer) ![Python](https://img.shields.io/badge/python-3.13%2B-blue)
+![License](https://img.shields.io/github/license/adamthuvesen/llm-infer) ![Python](https://img.shields.io/badge/python-3.13-blue)
 
 `llm-infer` is a small Python inference engine for learning, research, and measurement.
 It makes real serving techniques easy to inspect, checks outputs before making speed
@@ -72,7 +72,7 @@ walks the whole Esme chain, with every claim linked to a committed artifact.
 
 ## Install
 
-Python 3.13+ is required. Dependencies are managed with `uv`.
+Python 3.13 is required (torch 2.8.0, pinned to match the GPU image, has no 3.14 wheels). Dependencies are managed with `uv`.
 
 ```bash
 uv sync --extra dev --extra serving

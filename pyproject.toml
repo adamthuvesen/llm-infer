@@ -3,7 +3,7 @@ name = "llm-infer"
 version = "0.1.0"
 description = "A small paged LLM inference engine with pluggable model backends."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 license = "MIT"
 dependencies = [
     # Pinned to the Modal GPU image's torch (scripts/modal_flash_image.py), so CPU tests
