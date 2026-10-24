@@ -1988,8 +1988,8 @@ def fusion_probe(batch_sizes: list[int]) -> str:
             "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
         )
         if warm:
-            # Compile every decode shape on the eager path first, so no compilation can run
-            # inside graph capture.
+            # Run every decode shape on the eager path first, so most compilation happens
+            # before capture; capture's own warmup runs each segment before recording it.
             for size in capture_sizes:
                 requests = build_requests(runtime.tokenizer, size)
                 engine = InferenceEngine(
@@ -2056,11 +2056,12 @@ def fusion_probe(batch_sizes: list[int]) -> str:
                 oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
             )
             gate[arm] = dataclasses.asdict(agreement)
+        eager_outputs, compiled_outputs = outputs["eager"][size], outputs["compiled"][size]
         gate["parity_status"] = (
-            "exact"
-            if normalized_outputs_match(
-                outputs["eager"][size], outputs["compiled"][size], frozenset()
-            )
+            "failed"
+            if set(eager_outputs) != set(compiled_outputs)
+            else "exact"
+            if normalized_outputs_match(eager_outputs, compiled_outputs, frozenset())
             else "review_required"
         )
         gates.append(gate)
