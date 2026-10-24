@@ -1,9 +1,10 @@
 # Qwen correctness-fixture format
 
 This document describes the Qwen golden fixture. Esme uses the direct bundle
-logits/generation contract as its reference. The Qwen reference check never re-runs
-HuggingFace at test time; instead it replays a **committed golden fixture**
-of HF greedy token ids and asserts the llm-infer engine reproduces them token-for-token.
+logits/generation contract as its reference. The Qwen reference check
+(`tests/correctness/test_greedy_reference.py`) never re-runs HuggingFace at test time. It
+replays a **committed golden fixture** of HF greedy token ids and asserts that the llm-infer
+engine reproduces them token-for-token.
 Change this format only with a matching change to `scripts/generate_goldens.py` and the
 reference check.
 
@@ -58,13 +59,14 @@ Loads the pinned model in fp32 on CPU, applies the chat template, runs HF greedy
 each case, and rewrites the JSON. Add or edit cases in `tests/correctness/cases.py`,
 then regenerate and commit the updated fixture.
 
-## Benchmark rules
+## Tie rule
 
-The single-request unit path must produce exact token ids. A bf16 greedy step
-can diverge from HF only on a genuine numerical tie (top logits equal within
-tolerance); such a divergence is acceptable **only** when traced to that tie and
-documented here. Do not wave it off as "close enough." The reference check runs in **fp32** by
-default, where these ties near-vanish.
+The single-request unit path must produce exact token ids. A bf16 greedy step can diverge
+from HF only on a genuine numerical tie, where the top logits are equal within tolerance.
+Such a divergence is acceptable **only** when it is traced to that tie and documented here.
+The Qwen reference check runs in **fp32** by default, where these ties almost never occur.
+The Esme benchmark reference policy and its 0.1-logit bf16 tie rule are in
+[benchmark.md](benchmark.md#method).
 
 ## HF reference = full-recompute greedy
 
@@ -73,14 +75,14 @@ whole sequence per step, `argmax`, append. This is the *same algorithm class* as
 engine (which has no KV-cache and recomputes the full sequence each step). The fixture avoids
 `model.generate`.
 
-This was a real decision, forced by a traced divergence (see below). `generate` runs a
+The traced divergence below is the reason for this choice. `generate` runs a
 fused/cached attention kernel whose fp32 reduction order differs from token-by-token
 recompute. Pinning the reference check to `generate` would test "does the engine replicate
 HF's kernel fusion," not "does the engine decode the model correctly." Holding the
 attention algorithm fixed on both sides isolates the model math. That is what the
 reference check exists to check.
 
-### Traced divergence (the one that set this policy)
+### Traced divergence behind the full-recompute reference
 
 Case `single_table_group_by`, step 32, fp32, all paths loading the identical pinned
 model:
@@ -109,7 +111,7 @@ full-recompute math the winner is unambiguous and the engine matches HF exactly.
 only reason `generate` picks the other token is its different fused-kernel reduction
 order nudging a near-tie at an *earlier* step that cascades. Using full-recompute as
 the reference, the engine matches HF **token-for-token on every case with zero
-divergences**, so no bf16-style tie waiver is needed in reference check.
+divergences**, so the Qwen reference check needs no bf16-style tie waiver.
 
 ## What the reference check proves
 
@@ -119,15 +121,15 @@ greedy on the pinned Instruct model, under the pinned dtype and decoding config,
 the exact llm-rlvr `cot` prompt. That is the trusted reference every Qwen backend must
 reproduce.
 
-## The flash-attn backend and the tie-tolerance rule (flash-attn)
+## The flash-attn backend and the tie-tolerance rule
 
-`flash_attn_paged` is the first backend that runs a **fused** kernel in **bf16**, so
+`flash_attn_paged` runs a **fused** kernel in **bf16** against the Qwen goldens, so
 its fp32 reduction order differs from `torch_naive`'s materialized softmax. That is the
 same class of effect as the `generate`-vs-recompute split above: at a *genuine*
 numerical tie, where two top tokens have logits equal to within tiny noise, the fused
-reduction order can flip the argmax. Unlike reference check (full-recompute fp32, where ties
-near-vanish and the rule is bit-exact), the flash backend therefore needs a principled
-tie waiver. The rule stays falsifiable:
+reduction order can flip the argmax. The fp32 reference check uses full recompute, where
+ties almost never occur and the rule is bit-exact. The flash backend therefore needs a
+principled tie waiver. The rule stays falsifiable:
 
 - The flash backend's greedy continuation must match the committed golden
   **token-for-token**, with **one** exception class: a genuine numerical tie.
@@ -142,14 +144,15 @@ tie waiver. The rule stays falsifiable:
   is a real kernel/layout bug rather than a tie. There is no blanket "close enough" and no
   unconditional tolerance.
 
-This mirrors the reference check discipline exactly: the *non*-tie gap traced above was 0.397
+This is the same discipline as the fp32 reference check: the *non*-tie gap traced above was 0.397
 logits (~7000× the cross-path logit noise of 5.3e-5) and was correctly classified as
 **not** a tie. The 1e-3 tolerance sits well above that observed numerical noise yet
 hundreds of times below a real decision margin like 0.397, so it can accept genuine
 ties while still failing real bugs. The policy lives in `llm_infer/validation/tie_tolerance.py`; the
 GPU reference check is `tests/correctness/test_flash_attn_paged.py` (auto-skipped off CUDA, run
-on the target A100 via `scripts/modal_reference_check.py`). The exact `torch_naive` CPU reference check is
-unchanged and remains the local check.
+on the target A100 via `scripts/modal_reference_check.py`). The exact `torch_naive` CPU
+reference check is the local check. It is marked `slow`, so run it with
+`uv run pytest tests/correctness -q -m slow`.
 
 ### Traced flash-attn divergences
 
@@ -164,5 +167,5 @@ fp32-reduction-order difference never flipped an argmax on these cases, so the
 tie-tolerance rule above was never exercised: recompute the contested step with the
 `torch_naive` fp32 reference, accept only if the top-2 logit gap ≤ `1e-3`. A genuine
 near-tie would be accepted only on proof it is numerical, and a non-tie divergence would still
-fail the reference check. This mirrors the reference-check rule, where full-recompute fp32 also
-matched HF token-for-token with zero divergences and no waiver was needed.
+fail the reference check. The fp32 full-recompute reference check also matched HF
+token-for-token with zero divergences and no waiver.

@@ -67,12 +67,11 @@ which also holds contexts 32 and 768 and the piecewise-only arm.
 | 64 | 7,858.5 | 20,000.4 | 2.55x |
 | 256 | 18,911.1 | 35,181.0 | 1.86x |
 
-vLLM stays faster at every batch size. The July run of the same harness, on an A100 PCIe host
-and recorded in a local, uncommitted file, measured an 8.1x and 11.8x gap at 64 and 256 requests;
-batched prefill closed most of it. The batch-1 gap (3.1x) is
-unchanged, so it is not a batching effect. The two systems use different dependency stacks
-(Torch 2.8 / CUDA 12.8 against Torch 2.11 / CUDA 13.0). See
-[findings entry 12](findings.md#12-the-comparison-that-matters-vllm-on-the-same-host).
+vLLM stays faster at every batch size. The gap narrows to 1.86x at 256 requests and is widest
+at batch 1 (3.11x). Batch 1 has no batching effect, so batching cannot explain that gap. The two
+systems use different dependency stacks (Torch 2.8 / CUDA 12.8 against Torch 2.11 / CUDA 13.0).
+[Findings entry 12](findings.md#12-the-comparison-that-matters-vllm-on-the-same-host) compares
+these ratios with an earlier run of the same harness.
 
 `FlashInferPagedAttention` is the `auto` choice for CUDA fp16/bf16 Esme bundles and needs the
 `gpu` extra (`uv sync --extra gpu`); the Modal harnesses bake it into the shared GPU image. To
@@ -83,11 +82,16 @@ serve or benchmark on CUDA without it, pass `--attention-backend torch_naive` or
 
 ![Esme batch-size throughput curve](../assets/fig-esme-batch-curve.svg)
 
-Run `2026-07-10` on A100-80GB with the default CUDA Esme path: chat prompts from a fixed pool, greedy decoding, up to 256 new
-tokens per request, and prefix caching off. Each `llm_infer` row is the median of 3 measured
-iterations after 1 warmup. The sequential HF batch-8 anchor uses the same repetition count;
-the batch-16 through batch-256 HF rows are single measured flatness checks with no warmup because
-each iteration runs every request sequentially. The committed record is
+This curve was measured on `2026-07-10` with an earlier engine build, so its `llm_infer` tok/s are
+not current. It still shows the shape of batch scaling: engine throughput grows with concurrency
+while sequential HF stays flat. Current throughput is in the headline tables above and in the
+[README](../README.md).
+
+The run used one A100-SXM4-80GB (400 W) with the default CUDA Esme path: chat prompts from a fixed
+pool, greedy decoding, up to 256 new tokens per request, and prefix caching off. Each `llm_infer`
+row is the median of 3 measured iterations after 1 warmup. The sequential HF batch-8 anchor uses
+the same repetition count. The batch-16 through batch-256 HF rows are single measured flatness
+checks with no warmup, because each iteration runs every request sequentially. The committed record is
 [`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json), and the figure regenerates
 from repo state with:
 
@@ -105,16 +109,7 @@ uv run scripts/plot_benchmark_curve.py
 | 256 | 13,490.5 | 22.1 |
 
 At 256 concurrent requests, the engine serves 610.8x the same-row naive-HF floor. That multiple
-shows that throughput scales with concurrency while the sequential floor stays flat. It is not
-the headline, for the reasons above.
-
-Two things moved since the previous committed record (`2026-07-07`, 3,776.8 tok/s, 95.6x).
-Most of the gain is engine work: batched ragged prefill is now on by default, so the 256
-prompts prefill in packed calls instead of one at a time — the improvement grows with batch
-exactly as that predicts (batch 8 is unchanged within noise). The naive-HF floor also
-measured 22.1 tok/s on this run's container versus 39.5 on the previous one: the sequential
-`generate()` loop is host-bound, and cross-container host speed is the dominant term for it.
-Both sides of the multiple come from the same container in the same run, as always.
+is not the headline, for the reasons above.
 
 ## Method
 

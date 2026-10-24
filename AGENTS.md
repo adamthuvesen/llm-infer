@@ -43,7 +43,7 @@ Backend selection lives in `llm_infer/model/runtime.py`.
 ```
 llm_infer/
   model/             # backend registry, Esme/DenseBackbone loader, Qwen reference, rope utils
-  kernels/           # AttentionBackend protocol, torch_naive reference, flash_attn_paged
+  kernels/           # AttentionBackend protocol, torch_naive reference, torch_sdpa, FlashInfer, flash-attn
   kv_cache/          # block allocator, block tables, paged page store
   scheduler/         # prefill/decode admission, continuous batching, optional preemption
   serving/           # InferenceEngine step loop, sampler, OpenAI HTTP server, metrics
@@ -56,8 +56,9 @@ visualizer/          # schema-v3 KV trace replay UI
 ```
 
 Implemented features include greedy reference tests, paged KV cache, continuous batching,
-chunked prefill, prefix caching, flash-attn backend, speculative decode v1, request
-preemption, KV trace visualizer, and OpenAI-compatible serving with metrics/loadgen.
+chunked prefill, prefix caching, FlashInfer and flash-attn backends, piecewise and grouped CUDA
+decode graphs, prompt-lookup speculative decode, request preemption, KV trace visualizer, and
+OpenAI-compatible serving with metrics/loadgen.
 
 ## Benchmark rules
 
@@ -67,9 +68,8 @@ The 0.1-logit bf16 boundary is automatic acceptance. It stays below the measured
 (p99.9 shrink 0.25, `docs/findings.md` entry 20) so the gate can still see a bug. Larger
 numerical differences need a durable review. Entry 20 lists when that review may cite it.
 Missing/extra output and confirmed bugs fail. Keep raw
-timing in all measured rows, gate public tok/s with `headline_eligible`, and do not turn historical
-benchmark migration into a reason to rerun otherwise settled experiments. See
-`docs/internal/reference-policy-retro-audit.md` (maintainer-local notes, untracked).
+timing in all measured rows, gate public tok/s with `headline_eligible`, and do not rerun a settled
+experiment only to move its record to a newer policy format.
 
 ## Development
 
@@ -86,7 +86,7 @@ uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU reference check
 
 The local check is **CPU-runnable**: no GPU required. The slow 3B reference checks are opt-in
 because they load the pinned Qwen model and can take minutes on CPU.
-The flash-attn backend is GPU-only; Esme and Qwen reference checks run on the target
+The FlashInfer and flash-attn backends are GPU-only; Esme and Qwen reference checks run on the target
 GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
 Esme in `scripts/modal_esme_*` and the Qwen flash check in `scripts/modal_reference_check.py`.
 

@@ -5,10 +5,9 @@ negative results, because they explain the current design as much as the wins do
 
 Each entry has four parts: the question, the method, the result, and the decision. Numbers come
 from Modal A100-80GB runs of `Esme-214M-Chat` unless an entry says otherwise. Raw JSON records
-live in the gitignored `bench-results/` directory. Each entry names its record so a maintainer can
-find it. The committed public records are [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json),
-[`assets/esme-vllm-same-host.json`](../assets/esme-vllm-same-host.json), and
-[`assets/esme-batch-curve.json`](../assets/esme-batch-curve.json).
+go to `bench-results/`, which is not committed. Entries 12 onward commit the records behind their
+claims to [`assets/`](../assets/) and link them. Earlier entries name records that are not
+published.
 
 Two rules apply to every entry:
 
@@ -364,8 +363,8 @@ vLLM itself measured 2–27% faster on the new host.
   prefill packing, so this is now the cleanest open question.
 - **Grouped graphs give no gain in this harness: −0.7% to +3.4%.** They ran on every decode step
   (4,572 steps per bucket), and EOS is ignored, so batch drain does not explain it. In July a
-  fixed-length A/B measured +29.8% at batch 1. A plausible cause is the native-GQA decode change in
-  PR #27, which removed per-layer eager KV expansion between graph segments. That eager work is
+  fixed-length A/B measured +29.8% at batch 1. A plausible cause is the native-GQA decode change,
+  which removed per-layer eager KV expansion between graph segments. That eager work is
   what grouped graphs absorbed. This is a hypothesis, not a measurement. The HTTP-server default
   needed a fresh serving A/B before anyone relied on its +18% claim. Entry 18 ran it three times:
   the batch-1 gain is +10.3% or −1.3%, depending on the host class.
@@ -678,7 +677,7 @@ Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-timeli
 ## 18. Grouped graphs in the HTTP server, rerun
 
 **Question.** Do grouped graphs still pay in the HTTP server? Entry 7's serving A/B predates
-PR #27, and the raw-engine harness of entries 12 and 13 showed no gain.
+native-GQA decode, and the raw-engine harness of entries 12 and 13 showed no gain.
 
 **Method.** Streaming requests over localhost HTTP, greedy and seeded sampled workloads, batch 1,
 8, and 64, 128 new tokens, 2 warmups, and 5 measured runs per row. Graph capture for batch sizes 1
@@ -762,17 +761,16 @@ each in the compiled arm.
 is slower by more than 2%. A gain counts as a qualified relative result only with exact direct
 parity.
 
-**Result.** The decision rule failed as written, so the fix stays on its branch. The first two
-attempts hung the GPU at batch 64, and the third and fourth ran in two containers, not one.
+**Result.** The decision rule failed as written, so the pilot did not adopt host metadata. The
+pilot ran in two containers, one per host class.
 
-- **The first version raced a FlashInfer buffer.** `plan()` writes its plan info into one pinned
-  host buffer and queues an async copy to the device. The device-to-host read this entry removes
-  had drained the GPU first, which made reusing that buffer safe. Without it, a decode window
-  runs steps ahead, the next `plan()` overwrites the buffer before the copy runs, and a batch-64
-  kernel reads another step's plan and never finishes. A stall guard's thread dump found it: the
-  host was blocked on an ordinary kernel launch behind a stuck queue. The fix now waits, before
-  each `plan()`, on an event recorded after the previous one. That waits until the GPU reaches the
-  copy, not until it finishes the step. Removing a hidden sync can hand its job to a race.
+- **Removing the sync exposed a race on a FlashInfer buffer.** `plan()` writes its plan info into
+  one pinned host buffer and queues an async copy to the device. The device-to-host read this entry
+  removes had drained the GPU first, which made reusing that buffer safe. Without it, a decode
+  window runs steps ahead, the next `plan()` overwrites the buffer before the copy runs, and a
+  batch-64 kernel reads another step's plan and never finishes. Before each `plan()`, the engine
+  waits on an event recorded after the previous one. That waits until the GPU reaches the copy,
+  not until it finishes the step. Removing a hidden sync can hand its job to a race.
 - **Parity is exact in all 18 rows,** with 0 non-tie divergences against the fp32 oracle.
 - **Three rows were slower by more than 2%:** piecewise batch 8 (+2.4%, SXM4), piecewise batch 1
   (+3.7%, PCIe), and compiled batch 64 (+3.4%, PCIe). Their per-round walls spread 5%, 22%, and
@@ -821,7 +819,7 @@ applies the rule to both records, so no row is judged by eye.
 - **Predictions:** grouped batch 1 and 8 gain 2–4%, and grouped batch 64 gains 3–12%, depending on
   host speed. Every piecewise and compiled interval includes 0.
 
-**Confirmatory result.** The merge gate passed, so the fix ships. Two A100 PCIe (300 W)
+**Confirmatory result.** The gate passed, and host page metadata became the default. Two A100 PCIe (300 W)
 containers, 11 rounds per row, judged by `scripts/judge_paired_ab.py`. Parity is exact in all 18
 rows, no row regresses, and no interval is wide enough to count as inconclusive.
 
@@ -898,8 +896,7 @@ logit values of 16–64 is 0.125–0.25.
 
 **Decision rule (set before the run).** If the 99.9th-percentile shrink is at most 0.1 and no flip
 has a gap above 0.1, the bound becomes a measured percentile. Otherwise the bound stays as it is,
-and any new tolerance goes to the maintainer as a proposal with these counts. A threshold change
-is a policy decision, so this entry does not make it.
+and a new tolerance is a policy decision, made with these counts.
 
 **Result.** The decision rule keeps the 0.1 bound as it is: the 99.9th-percentile shrink is 0.25,
 and 7 flips have an fp32 gap above 0.1. Three of four predictions held. 130,048 positions per
@@ -954,7 +951,7 @@ Engine flips by the fp32 top-two margin:
   policy v2 accepts it. At most 7 prompts in 1,024 (0.7%) would reach `review_required` from a
   decode step; the prefill token is not measured.
 
-**Decision (maintainer).** The automatic bound stays at 0.1 logits. The two options considered were
+**Decision.** The automatic bound stays at 0.1 logits. The two options considered were
 keeping 0.1 or raising it to 0.25, the measured 99.9th-percentile shrink. A gate at 0.25 sits at
 the ceiling of normal bf16 error, so it could not tell that error from a kernel bug that moves
 logits by 0.2. Keeping 0.1 costs little: at most 0.7% of requests reach `review_required` from a
@@ -1046,7 +1043,7 @@ Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json)
 ## 22. Prompt-lookup speculation on the CUDA engine (predictions registered before the run)
 
 **Question.** Speculation is off on CUDA (entry 10). Its one positive row was a single
-repetition-heavy request on the old flash-attn backend. A speculative step verifies up to four
+repetition-heavy request on the flash-attn backend. A speculative step verifies up to four
 drafted tokens in one forward pass, but it gives up the decode window and its graph path. Does it
 pay at batch 1 on the current engine, on ordinary prompts or on prompts whose answers copy their
 input?
@@ -1121,8 +1118,6 @@ Records: [`assets/esme-spec-decode-ab-1.json`](../assets/esme-spec-decode-ab-1.j
 ## Open questions
 
 - Can a graphed, planned multi-token verify step make speculation pay on CUDA (entry 22)?
-- Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
-  The entry-17 method is cheap enough to run there.
-- Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
+- Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots record the CPU.
 - Does the cached path add error of its own, or only a different rounding order (entry 20)? It
   needs a control, for example the engine against itself with a perturbed reduction order.

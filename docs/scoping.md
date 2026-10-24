@@ -37,15 +37,15 @@ single-request unit path must produce exact token ids, and batched and paged pat
 checked against that behavior.
 
 bf16 greedy can diverge from fp32 near a token-decision boundary. Policy v2 calls rows `exact`,
-`accepted_numerical`, `review_required`, or `failed`. The existing 0.1-logit bound remains the
-automatic acceptance boundary. A larger numerical difference needs a recorded review; structural
-output failures and confirmed bugs fail. `review_required` is not shorthand for “the engine is
+`accepted_numerical`, `review_required`, or `failed`. The 0.1-logit bound is the automatic
+acceptance boundary. [Findings entry 20](findings.md) measured the error it has to cover. A larger
+numerical difference needs a recorded review. Structural output failures and confirmed bugs fail. `review_required` is not shorthand for “the engine is
 broken,” and it does not erase the measured timing.
 
 For same-run A/B work, `exact` or explicitly reviewed `accepted_numerical` candidate/baseline
 parity, plus equal token counts, can support the relative change even when both paths share a
 pending fp32 review. Headline tok/s still requires `exact` or `accepted_numerical` reference
-status. This keeps the gate useful without making benchmark archaeology the project's main job.
+status.
 
 ## Backends
 
@@ -85,7 +85,6 @@ llm_infer/
   benchmarks/     # Esme benchmark helpers and shared report utilities
 tests/correctness/ # reference and equivalence checks
 docs/             # public docs
-docs/internal/    # maintainer-local lab notes (untracked)
 scripts/          # goldens, benchmarks, loadgen, real-engine trace generator
 visualizer/       # schema-v3 KV trace replay UI
 ```
