@@ -30,7 +30,8 @@ Two rules apply to every entry:
 | 9 | What is the right sampled-output contract? | Same-shape seeded replay, not cross-shape exact tokens | Contract changed; sampled serving 3–5x faster |
 | 10 | Do chunked prefill, prefix caching, preemption, and speculation work? | Mixed; see the entry | Defaults follow the measurements |
 | 11 | Is the 0.1-logit bf16 bound measured? | No: it is an audited acceptance bound | Open; listed below |
-| 12 | How far is the engine from vLLM? | 3.1–3.2x at batch 1, 6.6–13.7x at batch 64/256 (before entries 6–7) | Rerun prepared |
+| 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
+| 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -310,51 +311,116 @@ Findings so far:
 
 **Question.** How far is this engine from a mature serving engine on the same model and GPU?
 
-**Method.** One reserved A100-80GB PCIe host. The fp32 oracle, `llm_infer`, and vLLM 0.24.0 ran as
-sequential child processes, with matching hostname and GPU UUID checked. Each row generated 128
-tokens per request (EOS ignored), with two warmups and the median of ten runs. All 24 rows passed
-the fp32 gate with zero non-tie divergences.
+**Method.** One reserved A100-80GB host per run. The fp32 oracle, two `llm_infer` arms, and vLLM
+0.24.0 ran as sequential child processes, with matching hostname and GPU UUID checked. The
+`llm_infer` arm uses the raw-engine defaults (piecewise graphs). The `llm_infer_grouped` arm adds
+exact-batch grouped graphs, the HTTP-server CUDA default. Each row generated 128 tokens per
+request with EOS ignored, after two warmups, as the median of ten runs.
 
-**Result** (2026-07-09):
+**Result** (2026-10-24, A100-SXM4-80GB). All 36 rows are headline-eligible with zero non-tie
+divergences: 14 rows are exact, and 22 contain accepted bf16 ties.
 
-| Context | Batch | `llm_infer` tok/s | vLLM tok/s | vLLM / `llm_infer` |
-| ---: | ---: | ---: | ---: | ---: |
-| 32 | 1 | 154.0 | 492.6 | 3.20x |
-| 32 | 8 | 869.0 | 3,335.7 | 3.84x |
-| 32 | 64 | 2,336.2 | 19,040.0 | 8.15x |
-| 32 | 256 | 2,802.4 | 38,283.1 | 13.66x |
-| 256 | 1 | 151.2 | 485.1 | 3.21x |
-| 256 | 8 | 842.8 | 3,191.6 | 3.79x |
-| 256 | 64 | 2,168.8 | 17,492.0 | 8.07x |
-| 256 | 256 | 2,609.8 | 30,802.9 | 11.80x |
-| 768 | 1 | 150.5 | 470.9 | 3.13x |
-| 768 | 8 | 799.4 | 2,994.9 | 3.75x |
-| 768 | 64 | 1,890.5 | 12,426.1 | 6.57x |
-| 768 | 256 | 2,211.0 | 17,828.1 | 8.06x |
+| Context | Batch | `llm_infer` tok/s | `llm_infer_grouped` tok/s | vLLM tok/s | vLLM / `llm_infer_grouped` | July ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 1 | 186.0 | 184.7 | 564.7 | 3.06x | 3.20x |
+| 32 | 8 | 1,208.1 | 1,208.1 | 3,416.3 | 2.83x | 3.84x |
+| 32 | 64 | 9,196.4 | 9,168.7 | 24,142.2 | 2.63x | 8.15x |
+| 32 | 256 | 25,836.8 | 26,188.6 | 44,863.5 | 1.71x | 13.66x |
+| 256 | 1 | 180.8 | 180.9 | 563.1 | 3.11x | 3.21x |
+| 256 | 8 | 1,173.4 | 1,188.6 | 3,298.7 | 2.78x | 3.79x |
+| 256 | 64 | 7,743.5 | 7,858.5 | 20,000.4 | 2.55x | 8.07x |
+| 256 | 256 | 18,298.8 | 18,911.1 | 35,181.0 | 1.86x | 11.80x |
+| 768 | 1 | 177.1 | 178.7 | 550.8 | 3.08x | 3.13x |
+| 768 | 8 | 1,131.4 | 1,138.4 | 3,080.9 | 2.71x | 3.75x |
+| 768 | 64 | 6,186.0 | 6,197.1 | 13,359.6 | 2.16x | 6.57x |
+| 768 | 256 | 11,741.0 | 11,851.3 | 19,876.7 | 1.68x | 8.06x |
+
+The July ratio column comes from the 2026-07-09 run (A100 PCIe, same harness, same vLLM version,
+`llm_infer` arm only). Compare ratios across the two runs, not raw tok/s: the hosts differ, and
+vLLM itself measured 2–27% faster on the new host.
+
+**What changed.**
+
+- **The high-batch gap closed from 6.6–13.7x to 1.7–2.6x.** In July, serial prefill took 67–84% of
+  `llm_infer` wall at batch 64–256. Batched prefill (entry 6) removed most of it.
+- **The batch-1 gap did not move: 3.1x then, 3.1x now.** Batch 1 has no batching effect and no
+  prefill packing, so this is now the cleanest open question.
+- **Grouped graphs give no gain in this harness: −0.7% to +3.4%.** They ran on every decode step
+  (4,572 steps per bucket), and EOS is ignored, so batch drain does not explain it. In July a
+  fixed-length A/B measured +29.8% at batch 1. A plausible cause is the native-GQA decode change in
+  PR #27, which removed per-layer eager KV expansion between graph segments. That eager work is
+  what grouped graphs absorbed. This is a hypothesis, not a measurement. The HTTP-server default
+  needs a fresh serving A/B before anyone relies on its +18% claim.
 
 **Limits.**
 
-- This run predates batched prefill (entry 6) and grouped graphs (entry 7). At that time, serial
-  prefill took 67–84% of `llm_infer` wall at batch 64–256, so the high-batch gap is the stale part
-  of this table.
-- The two systems used separate dependency stacks: Torch 2.8 / CUDA 12.8 against Torch 2.11 /
+- The two systems use separate dependency stacks: Torch 2.8 / CUDA 12.8 against Torch 2.11 /
   CUDA 13.0.
-- Each context row repeats one synthetic prompt, so this workload does not test prompt diversity.
+- Each context row repeats one synthetic prompt, and EOS is ignored. The ladder (entry 13) covers
+  the natural chat workload with real EOS.
+- Startup is not part of the comparison. vLLM took 62.6 s to build; `llm_infer` took 14.4 s for
+  piecewise capture plus about 13 s for grouped capture.
 
-**Decision.** The batch-1 gap (about 3.2x) is the cleanest open question: it is not a batching
-effect. A rerun against the current engine is prepared in
-[`scripts/modal_esme_vllm_baseline.py`](../scripts/modal_esme_vllm_baseline.py), with vLLM pinned
-to 0.24.0 and a grouped-graph `llm_infer` arm.
+Record: [`assets/esme-vllm-same-host.json`](../assets/esme-vllm-same-host.json).
+Reproduce: `modal run scripts/modal_esme_vllm_baseline.py --command full`.
 
-Record: `esme-vllm-baseline-full-20260709T235733`.
+## 13. Ablation ladder: what each technique buys, on one GPU
+
+**Question.** Entries 2–7 ran in different containers, so their gains cannot be added. What does
+each technique contribute when all of them run on one GPU, and how does the engine compare with
+plain batched HF?
+
+**Method.** One A100-SXM4-80GB container on the headline workload: chat prompts, up to 256 new
+tokens, real EOS, greedy. Two HF baselines run first: sequential `generate()` (the naive floor)
+and left-padded batched `generate()`. Then five cumulative engine rungs each add one technique.
+Every engine rung is a persistent engine built before timing, and rung order rotates each
+iteration. Medians come from five runs after one warmup. All 19 rows passed the fp32 gate with
+zero non-tie divergences.
+
+**Result** (2026-10-24, raw tok/s):
+
+| System | Batch 8 | Batch 64 | Batch 256 |
+| --- | ---: | ---: | ---: |
+| HF sequential `generate()` | 59.9 | — | — |
+| HF batched `generate()` | 249.4 | 2,079.3 | 6,070.9 |
+| Paged KV + continuous batching | 259.9 | 1,602.6 | 3,173.5 |
+| + batched prefill | 283.5 | 2,084.7 | 6,460.1 |
+| + decode window | 309.3 | 2,402.8 | 8,407.7 |
+| + piecewise CUDA graphs | 778.7 | 5,865.9 | 18,637.1 |
+| + grouped graphs | 777.7 | 5,867.8 | 18,784.9 |
+| **Full engine / HF batched** | **3.12x** | **2.82x** | **3.09x** |
+
+**Findings.**
+
+- **Against an honest baseline, the engine is about 3x, not 610x.** Most of the old headline
+  multiple was plain batching: HF batched alone is 4.2x faster than HF sequential at batch 8.
+- **Paging alone is not a speedup at this size.** Without graphs or batched prefill, the paged
+  engine runs at 0.77x of HF batched at batch 64 and 0.52x at batch 256. Paged KV buys memory
+  capacity (entry 10, and the KV evidence in the public curve); speed comes from the techniques
+  above it.
+- **CUDA graphs are the largest single lever: 2.53x / 2.44x / 2.24x.** This is the launch-bound
+  diagnosis of entry 2, measured on the full current stack.
+- **Batched prefill scales with batch: 1.05x / 1.30x / 2.03x.** That is the shape entry 5
+  predicted from the prefill share of wall time.
+- **The decode window adds 1.10x / 1.15x / 1.29x**, more than the 0–3% it gave alone in July.
+  It now also carries the planned buffers and stable page metadata.
+- **Grouped graphs add 1.00x / 1.00x / 1.01x** under real EOS, consistent with entries 7 and 12.
+- **The naive-HF floor is host-sensitive:** 59.9 tok/s here, 22.1 tok/s in the July headline run.
+  A multiple over that floor mostly measures the host CPU.
+
+**Limits.** Different rungs resolve bf16 ties differently, so output lengths differ by up to 4%
+(1,263 to 1,318 tokens at batch 8). The adjacent-rung speedups above are median wall-time ratios at batch 8 / 64 / 256.
+Exact parity holds for 5 of the 12 rung transitions; the record stores both forms.
+
+Record: [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json).
+Reproduce: `modal run scripts/modal_esme_batch_curve.py --command ladder`.
 
 ## Open questions
 
-- What explains the batch-1 gap to vLLM? A 214M bf16 model reads about 0.43 GB of weights per
-  step, so A100 bandwidth allows several thousand steps per second. The engine runs about 150. The
-  remaining host and launch cost is not yet split.
+- What explains the 3.1x batch-1 gap to vLLM? A 214M bf16 model reads about 0.43 GB of weights
+  per step, so A100 bandwidth allows several thousand steps per second. The engine runs about 180.
+  The host, launch, and kernel shares are not yet split.
+- Do grouped graphs still pay anywhere? Entries 12 and 13 show no gain on the current engine. The
+  HTTP serving A/B that justified the server default predates PR #27.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
   than the 8 in the headline pool.
-- How much did each technique contribute on one GPU? Entries 2–7 ran in different containers, so
-  their gains cannot be added. A same-container ablation ladder is prepared as
-  `modal run scripts/modal_esme_batch_curve.py --command ladder`.
