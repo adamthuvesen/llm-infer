@@ -7,7 +7,9 @@ attention, and an OpenAI-compatible server. On one A100 it serves 3.1x the token
 batched HuggingFace `generate()`. vLLM on the same host is 1.9x to 3.1x faster than `llm-infer`.
 
 This page tells the story of the 22 experiments in [findings.md](findings.md). Each entry there
-has the full method, the numbers, and the committed record. Entry numbers appear below in brackets.
+has the full method and the numbers. Entries 12 to 22 cite records committed in `assets/`.
+Entries 1 to 11 name raw records that stay outside the repository. Entry numbers appear below in
+brackets.
 
 ## The method
 
@@ -21,9 +23,9 @@ full-recompute oracle on the same prompts. Numerical ties are the only allowed d
 [1]. So every A/B runs both arms in one container, in alternating order, and a ratio never
 crosses containers.
 
-**Predictions before the run.** From entry 17 on, each experiment commits its predictions and its
-decision rule before any GPU time is spent. A script, `scripts/judge_paired_ab.py`, applies the
-rule to the records from two containers. The statistic is the median paired change per round,
+**Predictions before the run.** Entries 17 and 19 to 22 committed their predictions and decision
+rule before any GPU time was spent. For the paired A/Bs (entries 19, 21, and 22), a script,
+`scripts/judge_paired_ab.py`, applies the rule to the records from two containers. The statistic is the median paired change per round,
 with a 95% bootstrap interval [19]. A claim needs exact output parity and an interval below zero
 in both containers.
 
@@ -90,7 +92,7 @@ valid target under bf16. The contract became same-shape seeded replay, and sampl
 
 ## Check it yourself
 
-`make reproduce` needs no GPU. It checks every committed record against the public tables,
+`make reproduce` needs no GPU. It checks the committed benchmark records against the public tables,
 regenerates the README figures, and reruns the judge on each registered A/B. The judge must give
 the verdict that findings.md reports. The Modal commands that produce new records are listed in
 each entry and in [benchmark.md](benchmark.md).
