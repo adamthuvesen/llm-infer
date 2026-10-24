@@ -72,7 +72,8 @@ walks the whole Esme chain, with every claim linked to a committed artifact.
 
 ## Install
 
-Python 3.13 is required (torch 2.8.0, pinned to match the GPU image, has no 3.14 wheels). Dependencies are managed with `uv`.
+Python 3.13 on Linux or Apple-silicon macOS is required: torch 2.8.0, pinned to match the GPU
+image, has no wheels for Python 3.14 or Intel macOS. Dependencies are managed with `uv`.
 
 ```bash
 uv sync --extra dev --extra serving

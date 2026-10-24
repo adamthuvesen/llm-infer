@@ -1138,6 +1138,7 @@ def sweep_ladder(
         floor_iters,
     )
     rows.append(gated_row("hf_sequential", floor_batch, floor_requests, outputs, per_iter))
+    stall_guard.progress()
 
     for size in batch_sizes:
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
