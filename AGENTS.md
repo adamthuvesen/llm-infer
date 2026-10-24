@@ -88,6 +88,12 @@ The flash-attn backend is GPU-only; Esme and Qwen reference checks run on the ta
 GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
 Esme in `scripts/modal_esme_*` and the Qwen flash check in `scripts/modal_reference_check.py`.
 
+Modal runs bill until they finish or time out, and a hung run prints nothing. A GPU function
+calls `stall_guard.arm()` from `scripts/modal_stall_guard.py` and `stall_guard.progress()` after
+each row or batch, so a stall exits with thread stacks instead of running to its timeout. Run
+GPU jobs one at a time unless the experiment needs them together. Whoever launches a background
+run also watches its log and raises an alarm after 10 minutes without output.
+
 ## Conventions
 
 - Atomic [conventional commits](https://www.conventionalcommits.org/) (`type(scope): message`),
