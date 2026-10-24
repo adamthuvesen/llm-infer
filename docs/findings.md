@@ -42,6 +42,7 @@ Two rules apply to every entry:
 | 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound stays at 0.1; reviews of near-ties cite entry 20 |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
+| 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Pending; predictions registered before the run | — |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1114,6 +1115,52 @@ the same treatment as decode: a graphed, planned multi-token path. That is an op
 
 Records: [`assets/esme-spec-decode-ab-1.json`](../assets/esme-spec-decode-ab-1.json),
 [`assets/esme-spec-decode-ab-2.json`](../assets/esme-spec-decode-ab-2.json).
+
+## 23. Fused elementwise kernels on full-depth graphs (predictions registered before the run)
+
+**Question.** Entry 15 compiled `rms_norm` and `apply_rope`: kernels per step fell by half, and
+raw wall did not follow. FlashInfer's `plan()` still synced every step then (entry 17), and 26
+layers ran attention eagerly. Both are gone now (entries 19 and 21). The entry-19 records already
+hint at an answer. In the same two containers, the compiled piecewise arm was 7–12% faster than
+plain piecewise at batch 1 and 18–30% faster at batch 8 and 64 (raw timing, different phases of
+one run, not paired). Does fusion pay on top of the server's full-depth graphs? A second, smaller
+question closes a gap in entry 21: what does full depth cost at server startup?
+
+**Method.** `scripts/modal_esme_fusion_ab.py`, with entry 21's protocol. One persistent engine per
+arm and batch size, both grouping all 30 layers: `full_step` (the server default) and
+`full_step_fused` (the same, with `torch.compile` versions of the two functions swapped in while
+that arm's engine captures and runs). Batch 1, 8, and 64, 128 new tokens, EOS ignored, two warmup
+rounds, and 11 measured rounds that alternate which arm goes first. Every arm gates against the
+fp32 oracle, which runs with the original functions. The record stores direct token parity. Two
+A100 containers. `scripts/judge_paired_ab.py` applies the rule, with entry 19's statistic.
+
+The startup question runs `--command startup` in a fresh container: one cold
+`build_app_from_runtime` with the server defaults (buckets 1, 2, 4, 8, 16), then grouped-graph
+capture at the same buckets for four layers against all 30, twice each in alternating order.
+
+**Predictions (written before the run).**
+
+- **Parity is not exact.** A fused Triton reduction rounds differently from the eager chain, so
+  some bf16 ties resolve differently (entry 15). Direct parity is `review_required` at some batch,
+  and both arms keep zero non-tie divergences from fp32.
+- **Batch 1:** fused is 10–30% faster. Entry 15 cut kernel time by 45%. With the step in one
+  graph, less of that cut is lost to host work.
+- **Batch 8:** 15–35% faster. **Batch 64:** 10–30% faster.
+- **Startup:** cold `build_app_from_runtime` takes under 90 s. Warm full-depth capture takes at
+  most 1.5x the four-layer capture time, and its graph memory stays under 512 MiB over the five
+  buckets.
+
+**Decision rule (set before the run).** The arms cannot have exact direct parity, so the rule uses
+raw timing. The gate passes when both arms have zero non-tie divergences from fp32 in every row
+on both containers, and no row regresses (entry 21's definition). A row is a raw gain when its
+interval's upper bound is below 0 on both containers. If the gate passes and batch 1 is a raw
+gain, fusion is the next batch-1 lever, and making it a default is a separate change. That change
+must first review the direct-parity divergences and measure the compile cost at server startup.
+Otherwise fusion stays off, and the batch-1 work moves elsewhere. For startup, no default changes.
+If full depth exceeds 2x the four-layer capture time or 1 GiB of graph memory, the serve docs
+state that cost.
+
+**Result.** Pending.
 
 ## Open questions
 

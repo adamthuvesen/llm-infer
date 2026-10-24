@@ -30,6 +30,9 @@ class Rule:
     rows: frozenset[tuple[str, int]]
     claimed_configs: frozenset[str]
     rounds: int = 11
+    # The arms resolve bf16 ties differently by design, so direct parity cannot be exact. The
+    # gate then needs zero non-tie divergences from fp32 in both arms, and a gain is raw timing.
+    raw_timing: bool = False
 
 
 RULES = {
@@ -59,6 +62,14 @@ RULES = {
         claimed_configs=frozenset({"open", "grounded"}),
         rounds=64,
     ),
+    # docs/findings.md entry 23.
+    "decode-fusion-ab": Rule(
+        baseline="full_step",
+        candidate="full_step_fused",
+        rows=frozenset(("grouped", batch) for batch in (1, 8, 64)),
+        claimed_configs=frozenset({"grouped"}),
+        raw_timing=True,
+    ),
 }
 
 
@@ -66,7 +77,12 @@ def _changes(record: dict, rule: Rule) -> dict[tuple[str, int], tuple[PairedChan
     return {
         (config, row["batch_size"]): (
             paired_change(row[rule.baseline]["walls_s"], row[rule.candidate]["walls_s"]),
-            row["parity_status"],
+            "exact"
+            if row["parity_status"] == "exact"
+            else "nontie 0"
+            if rule.raw_timing
+            and all(row[arm]["agreement"]["nontie"] == 0 for arm in (rule.baseline, rule.candidate))
+            else row["parity_status"],
         )
         for config, rows in record["configs"].items()
         for row in rows
@@ -117,7 +133,8 @@ def main() -> int:
             )
             # An inconclusive row is only labeled: under the rule it cannot fail the gate unless
             # it also regresses, and it cannot support a claim (the claim below needs CI < 0).
-            gate_passes &= parity == "exact" and not regresses
+            gate_passes &= parity in ({"exact", "nontie 0"} if rule.raw_timing else {"exact"})
+            gate_passes &= not regresses
             cells.append(
                 f"{change.median_pct:+.1f}% [{change.ci_low_pct:+.1f}, {change.ci_high_pct:+.1f}] "
                 f"{status}, parity {parity}"
@@ -125,11 +142,12 @@ def main() -> int:
         if config in rule.claimed_configs:
             first, second = (container[key][0] for container in changes)
             both_exact = all(container[key][1] == "exact" for container in changes)
-            if not both_exact:
+            if not both_exact and not rule.raw_timing:
                 claims[f"{config} b{batch}"] = "not confirmed (parity not exact)"
             elif first.ci_high_pct < 0 and second.ci_high_pct < 0:
                 smaller = min(first.median_pct, second.median_pct, key=abs)
-                claims[f"{config} b{batch}"] = f"qualified gain {smaller:+.1f}%"
+                kind = "qualified gain" if both_exact else "raw gain"
+                claims[f"{config} b{batch}"] = f"{kind} {smaller:+.1f}%"
             elif (first.median_pct < 0) != (second.median_pct < 0):
                 claims[f"{config} b{batch}"] = "not confirmed (containers disagree on sign)"
             else:
