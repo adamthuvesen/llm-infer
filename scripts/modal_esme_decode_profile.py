@@ -2498,6 +2498,7 @@ def host_timeline(batch_sizes: list[int]) -> str:
 
 
 HOST_PLAN_ROUNDS = 5
+STALL_DUMP_S = 300
 HOST_PLAN_METADATA = ("device", "host")
 
 
@@ -2636,6 +2637,9 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     entry 17). Fixed 128-token greedy output, EOS ignored. Every arm gates against the fp32
     oracle, and the record stores direct device/host parity per configuration and batch.
     """
+    import faulthandler
+    import sys
+
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2645,6 +2649,8 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.runtime import load_model_runtime
 
+    # A first run went silent for 50 minutes with no error; a stall now leaves stacks in the log.
+    faulthandler.dump_traceback_later(STALL_DUMP_S, repeat=True, file=sys.stderr)
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     capture_sizes = tuple(sorted(set(batch_sizes)))
