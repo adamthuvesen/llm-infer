@@ -122,7 +122,7 @@ and groups all layers, because full depth is 2.9-4.6% faster per step than four 
 ([findings entry 21](findings.md)); `--no-grouped-decode-graphs` skips its startup capture. The
 raw engine keeps it explicit. The win depends on the batch holding its captured size, which
 serving admission provides and ragged EOS-terminating benchmark drains do not
-([findings entries 7 and 12](findings.md)). The runner counts its own hits
+([findings entries 7 and 13](findings.md)). The runner counts its own hits
 (`llm_infer_grouped_decode_steps_total` on `/metrics`) so a silent fall-through is visible.
 
 ## Paged KV Cache

@@ -1,6 +1,6 @@
 # Esme Serving Evaluation
 
-`scripts/esme_serving_eval.py` runs six workloads against the Esme serving path. Each workload
+`scripts/esme_serving_eval.py` runs eight workloads against the Esme serving path. Each workload
 stresses scheduler features together: prefix caching, chunked prefill, preemption, speculative
 decode, streaming, and sampling. The harness records TTFT, queue time, preemption count, and KV
 utilization per workload. It reports `tok/s` only when the workload passes the reference gate.

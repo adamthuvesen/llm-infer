@@ -762,7 +762,7 @@ is slower by more than 2%. A gain counts as a qualified relative result only wit
 parity.
 
 **Result.** The decision rule failed as written, so the pilot did not adopt host metadata. The
-pilot ran in two containers, one per host class.
+method called for one container. The pilot ran in two, one per host class.
 
 - **Removing the sync exposed a race on a FlashInfer buffer.** `plan()` writes its plan info into
   one pinned host buffer and queues an async copy to the device. The device-to-host read this entry
@@ -1118,6 +1118,8 @@ Records: [`assets/esme-spec-decode-ab-1.json`](../assets/esme-spec-decode-ab-1.j
 ## Open questions
 
 - Can a graphed, planned multi-token verify step make speculation pay on CUDA (entry 22)?
+- Does entry 15's compiled slowdown on A100 PCIe hold without the per-step `plan()` sync? Entry 17
+  saw the compiled arm faster on A100-SXM4.
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots record the CPU.
 - Does the cached path add error of its own, or only a different rounding order (entry 20)? It
   needs a control, for example the engine against itself with a perturbed reduction order.
