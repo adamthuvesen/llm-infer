@@ -635,11 +635,14 @@ faster, not slower (raw timing, no speed claim):
 | --- | ---: | ---: |
 | Uninstrumented wall | 5.105 | 3.100 |
 | `issue` overhead vs uninstrumented | +0.01% | −0.03% |
-| Host issue time / wall | 99.6% | 100.6% |
+| Host issue time / wall (means over 3 runs) | 99.6% | 99.9% |
 | `Event.synchronize` | 0.018 | 0.002 |
 
 Every instrumented pass added at most 0.5% to wall, so the method is cheap enough to repeat on a
-PCIe host.
+PCIe host. Two corrections to this record: the harness ran six warmup decodes per arm, not the
+two it declares, and it stored host time as a mean over the three runs while wall is their
+median. The table compares means to means. The harness now keeps host time per run and
+reports the median run's.
 
 **Outside the gate: the planner syncs on every step.** The `regions` pass found where the eager
 arm's wait hides. It is not in `Event.synchronize`. It is in FlashInfer's `plan()`:

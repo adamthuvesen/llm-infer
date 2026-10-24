@@ -157,10 +157,11 @@
       1
     ],
     "max_new_tokens": 128,
-    "warmup": 2,
+    "warmup": 6,
     "iters": 3,
     "backend": "comparison (bf16)",
     "reference": "none (diagnostic attribution only, never a speed claim)",
-    "repro_command": "modal run scripts/modal_esme_decode_profile.py --command host-timeline --batch-sizes 1"
+    "repro_command": "modal run scripts/modal_esme_decode_profile.py --command host-timeline --batch-sizes 1",
+    "note": "Produced before the host-timeline fix: six warmup decodes per arm, and host_ms_per_token_step is the mean over the three runs while wall_ms_per_token_step is their median, so host_issue_fraction_of_wall can exceed 1. Compare host time to the mean of walls_s instead."
   }
 }

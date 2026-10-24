@@ -2305,7 +2305,6 @@ HOST_TIMELINE_REGIONS = (
 
 def _host_timeline_row(runtime, size: int) -> dict:
     """The three host-timeline passes for one batch size on one persistent engine."""
-    import statistics
     from collections import defaultdict
 
     import torch
@@ -2323,8 +2322,10 @@ def _host_timeline_row(runtime, size: int) -> dict:
         device="cuda",
         capabilities=runtime.capabilities,
     )
-    totals: dict[str, float] = defaultdict(float)
-    calls: dict[str, int] = defaultdict(int)
+    # Host totals are kept per run, so each pass reports the host time of the same run its
+    # median wall comes from, not a mean that one slow run can push above wall.
+    run_totals: list[dict[str, float]] = []
+    run_calls: list[dict[str, int]] = []
     active = {"on": False}
 
     def timed(target: object, name: str, bucket: str) -> None:
@@ -2337,14 +2338,16 @@ def _host_timeline_row(runtime, size: int) -> dict:
             try:
                 return original(*args, **kwargs)
             finally:
-                totals[bucket] += time.perf_counter() - start
-                calls[bucket] += 1
+                run_totals[-1][bucket] += time.perf_counter() - start
+                run_calls[-1][bucket] += 1
 
         setattr(target, name, measured)
 
-    def decode_runs() -> list[float]:
+    def decode_runs(count: int = runs) -> list[float]:
         walls: list[float] = []
-        for _ in range(runs):
+        for _ in range(count):
+            run_totals.append(defaultdict(float))
+            run_calls.append(defaultdict(int))
             for req in requests:
                 engine.add_request(
                     Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
@@ -2361,27 +2364,25 @@ def _host_timeline_row(runtime, size: int) -> dict:
         return walls
 
     def summarize(pass_name: str, walls: list[float]) -> dict:
-        wall_ms = statistics.median(walls) * 1000.0 / token_steps
-        per_step = {name: total * 1000.0 / runs / token_steps for name, total in totals.items()}
+        median_run = sorted(range(len(walls)), key=walls.__getitem__)[len(walls) // 2]
+        wall_ms = walls[median_run] * 1000.0 / token_steps
+        totals, calls = run_totals[-len(walls) :][median_run], run_calls[-len(walls) :][median_run]
+        per_step = {name: total * 1000.0 / token_steps for name, total in totals.items()}
         row: dict[str, object] = {
             "pass": pass_name,
             "walls_s": walls,
+            "median_run": median_run,
             "wall_ms_per_token_step": wall_ms,
             "host_ms_per_token_step": per_step,
-            "calls_per_token_step": {
-                name: count / runs / token_steps for name, count in calls.items()
-            },
+            "calls_per_token_step": {name: count / token_steps for name, count in calls.items()},
         }
         if "engine_step" in per_step:
             issue = per_step["engine_step"] - per_step.get("event_synchronize", 0.0)
             row["host_issue_ms_per_token_step"] = issue
             row["host_issue_fraction_of_wall"] = issue / wall_ms
-        totals.clear()
-        calls.clear()
         return row
 
-    for _ in range(2):
-        decode_runs()
+    decode_runs(count=2)
     passes = [summarize("uninstrumented", decode_runs())]
     original_synchronize = torch.cuda.Event.synchronize
 
@@ -2392,8 +2393,8 @@ def _host_timeline_row(runtime, size: int) -> dict:
         try:
             return original_synchronize(event)
         finally:
-            totals["event_synchronize"] += time.perf_counter() - start
-            calls["event_synchronize"] += 1
+            run_totals[-1]["event_synchronize"] += time.perf_counter() - start
+            run_calls[-1]["event_synchronize"] += 1
 
     targets = {
         "runner": runtime.model.decode_graphs,
