@@ -38,7 +38,7 @@ Two rules apply to every entry:
 | 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; raw wall does not follow | Not shipped; see 16 |
 | 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
-| 18 | Do grouped graphs still pay in the server? | +2.5% to +12.3% on greedy; raw timing | Keep the server default |
+| 18 | Do grouped graphs still pay in the server? | No: −1.3% to +2.7% once arm order is balanced | The default no longer clears entry 7's 10% bar |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -363,8 +363,8 @@ vLLM itself measured 2–27% faster on the new host.
   fixed-length A/B measured +29.8% at batch 1. A plausible cause is the native-GQA decode change in
   PR #27, which removed per-layer eager KV expansion between graph segments. That eager work is
   what grouped graphs absorbed. This is a hypothesis, not a measurement. The HTTP-server default
-  needed a fresh serving A/B before anyone relied on its +18% claim. Entry 18 ran it: +12.3% at
-  batch 1.
+  needed a fresh serving A/B before anyone relied on its +18% claim. Entry 18 ran it: −1.3% at
+  batch 1 once arm order is balanced.
 
 **Limits.**
 
@@ -665,7 +665,8 @@ step.
 
 Both consequences are untested. Host-side metadata removes the sync, which lets the host issue
 step n+1 while the GPU runs step n. Capturing attention inside graphs removes most of the 2.5 ms.
-Grouped graphs already do that, which is consistent with entry 18's batch-1 gain.
+Grouped graphs already capture attention, yet entry 18 finds no batch-1 gain from them. So host
+time in the eager attention regions is not what limits a batch-1 step on the default path.
 
 Record: [`assets/esme-decode-host-timeline.json`](../assets/esme-decode-host-timeline.json).
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-timeline --batch-sizes 1`.
@@ -675,38 +676,41 @@ Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-timeli
 **Question.** Do grouped graphs still pay in the HTTP server? Entry 7's serving A/B predates
 PR #27, and the raw-engine harness of entries 12 and 13 showed no gain.
 
-**Method.** One A100-SXM4 container (400 W). Streaming requests over localhost HTTP, greedy and
-seeded sampled workloads, batch 1, 8, and 64, 128 new tokens, 2 warmups, and 5 measured runs per
-row. Graph capture for batch sizes 1 to 256 ran before timing. The piecewise arm ran first, then
-the grouped arm.
+**Method.** Streaming requests over localhost HTTP, greedy and seeded sampled workloads, batch 1,
+8, and 64, 128 new tokens, 2 warmups, and 5 measured runs per row. Graph capture for batch sizes 1
+to 256 ran before timing. Two runs, each in one A100-SXM4 container. In the first run, every
+piecewise row ran before every grouped row. The second run alternates which arm goes first from
+cell to cell.
 
 **Result** (tok/s, raw timing):
 
-| Workload | Batch | Piecewise | Grouped | Change |
-| --- | ---: | ---: | ---: | ---: |
-| Greedy | 1 | 158.2 | 177.6 | +12.3% |
-| Greedy | 8 | 978.2 | 1,002.7 | +2.5% |
-| Greedy | 64 | 3,292.0 | 3,526.9 | +7.1% |
-| Sampled | 1 | 136.0 | 147.7 | +8.6% |
-| Sampled | 8 | 769.2 | 760.6 | −1.1% |
-| Sampled | 64 | 1,659.9 | 2,245.9 | +35.3% |
+| Workload | Batch | Fixed order: piecewise | Grouped | Change | Balanced: piecewise | Grouped | Change | First in balanced run |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Greedy | 1 | 158.2 | 177.6 | +12.3% | 190.3 | 187.8 | −1.3% | piecewise |
+| Sampled | 1 | 136.0 | 147.7 | +8.6% | 159.2 | 158.9 | −0.2% | grouped |
+| Greedy | 8 | 978.2 | 1,002.7 | +2.5% | 1,060.7 | 1,089.1 | +2.7% | grouped |
+| Sampled | 8 | 769.2 | 760.6 | −1.1% | 858.6 | 850.0 | −1.0% | piecewise |
+| Greedy | 64 | 3,292.0 | 3,526.9 | +7.1% | 4,113.4 | 4,203.1 | +2.2% | piecewise |
+| Sampled | 64 | 1,659.9 | 2,245.9 | +35.3% | 2,859.3 | 2,902.6 | +1.5% | grouped |
 
-Every row passed its reference gate. Greedy rows match the fp32 oracle: exact at batch 1, and
-`accepted_numerical` at batch 8 and 64 with the same step-9 tie in both arms. Sampled rows pass
-same-shape replay. The record has no direct parity between the arms, so the changes are raw
-timing, not qualified A/B ratios. At greedy batch 1 both arms are exact against one oracle, so
-their tokens are identical.
+Every row in both runs passed its reference gate. Greedy rows match the fp32 oracle: exact at
+batch 1, and `accepted_numerical` at batch 8 and 64. Sampled rows pass same-shape replay. The
+records have no direct parity between arms, so the changes are raw timing.
 
-The sampled batch-64 row is unexplained. The piecewise arm's sampled row is 2.0x slower than its
-greedy row, and the grouped arm's is 1.6x slower. One run in a fixed order cannot separate that
-from an order or warm-up effect.
+The fixed-order gains came from the order, not from grouped graphs. In the first run the grouped
+arm always ran in the second half of the container's life. With the order balanced, every change
+sits within ±3%, and the sign does not follow which arm ran first. The two containers also differ
+by up to 1.7x in absolute tok/s (piecewise sampled batch 64), and their power limits differ (400 W
+and 500 W). This is entry 1's rule again: compare only inside one container, and balance the
+order inside it too.
 
-**Decision.** Keep grouped graphs as the HTTP-server CUDA default. The gain is smaller than entry
-7's +18% at batch 1, but it is positive in five of six rows. This entry does not explain why the
-raw-engine harness shows no gain: the harness, load shape, and container all differ.
+**Decision.** Grouped graphs no longer clear the 10% bar that entry 7 used to make them the
+HTTP-server CUDA default. This agrees with entries 12 and 13. They cost about 13 s of extra
+capture at server start. This entry does not change the default; that is a separate change.
 
-Record: [`assets/esme-serving-grouped-ab.json`](../assets/esme-serving-grouped-ab.json) (per-token
-inter-token latencies dropped; the full record keeps them). Reproduce:
+Records: [`assets/esme-serving-grouped-ab.json`](../assets/esme-serving-grouped-ab.json) (balanced)
+and [`assets/esme-serving-grouped-ab-fixed-order.json`](../assets/esme-serving-grouped-ab-fixed-order.json).
+Both drop per-token inter-token latencies; the full records keep them. Reproduce:
 `modal run scripts/modal_esme_serving_eval.py --batch-sizes 1,8,64 --measured-runs 5 --grouped-ab`.
 
 ## Open questions
@@ -715,6 +719,6 @@ inter-token latencies dropped; the full record keeps them). Reproduce:
   The entry-17 method is cheap enough to run there.
 - How much does removing the per-step `plan()` sync buy, and how much does capturing attention
   in graphs buy on top (entry 17)?
-- Is the sampled batch-64 grouped gain real (entry 18)? It needs a repeat with alternating order.
+- Should the HTTP server drop grouped graphs as its CUDA default (entry 18)?
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
   than the 8 in the headline pool.
