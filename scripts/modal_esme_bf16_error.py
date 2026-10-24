@@ -48,6 +48,7 @@ NEW_TOKENS = 128
 BLOCK_SIZE = 128
 TOLERANCE = 0.1
 WORST_FLIPS_KEPT = 10
+STALL_DUMP_S = 300
 
 app = modal.App("llm-infer-esme-bf16-error")
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -207,12 +208,17 @@ def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, 
     timeout=60 * 60,
 )
 def bf16_error(prompts: list[str]) -> str:
+    import faulthandler
+    import sys
+
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
 
+    # A first run went silent for 50 minutes with no error; a stall now leaves stacks in the log.
+    faulthandler.dump_traceback_later(STALL_DUMP_S, repeat=True, file=sys.stderr)
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     bf16_runtime = load_model_runtime(
