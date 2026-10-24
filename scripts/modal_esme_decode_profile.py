@@ -21,6 +21,7 @@ bf16 CUDA Esme attention path, greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command serve-smoke
     modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8
     modal run scripts/modal_esme_decode_profile.py --command fusion-probe --batch-sizes 1,8
+    modal run scripts/modal_esme_decode_profile.py --command timeline --batch-sizes 1
 
 ``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
 probe, launch counts, and the oracle-gated same-GPU ablation across the eager window and
@@ -2091,6 +2092,186 @@ def fusion_probe(batch_sizes: list[int]) -> str:
     )
 
 
+TIMELINE_NEW_TOKENS = 64
+TIMELINE_IMAGE = FLASH_IMAGE.apt_install("cuda-nsight-systems-12-8")
+GPU_ACTIVITY_TABLES = (
+    "CUPTI_ACTIVITY_KIND_KERNEL",
+    "CUPTI_ACTIVITY_KIND_MEMCPY",
+    "CUPTI_ACTIVITY_KIND_MEMSET",
+)
+
+
+def _timeline_gaps(sqlite_path: Path, token_steps: int) -> dict:
+    """Split GPU idle time in an nsys trace by cause, per token step.
+
+    Every GPU activity (kernel, memcpy, memset) carries the correlation id of the host API call
+    that issued it; all nodes of one CUDA graph replay share their ``cudaGraphLaunch`` id. For
+    each idle gap before an activity:
+
+    * same launch as the previous activity: ``graph_internal`` (the GPU idles between nodes);
+    * a new launch whose API call started after the GPU went idle: the part before the call is
+      ``host_wait`` (the host had not reached the call yet);
+    * the part spent inside that API call: ``in_call`` (host time inside the launch itself);
+    * the rest of the gap, after the call returned: ``launch_latency``.
+
+    Tracing adds host cost at every API call, so in a traced run these buckets describe the
+    traced regime, not the uninstrumented one.
+    """
+    import sqlite3
+
+    connection = sqlite3.connect(sqlite_path)
+    tables = {row[0] for row in connection.execute("select name from sqlite_master")}
+    names = dict(connection.execute("select id, value from StringIds"))
+    activities: list[tuple[int, int, int, str]] = []
+    for table in GPU_ACTIVITY_TABLES:
+        if table not in tables:
+            continue
+        columns = {row[1] for row in connection.execute(f"pragma table_info({table})")}
+        # nsys short names drop template arguments (a cuBLAS GEMV becomes "kernel"), so classify
+        # by the demangled name when the table has one.
+        name_column = next(
+            (column for column in ("demangledName", "shortName") if column in columns), None
+        )
+        name_select = f", {name_column}" if name_column else ""
+        query = f"select start, end, correlationId{name_select} from {table}"
+        for row in connection.execute(query):
+            label = names.get(row[3], "?") if name_column else table.rsplit("_", 1)[-1].lower()
+            activities.append((row[0], row[1], row[2], label))
+    runtime = {
+        row[0]: (row[1], row[2], names.get(row[3], "?"))
+        for row in connection.execute(
+            "select correlationId, start, end, nameId from CUPTI_ACTIVITY_KIND_RUNTIME"
+        )
+    }
+    connection.close()
+    if not activities:
+        raise RuntimeError(f"{sqlite_path}: no GPU activity in the captured range")
+
+    activities.sort()
+    busy_ns = 0
+    by_category = {"gemm": 0.0, "attention": 0.0, "other": 0.0}
+    gaps = {
+        "graph_internal": 0,
+        "host_wait": 0,
+        "in_call": 0,
+        "launch_latency": 0,
+        "unattributed": 0,
+    }
+    host_wait_by_api: dict[str, int] = {}
+    gap_count = 0
+    previous_end, previous_correlation = activities[0][0], activities[0][2]
+    for start, end, correlation, label in activities:
+        by_category[_kernel_category(label)] += (end - start) / 1e6
+        gap = start - previous_end
+        if gap > 0:
+            gap_count += 1
+            if correlation == previous_correlation:
+                gaps["graph_internal"] += gap
+            elif correlation not in runtime:
+                gaps["unattributed"] += gap
+            else:
+                api_start, api_end, api_name = runtime[correlation]
+                wait = min(gap, max(0, api_start - previous_end))
+                in_call = min(
+                    gap - wait, max(0, min(api_end, start) - max(api_start, previous_end))
+                )
+                gaps["host_wait"] += wait
+                gaps["in_call"] += in_call
+                gaps["launch_latency"] += gap - wait - in_call
+                host_wait_by_api[api_name] = host_wait_by_api.get(api_name, 0) + wait
+        busy_ns += max(0, end - max(start, previous_end))
+        if end > previous_end:
+            previous_end, previous_correlation = end, correlation
+    span_ns = previous_end - activities[0][0]
+    per_step_ms = 1e6 * token_steps
+    return {
+        "token_steps": token_steps,
+        "gpu_activities": len(activities),
+        "gpu_activities_per_token_step": len(activities) / token_steps,
+        "idle_gaps_per_token_step": gap_count / token_steps,
+        "span_ms_per_token_step": span_ns / per_step_ms,
+        "busy_ms_per_token_step": busy_ns / per_step_ms,
+        "busy_ms_by_category_per_token_step": {
+            name: ms / token_steps for name, ms in by_category.items()
+        },
+        "idle_ms_per_token_step": {name: ns / per_step_ms for name, ns in gaps.items()},
+        "host_wait_ms_by_api_per_token_step": {
+            name: ns / per_step_ms
+            for name, ns in sorted(host_wait_by_api.items(), key=lambda item: -item[1])
+        },
+    }
+
+
+@app.function(
+    image=TIMELINE_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def timeline_trace(batch_sizes: list[int]) -> str:
+    """nsys timeline of eager and compiled decode, with every idle gap attributed to a cause.
+
+    Each arm runs ``scripts/nsys_decode_step.py`` in a fresh process under ``nsys profile`` with
+    CUDA graph node tracing, so kernels inside graph replays appear one by one. The trace covers
+    only the measured decode. Tracing adds overhead, so the spans here are diagnostic and are not
+    compared with the uninstrumented roofline walls.
+    """
+    import glob
+    import subprocess
+    import tempfile
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+
+    esme_bundles.reload()
+    nsys = next(iter(sorted(glob.glob("/opt/nvidia/nsight-systems/*/bin/nsys"))), None) or next(
+        iter(sorted(glob.glob("/usr/local/cuda*/bin/nsys"))), None
+    )
+    if nsys is None:
+        raise RuntimeError("nsys is not installed in the timeline image")
+    version = subprocess.run([nsys, "--version"], capture_output=True, text=True).stdout.strip()
+    token_steps = TIMELINE_NEW_TOKENS - 1
+    rows: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="esme-timeline-") as tmp:
+        for size in batch_sizes:
+            for arm in ("eager", "compiled"):
+                output = Path(tmp) / f"{arm}-b{size}"
+                command = [
+                    nsys, "profile", "--trace=cuda,nvtx", "--cuda-graph-trace=node",
+                    "--sample=none", "--cpuctxsw=none", "--capture-range=cudaProfilerApi",
+                    "--capture-range-end=stop", "--export=sqlite", "--force-overwrite=true",
+                    "-o", str(output), "python", "scripts/nsys_decode_step.py",
+                    "--bundle", REMOTE_BUNDLE_PATH, "--arm", arm, "--batch", str(size),
+                    "--tokens", str(TIMELINE_NEW_TOKENS),
+                ]  # fmt: skip
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                sqlite_path = output.with_suffix(".sqlite")
+                if result.returncode != 0 or not sqlite_path.is_file():
+                    raise RuntimeError(
+                        f"nsys {arm} b{size} failed ({result.returncode}):\n"
+                        f"{result.stdout[-3000:]}\n{result.stderr[-3000:]}"
+                    )
+                row = {"arm": arm, "batch_size": size, **_timeline_gaps(sqlite_path, token_steps)}
+                rows.append(row)
+                idle = row["idle_ms_per_token_step"]
+                print(
+                    f"[timeline] {arm} b{size}: span {row['span_ms_per_token_step']:.3f} busy "
+                    f"{row['busy_ms_per_token_step']:.3f} ms/step; idle graph-internal "
+                    f"{idle['graph_internal']:.3f}, host-wait {idle['host_wait']:.3f}, launch "
+                    f"{idle['launch_latency']:.3f}; activities "
+                    f"{row['gpu_activities_per_token_step']:.0f}/step"
+                )
+    return json.dumps(
+        {
+            "probe": "decode-timeline",
+            "rows": rows,
+            "nsys_version": version,
+            "new_tokens": TIMELINE_NEW_TOKENS,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -2225,12 +2406,13 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "bucket-policy",
         "roofline",
         "fusion-probe",
+        "timeline",
     ):
         raise ValueError(
             "command must be 'profile', 'sampled-profile', 'bench', 'ablate', 'capture', "
             "'sync', 'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
             "'four-layer-group-ab', 'four-layer-parity', 'bucket-policy', 'roofline', "
-            "or 'fusion-probe', "
+            "'fusion-probe', or 'timeline', "
             f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
@@ -2279,6 +2461,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     elif command == "fusion-probe":
         print(f"[esme-decode] fusion probe: batches {sizes}, eager vs compiled elementwise")
         record = json.loads(fusion_probe.remote(sizes))
+    elif command == "timeline":
+        print(f"[esme-decode] nsys timeline: batches {sizes}, eager vs compiled elementwise")
+        record = json.loads(timeline_trace.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
@@ -2308,7 +2493,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         ),
         "warmup": (
             3
-            if command == "flashinfer-graph-probe"
+            if command in ("flashinfer-graph-probe", "timeline")
             else 0
             if command == "four-layer-parity"
             else 2
@@ -2324,7 +2509,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         ),
         "iters": (
             1
-            if command in ("flashinfer-graph-probe", "four-layer-parity")
+            if command in ("flashinfer-graph-probe", "four-layer-parity", "timeline")
             else 10
             if command in ("two-layer-group-ab", "four-layer-group-ab")
             else 6
@@ -2351,7 +2536,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             "eager/compiled parity"
             if command == "fusion-probe"
             else "none (diagnostic attribution only, never a speed claim)"
-            if command == "roofline"
+            if command in ("roofline", "timeline")
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"
         ),
         "repro_command": (
