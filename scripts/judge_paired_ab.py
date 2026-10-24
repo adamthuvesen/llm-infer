@@ -73,16 +73,20 @@ RULES = {
 }
 
 
+def _parity(row: dict, rule: Rule) -> str:
+    if not rule.raw_timing:
+        return row["parity_status"]
+    # The fp32 gate holds even when the arms agree with each other: both could be wrong.
+    if any(row[arm]["agreement"]["nontie"] != 0 for arm in (rule.baseline, rule.candidate)):
+        return "nontie divergence"
+    return "exact" if row["parity_status"] == "exact" else "nontie 0"
+
+
 def _changes(record: dict, rule: Rule) -> dict[tuple[str, int], tuple[PairedChange, str]]:
     return {
         (config, row["batch_size"]): (
             paired_change(row[rule.baseline]["walls_s"], row[rule.candidate]["walls_s"]),
-            "exact"
-            if row["parity_status"] == "exact"
-            else "nontie 0"
-            if rule.raw_timing
-            and all(row[arm]["agreement"]["nontie"] == 0 for arm in (rule.baseline, rule.candidate))
-            else row["parity_status"],
+            _parity(row, rule),
         )
         for config, rows in record["configs"].items()
         for row in rows
@@ -142,7 +146,9 @@ def main() -> int:
         if config in rule.claimed_configs:
             first, second = (container[key][0] for container in changes)
             both_exact = all(container[key][1] == "exact" for container in changes)
-            if not both_exact and not rule.raw_timing:
+            if any(container[key][1] == "nontie divergence" for container in changes):
+                claims[f"{config} b{batch}"] = "not confirmed (non-tie divergence from fp32)"
+            elif not both_exact and not rule.raw_timing:
                 claims[f"{config} b{batch}"] = "not confirmed (parity not exact)"
             elif first.ci_high_pct < 0 and second.ci_high_pct < 0:
                 smaller = min(first.median_pct, second.median_pct, key=abs)
