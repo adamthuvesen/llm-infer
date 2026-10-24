@@ -40,6 +40,7 @@ Two rules apply to every entry:
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
+| 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Pending; predictions registered before the run | — |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -860,6 +861,48 @@ Records (pilot): [`assets/esme-decode-host-plan-ab-pilot-sxm4.json`](../assets/e
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-ab --batch-sizes
 1,8,64`.
 
+## 20. Measured bf16 logit error (predictions registered before the run)
+
+**Question.** Entry 11 calls the 0.1-logit bound an audited acceptance boundary, not a measured
+percentile: the headline pool has 8 unique prompts. What is the measured distribution of bf16
+logit error, and how often does it exceed 0.1?
+
+**Method.** 1,024 unique prompts: a seeded sample of short, context-free instructions from
+`databricks/databricks-dolly-15k` at a pinned revision. The engine decodes them in batches of 64,
+128 new tokens each, EOS ignored, on its default bf16 path: FlashInfer paged decode, piecewise
+graphs, and decode windows. A recorder keeps every decode step's logits. The fp32 oracle and the
+bf16 model then recompute logits over exactly the contexts the engine saw, so every comparison is
+numerical error on one context, not a different continuation. That gives about 130,000 positions
+per comparison. Three comparisons split the error: engine against fp32, bf16 full recompute
+against fp32, and engine against bf16 recompute.
+
+The main statistic is the **competitor shrink**: the largest gain of any of the fp32 top-8
+competitors over the fp32 winner, `max(err[c] − err[a])`. The engine flips to `c` when the shrink
+exceeds the fp32 gap `f[a] − f[c]`. A tie tolerance has to bound this quantity. A CPU smoke on 4
+prompts showed one more fact before the run: the engine stores logits in bf16, whose spacing at
+logit values of 16–64 is 0.125–0.25.
+
+**Predictions (written before the run).**
+
+- **The tail passes 0.1.** Engine-vs-fp32 shrink has a median of 0.03–0.08, and its 99.9th
+  percentile is above 0.1. Entry 11 already saw single divergences at 0.108–0.146.
+- **The error is whole-model bf16, not the cached path.** Bf16 recompute against fp32 has a
+  99th-percentile shrink within 20% of the engine's. Entry 11 drew this conclusion from a few
+  rows; here it is a distribution.
+- **Flips stay near ties.** Some flips have an fp32 gap above 0.1, every flip has a gap below 0.3,
+  and no flip occurs where the fp32 margin is 0.3 or more.
+- **Output rounding matters.** The median bf16 spacing at the top logit is at least 0.0625.
+
+**Decision rule (set before the run).** If the 99.9th-percentile shrink is at most 0.1 and no flip
+has a gap above 0.1, the bound becomes a measured percentile. Otherwise the bound stays as it is,
+and any new tolerance goes to the maintainer as a proposal with these counts. A threshold change
+is a policy decision, so this entry does not make it.
+
+**Result.** Pending.
+
+Reproduce: `modal run scripts/modal_esme_bf16_error.py`. A CPU wiring check runs with
+`--command smoke`.
+
 ## Open questions
 
 - Does the compiled arm's slowdown reproduce on A100 PCIe? Entry 17 saw the opposite on SXM4.
@@ -867,5 +910,4 @@ Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-a
 - How much does capturing attention in graphs buy on top of removing the `plan()` sync (entries
   17 and 19)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
-- What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
-  than the 8 in the headline pool.
+- What logit-error distribution supports the 0.1 bf16 bound (entry 20)?
