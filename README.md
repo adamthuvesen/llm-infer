@@ -28,8 +28,9 @@ check.
 - Continuous batching with chunked prefill, so long prompts do not fully block active decode
   work.
 - Prefix caching for sibling prompts with shared prompt blocks.
-- Prompt-lookup speculative decoding with a greedy verifier. It is off by default and makes no
-  headline speed claim.
+- Prompt-lookup speculative decoding with a greedy verifier. Local CPU serving turns it on; CUDA
+  keeps it off, because it measured 3.5x to 4.2x slower per request there
+  ([findings entry 22](docs/findings.md)).
 - Request preemption under KV pressure: free KV, keep generated tokens, then resume by
   recompute.
 - OpenAI-compatible HTTP serving for Chat Completions, Completions, and a small stateless

@@ -28,7 +28,7 @@ class Rule:
     baseline: str
     candidate: str
     rows: frozenset[tuple[str, int]]
-    claimed_config: str
+    claimed_configs: frozenset[str]
     rounds: int = 11
 
 
@@ -42,14 +42,22 @@ RULES = {
             for config in ("piecewise", "grouped", "compiled")
             for batch in (1, 8, 64)
         ),
-        claimed_config="grouped",
+        claimed_configs=frozenset({"grouped"}),
     ),
     # docs/findings.md entry 21.
     "decode-full-step-ab": Rule(
         baseline="grouped4",
         candidate="full_step",
         rows=frozenset(("grouped", batch) for batch in (1, 8, 64)),
-        claimed_config="grouped",
+        claimed_configs=frozenset({"grouped"}),
+    ),
+    # docs/findings.md entry 22. Each prompt is one pair, so "rounds" counts prompts.
+    "decode-speculative-ab": Rule(
+        baseline="baseline",
+        candidate="speculative",
+        rows=frozenset({("open", 1), ("grounded", 1)}),
+        claimed_configs=frozenset({"open", "grounded"}),
+        rounds=64,
     ),
 }
 
@@ -114,7 +122,7 @@ def main() -> int:
                 f"{change.median_pct:+.1f}% [{change.ci_low_pct:+.1f}, {change.ci_high_pct:+.1f}] "
                 f"{status}, parity {parity}"
             )
-        if config == rule.claimed_config:
+        if config in rule.claimed_configs:
             first, second = (container[key][0] for container in changes)
             both_exact = all(container[key][1] == "exact" for container in changes)
             if not both_exact:
