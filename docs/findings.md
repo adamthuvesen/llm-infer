@@ -1039,14 +1039,14 @@ pay at batch 1 on the current engine, on ordinary prompts or on prompts whose an
 input?
 
 **Method.** `scripts/modal_esme_spec_decode_ab.py`. Two workloads of 64 distinct Dolly prompts each
-(pinned revision, seed 1), after 4 warmup prompts: `open` (context-free instructions) and
-`grounded` (summarization, extraction, and closed QA over a 200–1,200-character passage). Batch 1,
-128 new tokens, EOS ignored. Each prompt runs once on each arm, alternating which arm goes first,
-so each prompt is one pair: `baseline` (the default engine) against `speculative` (prompt lookup,
-up to 4 draft tokens from n-grams of up to 4). The statistic is the median per-prompt change in
-request latency, with a 95% bootstrap interval (entry 19's method). Every arm gates against the
-fp32 oracle, the record stores direct per-prompt parity, and `scripts/judge_paired_ab.py` applies
-the rule. Two A100 containers.
+(pinned revision, seed 1), after 4 warmup prompts: `open` (context-free instructions) and `grounded`
+(summarization, extraction, and closed QA over a 200–1,200-character passage). Batch 1, 128 new
+tokens, EOS ignored. Each prompt runs once on each arm, alternating which arm goes first, so each
+prompt is one pair: `baseline` (the raw engine's default, with piecewise decode graphs) against
+`speculative` (prompt lookup, up to 4 draft tokens from n-grams of up to 4). The statistic is the
+median per-prompt change in request latency, with a 95% bootstrap interval (entry 19's method).
+Every arm gates against the fp32 oracle, the record stores direct per-prompt parity, and
+`scripts/judge_paired_ab.py` applies the rule. Two A100 containers.
 
 **Predictions (written before the run).**
 
@@ -1091,6 +1091,10 @@ intervals; positive is slower.)
   steps. Accepting two tokens per step cannot recover that.
 - **The identical-stream subset agrees (held).** It shows +227% to +273%, the same sign as the
   full workloads.
+- **Limit: the baseline is the raw engine's default.** It decodes through piecewise graphs. The
+  HTTP server's CUDA default adds grouped graphs, which were as fast or faster at batch 1
+  (entries 18 and 21). Against the server default the slowdown would be the same or larger, so the
+  decision holds.
 - **One baseline row is `review_required`.** At grounded prompt `esme-066`, step 63, the baseline
   chose a token 0.119 logits below the fp32 maximum in both containers. That is one of the rare
   cases above 0.1 that entry 20 measured. It changes no conclusion here.

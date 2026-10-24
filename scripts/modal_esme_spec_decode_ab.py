@@ -8,10 +8,11 @@ trade on two Dolly workloads at batch 1:
 * ``open``: context-free instructions, where answers rarely repeat the prompt.
 * ``grounded``: summarization, extraction, and closed QA over a passage, where answers copy it.
 
-Each prompt runs once on each arm (``baseline``: the default engine; ``speculative``: prompt
-lookup with up to 4 draft tokens), in alternating order, so every prompt is one paired
-measurement. Every arm gates against the fp32 oracle, and the record stores direct token parity.
-``scripts/judge_paired_ab.py`` applies the rule registered in docs/findings.md.
+Each prompt runs once on each arm (``baseline``: the raw engine default, piecewise decode graphs
+without the server's grouped graphs; ``speculative``: prompt lookup with up to 4 draft tokens), in
+alternating order, so every prompt is one paired measurement. Every arm gates against the fp32
+oracle, and the record stores direct token parity. ``scripts/judge_paired_ab.py`` applies the rule
+registered in docs/findings.md.
 
     modal run scripts/modal_esme_spec_decode_ab.py
 """
