@@ -109,13 +109,14 @@ path; tokens become visible in window-sized bursts. Benchmark impact is summariz
 
 On CUDA, window steps replay piecewise CUDA graphs (`llm_infer/model/decode_graph.py`,
 model-owned, batch padded to a bucket, KV writes and attention eager between segments). A
-second tier, `InferenceEngine(grouped_decode_graphs=True)`, captures the leading four layers
-*including* KV writes and FlashInfer attention per exact batch size against the engine's own
-cache (`llm_infer/model/grouped_decode_graph.py`); a window whose batch matches a captured
-size runs there, everything else falls back to the piecewise buckets and then eager. The HTTP
-server enables it by default on CUDA bundle models (measured +18% single-request greedy tok/s;
-`--no-grouped-decode-graphs` skips its startup capture), while the raw engine keeps it
-explicit — the win depends on the batch holding its captured size, which serving admission
+second tier, `InferenceEngine(grouped_decode_graphs=True)`, captures the leading
+`grouped_layers` layers (four by default) *including* KV writes and FlashInfer attention per
+exact batch size against the engine's own cache (`llm_infer/model/grouped_decode_graph.py`); a
+window whose batch matches a captured size runs there, everything else falls back to the
+piecewise buckets and then eager. The HTTP server enables it by default on CUDA bundle models
+and groups all layers, which was 2.9-4.6% faster per step than four layers
+([findings entry 21](findings.md)); `--no-grouped-decode-graphs` skips its startup capture. The
+raw engine keeps it explicit — the win depends on the batch holding its captured size, which serving admission
 provides and ragged EOS-terminating benchmark drains do not (see
 the maintainer performance notes). The runner counts its own hits
 (`llm_infer_grouped_decode_steps_total` on `/metrics`) so a silent fall-through is visible.

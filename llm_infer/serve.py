@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from llm_infer.kernels.base import PagedDecodeAttentionBackend
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.interface import BackendCapabilities, ModelRuntime
+from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import (
     ATTENTION_BACKEND_CHOICES,
     AttentionBackendChoice,
@@ -71,11 +72,13 @@ def build_app_from_runtime(
 
     ``grouped_decode_graphs`` additionally captures engine-owned grouped-layer graphs for
     the same buckets; an exact-batch window decodes through them, everything else falls
-    back to the piecewise buckets. ``None`` (the serve default) enables it exactly where
+    back to the piecewise buckets. The server groups every layer: full depth was 2.9-4.6%
+    faster per step than the engine's four-layer default at batch 1-64, with exact parity
+    (docs/findings.md entry 21). ``None`` (the serve default) enables it exactly where
     capture is possible — a CUDA bundle model with a native paged attention backend and
-    piecewise graphs on — measured at +18% single-request and +7% batch-8 greedy HTTP
-    tok/s for roughly 7-10 s of extra startup capture per bucket. Explicit ``True`` forces
-    it (CPU engines then run the eager grouped path — the test hook); ``False`` disables.
+    piecewise graphs on. How much grouping pays depends on the host (entry 18). Explicit
+    ``True`` forces it (CPU engines then run the eager grouped path — the test hook);
+    ``False`` disables.
     """
     warmup_s = _warm_flashinfer_decode_if_needed(
         runtime,
@@ -121,6 +124,9 @@ def build_app_from_runtime(
         decode_window_size=decode_window_size,
         grouped_decode_graphs=grouped_decode_graphs,
         grouped_capture_sizes=decode_graph_buckets,
+        grouped_layers=(
+            runtime.model.num_layers if isinstance(runtime.model, PretrainBundleModel) else None
+        ),
     )
     if grouped_decode_graphs and torch.device(device).type == "cuda":
         grouped_s = time.perf_counter() - grouped_start

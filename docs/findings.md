@@ -1024,8 +1024,9 @@ intervals; negative is faster.)
 - **Limit:** both containers ran on one host class. Entry 18 found that host speed changes how
   much grouped graphs pay, so the gain on another host may differ.
 
-**Decision.** By the registered rule, full-depth grouping becomes the HTTP-server default, in a
-separate change.
+**Decision.** By the registered rule, full-depth grouping becomes the HTTP-server default.
+`build_app_from_runtime` in `llm_infer/serve.py` now groups every layer. The raw engine keeps four
+layers, so benchmark records stay comparable.
 
 Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json),
 [`assets/esme-full-step-ab-2.json`](../assets/esme-full-step-ab-2.json).
