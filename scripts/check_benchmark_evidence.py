@@ -75,15 +75,28 @@ def _failures() -> list[str]:
 
 
 def _gated_rows(path: Path) -> tuple[dict[tuple[str, int, int], float], list[str]]:
-    """Raw tok/s keyed by (system, context, batch); every row must be gated with no non-tie."""
+    """Public (gated) tok/s keyed by (system, context, batch); an ungated row is an error.
+
+    A row counts only when it is policy v2, reference-qualified, headline-eligible, free of
+    non-tie divergences, and carries the gated ``tokens_per_second``. Raw timing never feeds a
+    public table, so an internally inconsistent record cannot pass as a speed claim.
+    """
     rows = json.loads(path.read_text(encoding="utf-8")).get("rows", [])
     errors: list[str] = []
     tok_s: dict[tuple[str, int, int], float] = {}
     for row in rows:
         key = (row["system"], int(row.get("context_tokens", 0)), int(row["batch_size"]))
-        if row.get("headline_eligible") is not True or row.get("agreement", {}).get("nontie") != 0:
-            errors.append(f"{path}: {key} is not a headline-eligible, non-tie-free row")
-        tok_s[key] = float(row["raw_tokens_per_second"])
+        gated = (
+            row.get("policy_version") == 2
+            and row.get("reference_status") in QUALIFIED_REFERENCE_STATUSES
+            and row.get("headline_eligible") is True
+            and row.get("agreement", {}).get("nontie") == 0
+            and row.get("tokens_per_second") is not None
+        )
+        if not gated:
+            errors.append(f"{path}: {key} is not a reference-gated, headline-eligible row")
+            continue
+        tok_s[key] = float(row["tokens_per_second"])
     return tok_s, errors
 
 
