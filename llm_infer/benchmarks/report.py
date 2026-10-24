@@ -65,15 +65,24 @@ def gpu_snapshot() -> dict[str, object]:
     return snapshot
 
 
+# Sandboxed containers (Modal's gVisor) can omit "model name"; family and model ids still
+# identify the CPU generation.
+_CPU_FIELDS = ("model name", "vendor_id", "cpu family", "model", "cpu MHz")
+
+
 def _host_cpu_model() -> str:
     try:
         lines = Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
     except OSError:
         return platform.processor() or "unknown"
-    return next(
-        (line.split(":", 1)[1].strip() for line in lines if line.startswith("model name")),
-        "unknown",
-    )
+    first_cpu: dict[str, str] = {}
+    for line in lines:
+        if not line.strip():
+            break
+        key, _, value = line.partition(":")
+        first_cpu[key.strip()] = value.strip()
+    found = [f"{field}={first_cpu[field]}" for field in _CPU_FIELDS if first_cpu.get(field)]
+    return "; ".join(found) or "unknown"
 
 
 def library_versions() -> dict[str, str]:
