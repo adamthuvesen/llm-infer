@@ -34,6 +34,7 @@ Two rules apply to every entry:
 | 11 | Is the 0.1-logit bf16 bound measured? | No: it is an audited acceptance bound | Open; listed below |
 | 12 | How far is the engine from vLLM? | Now 3.1x at batch 1 and 1.7–2.6x at batch 64/256 (was 6.6–13.7x) | Batch 1 is the open gap |
 | 13 | What does each technique buy on one GPU? | 3.1x over HF batched `generate()`; graphs are the largest lever | Replace the naive-HF headline |
+| 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -236,6 +237,11 @@ cut gives 5–10% of the step, below the 10% bar, before the cost of a dual refe
 **Decision.** Closed without implementation. Reopen only if a profile of the graphed path shows
 GPU-busy above half the step, with projection GEMMs dominating.
 
+**Correction (2026-10-24).** The premise was wrong. A kernel-level profile of the graphed path
+(entry 14) shows 5.0 ms of GPU kernel time in a 5.5 ms batch-1 step, not 1–2 ms. The reopen
+condition was also aimed at the wrong target: GEMMs take 1.1 ms, and about 3.7 ms goes to small
+elementwise, norm, and copy kernels, which is exactly what fusion removes.
+
 ## 9. The sampled-output contract was wrong, then sampled serving got 3–5x faster
 
 **Question.** What should "correct" mean for seeded sampling under bf16?
@@ -423,11 +429,58 @@ way adjacent rungs are.
 Record: [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json).
 Reproduce: `modal run scripts/modal_esme_batch_curve.py --command ladder`.
 
+## 14. Batch-1 roofline: the step is GPU-bound on kernel count
+
+**Question.** vLLM decodes 3.1x faster at batch 1 (entry 12), where batching cannot explain the
+gap. Where does one batch-1 token step go, and how far is it from the hardware floor?
+
+**Method.** One A100-SXM4-80GB container, default CUDA path: bf16 weights, FlashInfer, piecewise
+CUDA graphs, decode window 8. A persistent engine decodes 128 fixed tokens per request, so the
+batch never shrinks. An uninstrumented run gives wall time per token step (median of 3 after 2
+warmups). A separate `torch.profiler` run over decode only gives each kernel's device time from
+CUPTI, including kernels inside graph replays. The floor is the time to stream every weight
+once at the A100's 2.039 TB/s spec bandwidth: 427.9 MB of bf16 weights, plus the KV reads.
+
+**Result** (ms per token step):
+
+| Batch | Wall | GEMM | Attention | Other kernels | Host gap | GPU busy | HBM floor | Wall / floor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 5.51 | 1.13 | 0.19 | 3.68 | 0.51 | 91% | 0.21 | 26x |
+| 8 | 6.88 | 1.76 | 0.20 | 4.39 | 0.53 | 92% | 0.22 | 31x |
+| 64 | 7.74 | 1.64 | 0.30 | 4.54 | 1.26 | 84% | 0.29 | 27x |
+
+**Findings.**
+
+- **The step is GPU-bound, not host-bound.** With graphs on, the GPU is busy 84–92% of each
+  step. The host-dispatch story of entries 2–4 was true before graphs. It is not the current
+  bottleneck.
+- **Kernel count is the bottleneck.** At least 1,870 kernels run per token step at every batch
+  size (the 20 largest kernel types alone), about 2.6 µs each on average. "Other" kernels take 67% of the batch-1 step: RMSNorm as separate
+  mean, pow, rsqrt, multiply, and cast kernels (121 norm calls per step), residual adds, dtype
+  copies, index gathers, and small memory copies. Graphs remove the CPU cost of
+  a launch, but each kernel still costs GPU time to start and drain.
+- **GEMMs are not bandwidth-efficient either.** At batch 1 the GEMV kernels stream the weights at
+  0.38 TB/s, 19% of spec bandwidth. That is the second lever, after kernel count.
+- **The whole step is 26x the HBM floor.** Even vLLM, at about 1.8 ms per step, is near 8x the
+  floor. At 214M parameters, decode latency is set by kernel count and size, not by bytes moved.
+
+**What this predicts.** Fusing each layer's elementwise chain (residual add with RMSNorm, the
+norm itself, RoPE with the QK norm, SiLU with the gate multiply) to a few kernels would cut most
+of the 3.7 ms. If "other" fell to about 0.7 ms, a batch-1 step would take about 2.5 ms, about
+400 tok/s against vLLM's 563. That number is an estimate from this profile, not a measurement.
+
+**Decision.** Reopen fusion (entry 8). `torch.compile` lost in entry 4 on host overhead from its
+own cudagraph runtime. Compiling only the elementwise segments and capturing the result inside the
+existing manual graphs avoids that cost. That is the next experiment, gated like every other
+change: fp32 reference first, then a same-container A/B.
+
+Record: [`assets/esme-decode-roofline.json`](../assets/esme-decode-roofline.json).
+Reproduce: `modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8,64`.
+
 ## Open questions
 
-- What explains the 3.1x batch-1 gap to vLLM? A 214M bf16 model reads about 0.43 GB of weights
-  per step, so A100 bandwidth allows several thousand steps per second. The engine runs about 180.
-  The host, launch, and kernel shares are not yet split.
+- Does compiled elementwise fusion inside the manual graphs close the batch-1 gap that entry 14
+  predicts?
 - Do grouped graphs still pay anywhere? Entries 12 and 13 show no gain on the current engine. The
   HTTP serving A/B that justified the server default predates PR #27.
 - What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
