@@ -170,9 +170,9 @@ class InferenceEngine(
                     "omit it for this backend"
                 )
             if grouped_layers is None:
-                # Four grouped layers is the measured A100 winner; the runner needs a
-                # following ungrouped layer, so very small (test) models group two.
-                grouped_layers = 4 if model.num_layers > 4 else 2
+                # Four grouped layers is the measured A100 winner (July A/B); small test
+                # models group every layer.
+                grouped_layers = min(4, model.num_layers)
             self.grouped_decode_runners = build_engine_grouped_runners(
                 model,
                 self.cache,

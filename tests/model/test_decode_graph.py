@@ -180,14 +180,11 @@ def test_grouped_runner_validates_supported_group_sizes(runtime) -> None:
     model = runtime.model
     cache = _fresh_cache(model)
 
-    with pytest.raises(ValueError, match="grouped_layers must be 2 or 4"):
-        EngineOwnedGroupedDecodeGraphRunner(
-            model, cache, batch_size=1, grouped_layers=3, mode="eager"
-        )
-    with pytest.raises(ValueError, match="needs 4 layers"):
-        EngineOwnedGroupedDecodeGraphRunner(
-            model, cache, batch_size=1, grouped_layers=4, mode="eager"
-        )
+    for grouped_layers in (0, model.num_layers + 1):
+        with pytest.raises(ValueError, match="grouped_layers must be between 1 and"):
+            EngineOwnedGroupedDecodeGraphRunner(
+                model, cache, batch_size=1, grouped_layers=grouped_layers, mode="eager"
+            )
 
 
 def test_batch_above_largest_bucket_falls_back_to_eager(runtime) -> None:
