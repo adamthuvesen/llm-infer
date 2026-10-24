@@ -125,7 +125,9 @@ def _arm_rows(runtime, batch_sizes: list[int]):
             f"full_step {row['full_step']['wall_ms_per_token_step']:.3f} ms/step"
         )
         stall_guard.progress()
-        del engines
+        # The closures and the last runner hold this row's engines too; drop every reference so
+        # the cache can return their graphs, KV pages, and workspaces before the next batch.
+        del engines, runner, decode
         torch.cuda.empty_cache()
     return rows, outputs
 
