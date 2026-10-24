@@ -143,6 +143,8 @@ class DecodeWindowPlan:
             or self.page_indptr is None
             or self.native_page_indices is None
             or self.page_last_page_len is None
+            or self.page_indptr_host_matrix is None
+            or self.page_last_page_len_host_matrix is None
         ):
             raise ValueError("decode window was built without native page metadata")
         step = self.steps_used
@@ -155,16 +157,8 @@ class DecodeWindowPlan:
             indices=self.native_page_indices[:total_pages],
             last_page_len=self.page_last_page_len,
             page_size=self.block_size,
-            indptr_host=(
-                self.page_indptr_host_matrix[step]
-                if self.page_indptr_host_matrix is not None
-                else None
-            ),
-            last_page_len_host=(
-                self.page_last_page_len_host_matrix[step]
-                if self.page_last_page_len_host_matrix is not None
-                else None
-            ),
+            indptr_host=self.page_indptr_host_matrix[step],
+            last_page_len_host=self.page_last_page_len_host_matrix[step],
         )
 
 
