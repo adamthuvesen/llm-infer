@@ -37,6 +37,8 @@ check.
 - Prometheus-style metrics and a local KV trace visualizer.
 
 For the longer architecture map, see [docs/architecture.md](docs/architecture.md).
+For what each experiment measured and decided, including the negative results, see
+[docs/findings.md](docs/findings.md).
 
 ## Backends
 
@@ -162,6 +164,7 @@ See [visualizer/README.md](visualizer/README.md).
 
 ## Where To Look
 
+- [docs/findings.md](docs/findings.md) - research log: each experiment's question, measurement, and decision, including negative results.
 - [docs/scoping.md](docs/scoping.md) - scope, non-goals, and the reference-before-speed rule.
 - [docs/architecture.md](docs/architecture.md) - runtime flows and module ownership.
 - [docs/benchmark.md](docs/benchmark.md) - benchmark setup and current result record.
