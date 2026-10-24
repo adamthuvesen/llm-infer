@@ -94,6 +94,12 @@ def test_worker_command_launches_this_script_in_a_fresh_python_process(tmp_path:
 
     oracle_command = worker_command("oracle", tmp_path / "input.json", tmp_path / "output.json")
     assert oracle_command[0] == sys.executable
+    grouped_command = worker_command(
+        "llm_infer_grouped", tmp_path / "input.json", tmp_path / "output.json"
+    )
+    assert grouped_command[0] == sys.executable
+    with pytest.raises(ValueError, match="unknown worker system"):
+        worker_command("sglang", tmp_path / "input.json", tmp_path / "output.json")
 
 
 def test_same_host_validation_requires_distinct_pid_and_matching_gpu() -> None:
