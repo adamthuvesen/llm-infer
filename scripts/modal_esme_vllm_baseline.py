@@ -891,7 +891,7 @@ def _parse_worker_args() -> argparse.Namespace | None:
     if "--worker" not in sys.argv:
         return None
     parser = argparse.ArgumentParser()
-    parser.add_argument("--worker", choices=("oracle", "llm_infer", "vllm"), required=True)
+    parser.add_argument("--worker", choices=("oracle", *ENGINE_SYSTEMS), required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
