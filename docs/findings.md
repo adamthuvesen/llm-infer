@@ -42,6 +42,9 @@ Two rules apply to every entry:
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
 | 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound unchanged; options proposed |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
+||||||| parent of 85a5c95 (feat(bench): prompt-lookup speculation A/B on CUDA, predictions registered)
+| 21 | Does grouping all 30 layers beat the server's four-layer group? | Pending; predictions registered before the run | — |
+| 22 | Does prompt-lookup speculation pay on the CUDA engine? | Pending; predictions registered before the run | — |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1028,6 +1031,43 @@ separate change.
 
 Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json),
 [`assets/esme-full-step-ab-2.json`](../assets/esme-full-step-ab-2.json).
+
+## 22. Prompt-lookup speculation on the CUDA engine (predictions registered before the run)
+
+**Question.** Speculation is off on CUDA (entry 10). Its one positive row was a single
+repetition-heavy request on the old flash-attn backend. A speculative step verifies up to four
+drafted tokens in one forward pass, but it gives up the decode window and its graph path. Does it
+pay at batch 1 on the current engine, on ordinary prompts or on prompts whose answers copy their
+input?
+
+**Method.** `scripts/modal_esme_spec_decode_ab.py`. Two workloads of 64 distinct Dolly prompts each
+(pinned revision, seed 1), after 4 warmup prompts: `open` (context-free instructions) and
+`grounded` (summarization, extraction, and closed QA over a 200–1,200-character passage). Batch 1,
+128 new tokens, EOS ignored. Each prompt runs once on each arm, alternating which arm goes first,
+so each prompt is one pair: `baseline` (the default engine) against `speculative` (prompt lookup,
+up to 4 draft tokens from n-grams of up to 4). The statistic is the median per-prompt change in
+request latency, with a 95% bootstrap interval (entry 19's method). Every arm gates against the
+fp32 oracle, the record stores direct per-prompt parity, and `scripts/judge_paired_ab.py` applies
+the rule. Two A100 containers.
+
+**Predictions (written before the run).**
+
+- **Parity is not exact.** A verify step computes several positions in one forward pass, a
+  different reduction order than one-token decode, so some prompts flip at near-ties (entry 20).
+  Both workloads report `review_required` direct parity, and no claim qualifies.
+- **Open:** 1.0–1.4 tokens per verify step. Speculation is 20–60% slower per request, because it
+  pays the lost window and graph path without accepting many drafts.
+- **Grounded:** 1.5–2.5 tokens per verify step, but speculation is still 10–60% slower. At batch
+  1, the graphed window step costs less than an eager verify step that emits two tokens.
+- **Identical-stream subset (exploratory, registered here):** the median change over the prompts
+  whose two arms emit identical tokens has the same sign as the full-workload median.
+
+**Decision rule (set before the run).** Speculation becomes a CUDA default for a workload only if
+that workload is a qualified gain: exact direct parity on both containers, and an interval upper
+bound below 0 on both. Otherwise it stays off, and the timing is reported as raw. The
+identical-stream subset is reported, never claimed.
+
+**Result.** Pending.
 
 ## Open questions
 
