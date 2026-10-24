@@ -25,9 +25,11 @@ ratio never crosses containers.
 
 **Predictions before the run.** Entries 17 and 19 to 23 committed their predictions and decision
 rule before any GPU time was spent. For the paired A/Bs (entries 19, 21, 22, and 23), a script,
-`scripts/judge_paired_ab.py`, applies the rule to the records from two containers. The statistic is the median paired change per round,
-with a 95% bootstrap interval [19]. A claim needs exact output parity and an interval below zero
-in both containers.
+`scripts/judge_paired_ab.py`, applies the rule to the records from two containers. The statistic
+is the median paired change per round, with a 95% bootstrap interval [19]. A qualified claim needs
+exact output parity and an interval below zero in both containers. Some arms cannot match token
+for token by design, such as a fused kernel that rounds differently. Their gains are reported as
+raw timing, and only when both arms have zero non-tie divergences from fp32 [23].
 
 The third rule changed outcomes. It caught an underpowered pilot [19], and it rejected
 speculation even though some prompts accepted two draft tokens per step [22].
