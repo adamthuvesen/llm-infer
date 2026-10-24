@@ -40,6 +40,7 @@ Two rules apply to every entry:
 | 17 | Is the compiled arm host-bound or GPU-bound? | Gate failed: compiled was faster here. FlashInfer `plan()` syncs every step | Remove the sync; then target eager attention |
 | 18 | Do grouped graphs still pay in the server? | Depends on the host: +10.3% at batch 1 with exact parity on one class, −1.3% on another | Keep the server default; record the host CPU |
 | 19 | What does removing the per-step `plan()` sync buy? | Pilot rule failed (underpowered); the registered confirmatory run passed: grouped −1.6% to −3.8%, exact parity | Shipped, with a fence for a race the sync had hidden |
+| 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound unchanged; options proposed |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 
 ## 1. Cross-container variance sets the comparison rule
@@ -861,6 +862,113 @@ Records (pilot): [`assets/esme-decode-host-plan-ab-pilot-sxm4.json`](../assets/e
 Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-ab --batch-sizes
 1,8,64`.
 
+## 20. Measured bf16 logit error (predictions registered before the run)
+
+**Question.** Entry 11 calls the 0.1-logit bound an audited acceptance boundary, not a measured
+percentile: the headline pool has 8 unique prompts. What is the measured distribution of bf16
+logit error, and how often does it exceed 0.1?
+
+**Method.** 1,024 sampled prompts (1,022 unique texts: two Dolly instructions appear twice): a
+seeded sample of short, context-free instructions from
+`databricks/databricks-dolly-15k` at a pinned revision. The engine decodes them in batches of 64,
+128 new tokens each, EOS ignored, on its default bf16 path: FlashInfer paged decode, piecewise
+graphs, and decode windows. A recorder keeps every decode step's logits. The fp32 oracle and the
+bf16 model then recompute logits over exactly the contexts the engine saw, so every comparison is
+numerical error on one context, not a different continuation. That gives about 130,000 positions
+per comparison. Three comparisons split the error: engine against fp32, bf16 full recompute
+against fp32, and engine against bf16 recompute.
+
+The main statistic is the **competitor shrink**: the largest gain of any of the fp32 top-8
+competitors over the fp32 winner, `max(err[c] − err[a])`. The engine flips to `c` when the shrink
+exceeds the fp32 gap `f[a] − f[c]`. A tie tolerance has to bound this quantity. A CPU smoke on 4
+prompts showed one more fact before the run: the engine stores logits in bf16, whose spacing at
+logit values of 16–64 is 0.125–0.25.
+
+**Predictions (written before the run).**
+
+- **The tail passes 0.1.** Engine-vs-fp32 shrink has a median of 0.03–0.08, and its 99.9th
+  percentile is above 0.1. Entry 11 already saw single divergences at 0.108–0.146.
+- **The error is whole-model bf16, not the cached path.** Bf16 recompute against fp32 has a
+  99th-percentile shrink within 20% of the engine's. Entry 11 drew this conclusion from a few
+  rows; here it is a distribution.
+- **Flips stay near ties.** Some flips have an fp32 gap above 0.1, every flip has a gap below 0.3,
+  and no flip occurs where the fp32 margin is 0.3 or more.
+- **Output rounding matters.** The median bf16 spacing at the top logit is at least 0.0625.
+
+**Decision rule (set before the run).** If the 99.9th-percentile shrink is at most 0.1 and no flip
+has a gap above 0.1, the bound becomes a measured percentile. Otherwise the bound stays as it is,
+and any new tolerance goes to the maintainer as a proposal with these counts. A threshold change
+is a policy decision, so this entry does not make it.
+
+**Result.** The decision rule keeps the 0.1 bound as it is: the 99.9th-percentile shrink is 0.25,
+and 7 flips have an fp32 gap above 0.1. Three of four predictions held. 130,048 positions per
+comparison on one A100-SXM4, with the row-to-request mapping checked on every batch. Each request
+contributes its 127 decode steps. The first generated token comes from prefill, and the recorder
+does not see it, so no claim below covers that token.
+
+| Statistic (logits) | Engine vs fp32 | bf16 recompute vs fp32 | Engine vs bf16 recompute |
+| --- | ---: | ---: | ---: |
+| Competitor shrink, median | 0.039 | 0.039 | 0.039 |
+| Competitor shrink, p99 | 0.160 | 0.161 | 0.156 |
+| Competitor shrink, p99.9 | 0.250 | 0.248 | 0.234 |
+| Competitor shrink, max | 0.636 | 0.574 | 0.606 |
+| Positions with shrink above 0.1 | 7.3% | 7.2% | 7.5% |
+| Flips | 807 | 767 | 867 |
+| Flips with a reference gap above 0.1 | 7 | 13 | 12 |
+| Largest flip gap | 0.135 | 0.245 | 0.156 |
+
+In the third column the reference is the bf16 recompute, so its margins and gaps are measured
+against that, not fp32. Its flip count may also include exact top-two ties in the bf16 reference,
+counted as flips with a gap of 0. The fp32 columns are unaffected, and so is every count above
+0.1.
+
+Engine flips by the fp32 top-two margin:
+
+| fp32 margin | Positions | Flips | Flip rate |
+| --- | ---: | ---: | ---: |
+| below 0.01 | 630 | 255 | 40.5% |
+| 0.01–0.03 | 1,177 | 330 | 28.0% |
+| 0.03–0.1 | 4,041 | 215 | 5.3% |
+| 0.1–0.3 | 10,471 | 7 | 0.07% |
+| 0.3 or more | 113,729 | 0 | 0 |
+
+- **The tail passes 0.1 (held).** The median shrink is 0.039, and 7.3% of positions move a
+  competitor by more than 0.1 relative to the winner. A flip needs the fp32 margin to be small as
+  well, which is why only 7 of 807 flips sit above the bound.
+- **The cached path does not make the error larger (held for the distribution).** Bf16 full
+  recompute against fp32 matches the engine's distribution to within 1% at the 99th percentile.
+  So paged KV, FlashInfer, and CUDA graphs do not widen the error that the tie rule must cover.
+  They do change individual logits: engine against bf16 recompute shows an error as large as
+  either against fp32. A different rounding order would do that, but this run has no control
+  that separates a rounding-order effect from a small error of the cached path's own. That
+  attribution stays open.
+- **Flips stay near ties (held).** No flip has an fp32 gap above 0.25, and no flip occurs where
+  the fp32 margin is 0.3 or more, across 113,729 such positions.
+- **Output rounding does not set the floor (failed).** The median bf16 spacing at the top logit is
+  0.0078, because top logits are mostly between 1 and 2. The 0.25 differences in the CPU smoke
+  came from rare large logits. The error builds up through the model's 30 bf16 layers, not in the
+  last rounding step.
+- **Divergence from fp32 greedy is normal, not rare.** 544 of the 1,024 prompts flip at least once
+  in their 127 measured decode steps. Almost every such flip sits inside the 0.1 tie band, so
+  policy v2 accepts it. At most 7 prompts in 1,024 (0.7%) would reach `review_required` from a
+  decode step; the prefill token is not measured.
+
+**Proposal for the maintainer (not adopted).** The data supports either option below. Choosing one
+is a policy change, so this entry does not make it.
+
+- **Keep 0.1.** At most 0.7% of requests would need review from their decode steps, and every observed
+  review case would be a measured near-tie (fp32 gap at most 0.135 on the engine).
+- **Raise the bound to 0.25,** the measured 99.9th-percentile shrink. It would accept all 807
+  observed engine flips and all 767 recompute flips. The cost: a real kernel bug whose error stays
+  below 0.25 logits would also pass. The other half of the rule still holds, that both tokens must
+  sit within the tolerance of the fp32 maximum.
+
+Record: [`assets/esme-bf16-error.json`](../assets/esme-bf16-error.json). It stores the Dolly line
+indices and a hash, not the prompt text.
+
+Reproduce: `modal run scripts/modal_esme_bf16_error.py`. A CPU wiring check runs with
+`--command smoke`.
+
 ## 21. Full-step decode graphs (predictions registered before the run)
 
 **Question.** The HTTP server's CUDA default groups the first four layers, with their KV writes
@@ -928,5 +1036,6 @@ Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json)
 - How much does capturing attention in graphs buy on top of removing the `plan()` sync (entries
   17 and 19)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots now record it.
-- What logit-error distribution supports the 0.1 bf16 bound? This needs many more unique prompts
-  than the 8 in the headline pool.
+- Should the bf16 tie bound stay at 0.1 or move to the measured 0.25 (entry 20)?
+- Does the cached path add error of its own, or only a different rounding order (entry 20)? It
+  needs a control, for example the engine against itself with a perturbed reduction order.
