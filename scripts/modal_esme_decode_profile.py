@@ -20,6 +20,7 @@ bf16 CUDA Esme attention path, greedy, prefix caching off:
     modal run scripts/modal_esme_decode_profile.py --command capture --batch-sizes 8,64,256
     modal run scripts/modal_esme_decode_profile.py --command serve-smoke
     modal run scripts/modal_esme_decode_profile.py --command roofline --batch-sizes 1,8
+    modal run scripts/modal_esme_decode_profile.py --command fusion-probe --batch-sizes 1,8
 
 ``--command capture`` is the decode-graph report: in ONE container it runs the sync-debug
 probe, launch counts, and the oracle-gated same-GPU ablation across the eager window and
@@ -1737,48 +1738,29 @@ def _kernel_category(name: str) -> str:
     return "other"
 
 
-@app.function(
-    image=FLASH_IMAGE,
-    gpu="A100-80GB",
-    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
-    timeout=60 * 60,
-)
-def roofline_report(batch_sizes: list[int]) -> str:
-    """Where one decode token-step goes, against the HBM floor of streaming the weights once.
+def _roofline_rows(
+    runtime, batch_sizes: list[int], peak_bytes_per_s: float
+) -> tuple[list[dict], dict[int, dict[str, list[int]]]]:
+    """Roofline rows per batch size, plus each batch's fixed-length greedy outputs for gating.
 
-    Runs the default CUDA path (bf16, FlashInfer, piecewise decode graphs, decode window 8) on a
-    persistent engine with a fixed output length, so the batch never shrinks. Per batch size:
-    an uninstrumented timed run gives wall per token-step; a separate ``torch.profiler`` run
-    gives kernel time by category. ``idle_gap`` is wall minus kernel time: every moment no kernel
-    runs, which covers host dispatch and the gaps between graph nodes during a replay. Kernel
-    times inside graph replays come from CUPTI device records; the profiled run's own wall is
-    not used.
+    One persistent engine per batch decodes ``ROOFLINE_NEW_TOKENS`` with EOS ignored, so the
+    batch never shrinks. An uninstrumented run gives wall per token step; a profiled run over
+    decode only gives CUPTI kernel time by category; a final run records the output tokens.
     """
     import torch
 
-    from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.esme_paged import build_requests
-    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
-    from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
-    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
-    esme_bundles.reload()
-    runtime = load_model_runtime(
-        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
-    )
     model = runtime.model
-    capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
-    gpu = gpu_snapshot()
-    peak_bytes_per_s = A100_PEAK_BYTES_PER_S.get(str(gpu.get("name")))
-    if peak_bytes_per_s is None:
-        raise RuntimeError(f"no spec HBM bandwidth recorded for GPU {gpu.get('name')!r}")
+
     weight_bytes = sum(tensor.numel() * tensor.element_size() for tensor in model.w.values())
     kv_bytes_per_token = (
         model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
     )
 
     rows: list[dict] = []
+    outputs_by_batch: dict[int, dict[str, list[int]]] = {}
     for size in batch_sizes:
         requests = build_requests(runtime.tokenizer, size)
         needed = sum(
@@ -1822,11 +1804,13 @@ def roofline_report(batch_sizes: list[int]) -> str:
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
         ) as prof:
             decode()
+        events = prof.key_averages()
         kernels = [
             evt
-            for evt in prof.key_averages()
+            for evt in events
             if evt.device_type == torch.autograd.DeviceType.CUDA and evt.self_device_time_total > 0
         ]
+        host_events = [evt for evt in events if evt.device_type == torch.autograd.DeviceType.CPU]
         by_category = {"gemm": 0.0, "attention": 0.0, "other": 0.0}
         for evt in kernels:
             by_category[_kernel_category(evt.key)] += evt.self_device_time_total / 1000.0
@@ -1860,6 +1844,23 @@ def roofline_report(batch_sizes: list[int]) -> str:
                 "gemm_fraction_of_peak_bandwidth": (
                     weight_bytes / (per_step["gemm"] / 1000.0) / peak_bytes_per_s
                 ),
+                "kernel_launches_per_token_step": sum(evt.count for evt in kernels) / token_steps,
+                "host_calls_per_token_step": {
+                    name: sum(evt.count for evt in host_events if evt.key == name) / token_steps
+                    for name in ("cudaGraphLaunch", "cudaLaunchKernel", "cuLaunchKernel")
+                },
+                "top_host_ops": [
+                    {
+                        "op": evt.key,
+                        "calls": evt.count,
+                        "self_cpu_ms_per_token_step": evt.self_cpu_time_total
+                        / 1000.0
+                        / token_steps,
+                    }
+                    for evt in sorted(
+                        host_events, key=lambda e: e.self_cpu_time_total, reverse=True
+                    )[:15]
+                ],
                 "distinct_kernel_names": len(kernels),
                 "top_kernels": [
                     {
@@ -1879,8 +1880,55 @@ def roofline_report(batch_sizes: list[int]) -> str:
             f"(gemm {per_step['gemm']:.3f}, attn {per_step['attention']:.3f}, other "
             f"{per_step['other']:.3f}), floor {floor_ms:.3f} ms"
         )
+        for req in requests:
+            engine.add_request(
+                Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
+            )
+        outputs_by_batch[size] = engine.run()
         del engine
         torch.cuda.empty_cache()
+    return rows, outputs_by_batch
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def roofline_report(batch_sizes: list[int]) -> str:
+    """Where one decode token-step goes, against the HBM floor of streaming the weights once.
+
+    Runs the default CUDA path (bf16, FlashInfer, piecewise decode graphs, decode window 8) on a
+    persistent engine with a fixed output length, so the batch never shrinks. Per batch size:
+    an uninstrumented timed run gives wall per token-step; a separate ``torch.profiler`` run
+    gives kernel time by category. ``idle_gap`` is wall minus kernel time: every moment no kernel
+    runs, which covers host dispatch and the gaps between graph nodes during a replay. Kernel
+    times inside graph replays come from CUPTI device records; the profiled run's own wall is
+    not used.
+    """
+    import torch
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    model = runtime.model
+    capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
+    gpu = gpu_snapshot()
+    peak_bytes_per_s = A100_PEAK_BYTES_PER_S.get(str(gpu.get("name")))
+    if peak_bytes_per_s is None:
+        raise RuntimeError(f"no spec HBM bandwidth recorded for GPU {gpu.get('name')!r}")
+    weight_bytes = sum(tensor.numel() * tensor.element_size() for tensor in model.w.values())
+    kv_bytes_per_token = (
+        model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
+    )
+    rows, _ = _roofline_rows(runtime, batch_sizes, peak_bytes_per_s)
 
     return json.dumps(
         {
@@ -1891,6 +1939,152 @@ def roofline_report(batch_sizes: list[int]) -> str:
             "peak_hbm_bytes_per_s": peak_bytes_per_s,
             "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
             "attention_backend": type(model.backend).__name__,
+            "gpu": gpu,
+            "versions": library_versions(),
+        }
+    )
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=60 * 60,
+)
+def fusion_probe(batch_sizes: list[int]) -> str:
+    """Does compiling the elementwise chains cut decode kernel count and device time?
+
+    Two arms in one container, each measured with the roofline protocol. ``eager`` is the
+    default path. ``compiled`` swaps ``rms_norm`` and ``apply_rope`` for ``torch.compile``
+    versions (no compiler CUDA graphs) inside the model modules before the model loads, warms
+    them on the eager decode path, then captures the usual manual piecewise graphs around the
+    compiled kernels. Both arms gate against the fp32 oracle, which runs with the original
+    functions, and the record stores direct eager/compiled parity.
+    """
+    import torch
+
+    import llm_infer.model.decode_graph as decode_graph_module
+    import llm_infer.model.pretrain_bundle as bundle_module
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+    from llm_infer.benchmarks.reference_policy import normalized_outputs_match
+    from llm_infer.model import rope_utils
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    gpu = gpu_snapshot()
+    peak_bytes_per_s = A100_PEAK_BYTES_PER_S.get(str(gpu.get("name")))
+    if peak_bytes_per_s is None:
+        raise RuntimeError(f"no spec HBM bandwidth recorded for GPU {gpu.get('name')!r}")
+    capture_sizes = tuple(sorted(set(batch_sizes)))
+
+    def load_with_graphs(warm: bool) -> tuple[object, float]:
+        runtime = load_model_runtime(
+            "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+        )
+        if warm:
+            # Run every decode shape on the eager path first, so most compilation happens
+            # before capture; capture's own warmup runs each segment before recording it.
+            for size in capture_sizes:
+                requests = build_requests(runtime.tokenizer, size)
+                engine = InferenceEngine(
+                    runtime.model,
+                    block_size=BLOCK_SIZE,
+                    num_blocks=size * 4 + 4,
+                    device="cuda",
+                    capabilities=runtime.capabilities,
+                )
+                for req in requests:
+                    engine.add_request(
+                        Request(req.request_id, list(req.prompt_ids), 16, frozenset())
+                    )
+                engine.run()
+        return runtime, enable_decode_graphs_if_cuda(runtime.model, capture_sizes)
+
+    arms: dict[str, dict] = {}
+    outputs: dict[str, dict[int, dict[str, list[int]]]] = {}
+    runtime, capture_s = load_with_graphs(warm=False)
+    rows, outputs["eager"] = _roofline_rows(runtime, batch_sizes, peak_bytes_per_s)
+    arms["eager"] = {"rows": rows, "capture_s": capture_s}
+    tokenizer = runtime.tokenizer
+    del runtime
+    torch.cuda.empty_cache()
+
+    originals = (bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm)
+    compiled_rms_norm = torch.compile(rope_utils.rms_norm, dynamic=True)
+    compiled_apply_rope = torch.compile(rope_utils.apply_rope, dynamic=True)
+    bundle_module.rms_norm = compiled_rms_norm
+    bundle_module.apply_rope = compiled_apply_rope
+    decode_graph_module.rms_norm = compiled_rms_norm
+    try:
+        compile_start = time.perf_counter()
+        runtime, capture_s = load_with_graphs(warm=True)
+        compile_and_capture_s = time.perf_counter() - compile_start
+        rows, outputs["compiled"] = _roofline_rows(runtime, batch_sizes, peak_bytes_per_s)
+        arms["compiled"] = {
+            "rows": rows,
+            "capture_s": capture_s,
+            "load_compile_capture_s": compile_and_capture_s,
+        }
+        del runtime
+        torch.cuda.empty_cache()
+    finally:
+        bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm = originals
+
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    gates: list[dict] = []
+    for size in batch_sizes:
+        requests = build_requests(tokenizer, size)
+        reference: dict[str, list[int]] = {}
+        for req in requests:
+            reference[req.request_id] = greedy_decode(
+                oracle_runtime.model,
+                list(req.prompt_ids),
+                max_new_tokens=ROOFLINE_NEW_TOKENS,
+                eos_token_ids=set(),
+            )
+        gate: dict[str, object] = {"batch_size": size}
+        for arm in ("eager", "compiled"):
+            agreement = tie_tolerant_agreement(
+                oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
+            )
+            gate[arm] = dataclasses.asdict(agreement)
+        eager_outputs, compiled_outputs = outputs["eager"][size], outputs["compiled"][size]
+        gate["parity_status"] = (
+            "failed"
+            if set(eager_outputs) != set(compiled_outputs)
+            else "exact"
+            if normalized_outputs_match(eager_outputs, compiled_outputs, frozenset())
+            else "review_required"
+        )
+        gates.append(gate)
+        eager_row = next(r for r in arms["eager"]["rows"] if r["batch_size"] == size)
+        compiled_row = next(r for r in arms["compiled"]["rows"] if r["batch_size"] == size)
+        print(
+            f"[fusion] batch={size}: launches/step "
+            f"{eager_row['kernel_launches_per_token_step']:.0f} -> "
+            f"{compiled_row['kernel_launches_per_token_step']:.0f}, kernel ms "
+            f"{eager_row['kernel_total_ms_per_token_step']:.3f} -> "
+            f"{compiled_row['kernel_total_ms_per_token_step']:.3f}, wall "
+            f"{eager_row['wall_ms_per_token_step']:.3f} -> "
+            f"{compiled_row['wall_ms_per_token_step']:.3f}, parity {gate['parity_status']}, "
+            f"nontie {gate['eager']['nontie']}/{gate['compiled']['nontie']}"
+        )
+
+    return json.dumps(
+        {
+            "probe": "decode-fusion",
+            "arms": arms,
+            "gates": gates,
+            "compiled_functions": ["rope_utils.rms_norm", "rope_utils.apply_rope"],
+            "capture_sizes": list(capture_sizes),
             "gpu": gpu,
             "versions": library_versions(),
         }
@@ -2030,11 +2224,13 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
         "four-layer-parity",
         "bucket-policy",
         "roofline",
+        "fusion-probe",
     ):
         raise ValueError(
             "command must be 'profile', 'sampled-profile', 'bench', 'ablate', 'capture', "
             "'sync', 'serve-smoke', 'flashinfer-graph-probe', 'two-layer-group-ab', "
-            "'four-layer-group-ab', 'four-layer-parity', 'bucket-policy', or 'roofline', "
+            "'four-layer-group-ab', 'four-layer-parity', 'bucket-policy', 'roofline', "
+            "or 'fusion-probe', "
             f"got {command!r}"
         )
     sizes = _parse_batch_sizes(batch_sizes)
@@ -2080,6 +2276,9 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
     elif command == "roofline":
         print(f"[esme-decode] roofline: batches {sizes}, {ROOFLINE_NEW_TOKENS} fixed new tokens")
         record = json.loads(roofline_report.remote(sizes))
+    elif command == "fusion-probe":
+        print(f"[esme-decode] fusion probe: batches {sizes}, eager vs compiled elementwise")
+        record = json.loads(fusion_probe.remote(sizes))
     else:
         record = json.loads(bench_decode.remote(sizes))
     record["config"] = {
@@ -2103,6 +2302,7 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
                 "four-layer-parity",
                 "bucket-policy",
                 "roofline",
+                "fusion-probe",
             )
             else MAX_NEW_TOKENS
         ),
@@ -2112,7 +2312,14 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else 0
             if command == "four-layer-parity"
             else 2
-            if command in ("two-layer-group-ab", "four-layer-group-ab", "bucket-policy", "roofline")
+            if command
+            in (
+                "two-layer-group-ab",
+                "four-layer-group-ab",
+                "bucket-policy",
+                "roofline",
+                "fusion-probe",
+            )
             else WARMUP_ITERS
         ),
         "iters": (
@@ -2139,7 +2346,12 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             "fresh ordinary FlashInfer wrapper planned for the exact page metadata"
             if command == "flashinfer-graph-probe"
             else "none (diagnostic attribution only, never a speed claim)"
-            if command in ("sampled-profile", "roofline")
+            if command == "sampled-profile"
+            else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant, plus direct "
+            "eager/compiled parity"
+            if command == "fusion-probe"
+            else "none (diagnostic attribution only, never a speed claim)"
+            if command == "roofline"
             else "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant"
         ),
         "repro_command": (
