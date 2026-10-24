@@ -9,6 +9,7 @@ docs/findings.md entry 19 before the run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -39,11 +40,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    paths = [Path(path).resolve() for path in sys.argv[1:]]
-    if paths[0] == paths[1]:
-        print("error: the rule needs two different containers' records", file=sys.stderr)
+    raw = [Path(path).read_bytes() for path in sys.argv[1:]]
+    records = [json.loads(content) for content in raw]
+    container_ids = [record.get("container_id") for record in records]
+    same_container = None not in container_ids and container_ids[0] == container_ids[1]
+    if hashlib.sha256(raw[0]).digest() == hashlib.sha256(raw[1]).digest() or same_container:
+        print("error: the rule needs records from two different containers", file=sys.stderr)
         return 2
-    records = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     if any(record["rounds"] != REGISTERED_ROUNDS for record in records):
         print(f"error: the registered run has {REGISTERED_ROUNDS} rounds per row", file=sys.stderr)
         return 2

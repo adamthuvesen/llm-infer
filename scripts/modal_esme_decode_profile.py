@@ -35,6 +35,7 @@ import contextlib
 import dataclasses
 import json
 import math
+import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -2710,6 +2711,8 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     return json.dumps(
         {
             "probe": "decode-host-plan-ab",
+            # The judge refuses two records from one container.
+            "container_id": os.environ.get("MODAL_TASK_ID", "unknown"),
             "configs": configs,
             "rounds": HOST_PLAN_ROUNDS,
             "capture_sizes": list(capture_sizes),
