@@ -1804,11 +1804,13 @@ def _roofline_rows(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
         ) as prof:
             decode()
+        events = prof.key_averages()
         kernels = [
             evt
-            for evt in prof.key_averages()
+            for evt in events
             if evt.device_type == torch.autograd.DeviceType.CUDA and evt.self_device_time_total > 0
         ]
+        host_events = [evt for evt in events if evt.device_type == torch.autograd.DeviceType.CPU]
         by_category = {"gemm": 0.0, "attention": 0.0, "other": 0.0}
         for evt in kernels:
             by_category[_kernel_category(evt.key)] += evt.self_device_time_total / 1000.0
@@ -1843,6 +1845,22 @@ def _roofline_rows(
                     weight_bytes / (per_step["gemm"] / 1000.0) / peak_bytes_per_s
                 ),
                 "kernel_launches_per_token_step": sum(evt.count for evt in kernels) / token_steps,
+                "host_calls_per_token_step": {
+                    name: sum(evt.count for evt in host_events if evt.key == name) / token_steps
+                    for name in ("cudaGraphLaunch", "cudaLaunchKernel", "cuLaunchKernel")
+                },
+                "top_host_ops": [
+                    {
+                        "op": evt.key,
+                        "calls": evt.count,
+                        "self_cpu_ms_per_token_step": evt.self_cpu_time_total
+                        / 1000.0
+                        / token_steps,
+                    }
+                    for evt in sorted(
+                        host_events, key=lambda e: e.self_cpu_time_total, reverse=True
+                    )[:15]
+                ],
                 "distinct_kernel_names": len(kernels),
                 "top_kernels": [
                     {
