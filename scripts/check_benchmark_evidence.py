@@ -44,6 +44,17 @@ AB_VERDICTS = (
         ),
     ),
     (
+        "entry 23",
+        ("esme-fusion-ab-1.json", "esme-fusion-ab-2.json"),
+        0,
+        (
+            "grouped b1: raw gain -43.8%",
+            "grouped b8: raw gain -40.1%",
+            "grouped b64: qualified gain -37.4%",
+            "merge gate: PASS",
+        ),
+    ),
+    (
         "entry 22",
         ("esme-spec-decode-ab-1.json", "esme-spec-decode-ab-2.json"),
         1,
