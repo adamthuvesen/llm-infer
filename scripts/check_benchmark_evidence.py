@@ -92,6 +92,20 @@ def _headline_table_errors() -> list[str]:
     ladder, errors = _gated_rows(LADDER_RECORD)
     vllm, vllm_errors = _gated_rows(VLLM_RECORD)
     errors.extend(vllm_errors)
+    required = [
+        (LADDER_RECORD, ladder, (system, 0, batch))
+        for batch in (8, 64, 256)
+        for system in ("hf_batched", "+grouped_graphs")
+    ] + [
+        (VLLM_RECORD, vllm, (system, 256, batch))
+        for batch in (1, 8, 64, 256)
+        for system in ("llm_infer_grouped", "vllm")
+    ]
+    missing = [
+        f"{path}: missing headline row {key}" for path, rows, key in required if key not in rows
+    ]
+    if missing:
+        return errors + missing
     expected: list[str] = []
     for batch in (8, 64, 256):
         hf_sequential = ladder.get(("hf_sequential", 0, batch))

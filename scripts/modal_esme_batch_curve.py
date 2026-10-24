@@ -1,6 +1,6 @@
 """Modal A100 batch-size curve for Esme-214M-Chat: llm_infer vs the naive-HF floor.
 
-The centerpiece figure behind ``assets/fig-esme-batch-curve.svg``: engine throughput as the
+The batch-scaling figure behind ``assets/fig-esme-batch-curve.svg``: engine throughput as the
 batch grows from 8 to 256 concurrent chat requests, against the measured naive
 HF-sequential floor. Same workload family as the headline benchmark (HEADLINE_PROMPTS
 pool, up to 256 new tokens, greedy, prefix caching off) and the same gate: every reported
@@ -1184,7 +1184,6 @@ def sweep_ladder(
                 if iteration >= warmup:
                     timings[name].append(time.perf_counter() - start)
                     rung_outputs[name] = result
-        model.decode_graphs = piecewise_runner
 
         grouped_runner = engines["+grouped_graphs"][0].grouped_decode_runners[size]
         if grouped_runner.steps_handled == 0:

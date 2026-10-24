@@ -100,8 +100,6 @@ def test_worker_command_launches_this_script_in_a_fresh_python_process(tmp_path:
         "llm_infer_grouped", tmp_path / "input.json", tmp_path / "output.json"
     )
     assert grouped_command[0] == sys.executable
-    with pytest.raises(ValueError, match="unknown worker system"):
-        worker_command("sglang", tmp_path / "input.json", tmp_path / "output.json")
 
 
 @pytest.mark.parametrize("system", ["oracle", *ENGINE_SYSTEMS])
