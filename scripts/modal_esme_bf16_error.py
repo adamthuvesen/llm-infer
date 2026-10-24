@@ -1,4 +1,4 @@
-"""Measured bf16 logit error on many unique prompts: what supports the 0.1-logit tie rule?
+"""Measured bf16 logit error on many sampled prompts: what supports the 0.1-logit tie rule?
 
 The engine decodes a pool of unique chat prompts in bf16 (FlashInfer, piecewise CUDA graphs,
 decode windows: the raw-engine default) with EOS ignored. A recorder keeps every decode step's
@@ -180,7 +180,6 @@ def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, 
                     worst_flips.append(
                         {
                             "request_id": req.request_id,
-                            "prompt_index": start + batch.index(req),
                             "decode_step": step + 1,
                             "flip_gap": float(errors.flip_gap[step]),
                             "fp32_margin": float(errors.fp32_margin[step]),

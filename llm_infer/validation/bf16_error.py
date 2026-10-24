@@ -13,9 +13,10 @@ For each position, with ``a`` the fp32 top token and ``err = candidate - referen
 * ``competitor_shrink``: the largest ``err[c] - err[a]`` over the fp32 top competitors ``c``.
   The candidate flips to ``c`` when this exceeds ``f[a] - f[c]``, so this is the quantity a
   tie tolerance must bound.
-* ``flipped`` and ``flip_gap``: whether the candidate's argmax differs from ``a``, and the fp32
-  gap ``f[a] - f[candidate argmax]`` when it does. A flip with a gap above the tolerance is a
-  ``review_required`` row under policy v2.
+* ``flipped`` and ``flip_gap``: whether the candidate's argmax scores below ``a`` on the
+  reference, and that gap ``f[a] - f[candidate argmax]``. An exact tie on the reference is not a
+  flip. Policy v2 judges only a request's first divergence, so a flip above the tolerance marks a
+  request for review only when it is that request's first flip.
 * ``max_abs_error``: ``max |err|`` over the vocabulary.
 * ``bf16_spacing``: the gap between adjacent bf16 values at the fp32 top logit. Logits stored
   in bf16 cannot resolve a margin finer than this, so it sets a floor under any tie tolerance.
@@ -58,8 +59,9 @@ def position_errors(reference: torch.Tensor, candidate: torch.Tensor) -> Positio
     top_error = error.gather(-1, top_ids)
     winner_error = top_error[:, :1]
     candidate_top = candidate.float().argmax(dim=-1)
-    flipped = candidate_top != top_ids[:, 0]
     flip_gap = top_values[:, 0] - reference.gather(-1, candidate_top[:, None]).squeeze(-1)
+    # topk's order among exactly tied values is unspecified on CUDA; a tie is not a flip.
+    flipped = flip_gap > 0
     return PositionErrors(
         fp32_margin=(top_values[:, 0] - top_values[:, 1]).cpu(),
         margin_error=(winner_error[:, 0] - top_error[:, 1]).abs().cpu(),

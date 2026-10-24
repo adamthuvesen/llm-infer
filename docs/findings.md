@@ -867,7 +867,8 @@ Reproduce: `modal run scripts/modal_esme_decode_profile.py --command host-plan-a
 percentile: the headline pool has 8 unique prompts. What is the measured distribution of bf16
 logit error, and how often does it exceed 0.1?
 
-**Method.** 1,024 unique prompts: a seeded sample of short, context-free instructions from
+**Method.** 1,024 sampled prompts (1,022 unique texts: two Dolly instructions appear twice): a
+seeded sample of short, context-free instructions from
 `databricks/databricks-dolly-15k` at a pinned revision. The engine decodes them in batches of 64,
 128 new tokens each, EOS ignored, on its default bf16 path: FlashInfer paged decode, piecewise
 graphs, and decode windows. A recorder keeps every decode step's logits. The fp32 oracle and the
@@ -910,8 +911,13 @@ comparison on one A100-SXM4, with the row-to-request mapping checked on every ba
 | Competitor shrink, max | 0.636 | 0.574 | 0.606 |
 | Positions with shrink above 0.1 | 7.3% | 7.2% | 7.5% |
 | Flips | 807 | 767 | 867 |
-| Flips with an fp32 gap above 0.1 | 7 | 13 | 12 |
+| Flips with a reference gap above 0.1 | 7 | 13 | 12 |
 | Largest flip gap | 0.135 | 0.245 | 0.156 |
+
+In the third column the reference is the bf16 recompute, so its margins and gaps are measured
+against that, not fp32. Its flip count may also include exact top-two ties in the bf16 reference,
+which the record counted as flips with a gap of 0. The code now counts a flip only when the gap
+is above 0.
 
 Engine flips by the fp32 top-two margin:
 
@@ -944,7 +950,7 @@ Engine flips by the fp32 top-two margin:
 **Proposal for the maintainer (not adopted).** The data supports either option below. Choosing one
 is a policy change, so this entry does not make it.
 
-- **Keep 0.1.** About 0.7% of 128-token greedy requests would need review, and every observed
+- **Keep 0.1.** At most 0.7% of 128-token greedy requests would need review, and every observed
   review case would be a measured near-tie (fp32 gap at most 0.135 on the engine).
 - **Raise the bound to 0.25,** the measured 99.9th-percentile shrink. It would accept all 807
   observed engine flips and all 767 recompute flips. The cost: a real kernel bug whose error stays
