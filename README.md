@@ -12,9 +12,9 @@ loop, benchmark harness, and trace output. It consumes export bundles from
 [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain) and
 [`esme-posttrain`](https://github.com/adamthuvesen/esme-posttrain).
 
-`Esme-214M-Chat` is the default model throughout the docs. Speed is measured against
-naive HuggingFace generation. Qwen2.5-Coder is the independent HuggingFace reference
-for catching correctness regressions.
+`Esme-214M-Chat` is the default model throughout the docs. Speed is measured on the same GPU
+against batched HuggingFace `generate()` and against vLLM. Qwen2.5-Coder is the independent
+HuggingFace reference for catching correctness regressions.
 
 The core rule: every speed claim must first match a known-good reference output on
 the same prompt and model. Experimental paths stay labeled experimental until they pass that
@@ -37,6 +37,8 @@ check.
 - Prometheus-style metrics and a local KV trace visualizer.
 
 For the longer architecture map, see [docs/architecture.md](docs/architecture.md).
+For what each experiment measured and decided, including the negative results, see
+[docs/findings.md](docs/findings.md).
 
 ## Backends
 
@@ -135,24 +137,43 @@ served bench page can point at it).
 ## Benchmarks
 
 A system reports tok/s only after its tokens match the fp32 `PretrainBundleModel.logits()`
-reference, with traced numerical ties the only allowed difference.
+reference, with traced numerical ties the only allowed difference. Every number below comes from
+a committed record and passed that gate.
 
-Headline: `2026-07-10`, A100-80GB, default CUDA Esme path with `FlashInferPagedAttention`,
-**256 concurrent chat requests x up to 256 new tokens** (within Esme's 1024-token context),
-greedy, median of 3 iterations:
+**Against batched HuggingFace.** `2026-10-24`, one A100-SXM4-80GB container, chat prompts, up to
+256 new tokens, real EOS, greedy, median of 5 runs:
 
-| System | tok/s | vs naive baseline |
-| --- | ---: | ---: |
-| naive HF sequential | 22.1 | 1x |
-| `llm_infer` | 13,490.5 | **610.8x** |
+| Concurrent requests | HF sequential tok/s | HF batched tok/s | `llm_infer` tok/s | vs HF batched |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 59.9 | 249.4 | 777.7 | **3.1x** |
+| 64 | — | 2,079.3 | 5,867.8 | **2.8x** |
+| 256 | — | 6,070.9 | 18,784.9 | **3.1x** |
 
-The batch-sweep curve below is the same run. Throughput scales with concurrency because all
-requests decode through one shared paged-KV engine, while the naive baseline stays flat:
+HF sequential is the naive floor: one `generate()` call per request. Plain batching already
+explains a 4.2x gain over it, so the engine is measured against batched `generate()`. The figure
+shows where the remaining gain comes from:
 
-![Esme batch-size throughput curve](assets/fig-esme-batch-curve.svg)
+![Esme ablation ladder: tok/s added by each engine technique](assets/fig-esme-ablation-ladder.svg)
 
-Methodology and the committed curve record are summarized in
-[docs/benchmark.md](docs/benchmark.md).
+**Against vLLM.** `2026-10-24`, vLLM 0.24.0 and `llm_infer` (grouped and piecewise CUDA graphs
+captured at each measured batch size) on one reserved A100-SXM4-80GB host,
+256 cached prompt tokens, 128 new tokens per request, EOS ignored, median of 10 runs:
+
+| Concurrent requests | `llm_infer` tok/s | vLLM tok/s | vLLM / `llm_infer` |
+| ---: | ---: | ---: | ---: |
+| 1 | 180.9 | 563.1 | 3.11x |
+| 8 | 1,188.6 | 3,298.7 | 2.78x |
+| 64 | 7,858.5 | 20,000.4 | 2.55x |
+| 256 | 18,911.1 | 35,181.0 | 1.86x |
+
+Batched prefill closed most of the high-batch gap since July (findings entry 12 has that
+comparison). The 3.1x batch-1 gap has not moved and is the main open question. The HTTP server
+captures graphs only up to 16 concurrent requests by default; pass `--decode-graph-buckets` to
+serve larger batches from graphs.
+
+Method, the batch-scaling curve, and every row's reference status are in
+[docs/benchmark.md](docs/benchmark.md). The experiments behind these numbers, including the
+negative results, are in [docs/findings.md](docs/findings.md).
 
 ## KV Trace Visualizer
 
@@ -162,6 +183,7 @@ See [visualizer/README.md](visualizer/README.md).
 
 ## Where To Look
 
+- [docs/findings.md](docs/findings.md) - research log: each experiment's question, measurement, and decision, including negative results.
 - [docs/scoping.md](docs/scoping.md) - scope, non-goals, and the reference-before-speed rule.
 - [docs/architecture.md](docs/architecture.md) - runtime flows and module ownership.
 - [docs/benchmark.md](docs/benchmark.md) - benchmark setup and current result record.

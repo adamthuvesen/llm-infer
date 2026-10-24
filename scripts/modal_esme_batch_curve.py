@@ -1,6 +1,6 @@
 """Modal A100 batch-size curve for Esme-214M-Chat: llm_infer vs the naive-HF floor.
 
-The centerpiece figure behind ``assets/fig-esme-batch-curve.svg``: engine throughput as the
+The batch-scaling figure behind ``assets/fig-esme-batch-curve.svg``: engine throughput as the
 batch grows from 8 to 256 concurrent chat requests, against the measured naive
 HF-sequential floor. Same workload family as the headline benchmark (HEADLINE_PROMPTS
 pool, up to 256 new tokens, greedy, prefix caching off) and the same gate: every reported
@@ -20,6 +20,7 @@ how the right side of the curve fits in memory.
 
     modal run scripts/modal_esme_batch_curve.py --command smoke   # tiny shape, 1 iter
     modal run scripts/modal_esme_batch_curve.py --command curve   # the published sweep
+    modal run scripts/modal_esme_batch_curve.py --command ladder  # same-container ablation
 """
 
 from __future__ import annotations
@@ -972,6 +973,274 @@ def sweep_flashinfer_compare(
     )
 
 
+# Cumulative ablation ladder: each rung adds one technique to the rung before it. The
+# graphs flag selects the model-owned piecewise runner; grouped adds exact-batch grouped
+# graphs on top. Paged KV and continuous batching are present on every engine rung.
+LADDER_RUNGS: tuple[tuple[str, dict[str, object], bool, bool], ...] = (
+    ("paged_continuous", {"batched_prefill": False, "decode_window_size": 1}, False, False),
+    ("+batched_prefill", {"batched_prefill": True, "decode_window_size": 1}, False, False),
+    ("+decode_window", {"batched_prefill": True, "decode_window_size": 8}, False, False),
+    ("+piecewise_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, False),
+    ("+grouped_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, True),
+)
+
+
+@app.function(
+    image=FLASH_IMAGE,
+    gpu="A100-80GB",
+    volumes={ESME_BUNDLE_MOUNT: esme_bundles},
+    timeout=2 * 60 * 60,
+)
+def sweep_ladder(
+    batch_sizes: list[int],
+    hf_floor_spec: list[int],
+    max_new_tokens: int,
+    warmup: int,
+    iters: int,
+) -> str:
+    """Same-container ablation ladder: HF baselines, then one engine technique per rung.
+
+        Every rung runs the persistent-engine protocol of ``sweep_grouped_ab``: one engine per
+        (batch, rung) built before timing, so grouped capture never lands in a timed region.
+        Rung order rotates each iteration to keep clock drift out of the step ratios. A step
+        ratio between adjacent rungs is reported only when their outputs match exactly; the raw
+        ratio is always kept. HF batched ``generate()`` separates plain static batching from the
+        engine's techniques; HF sequential is the naive floor at one ``[batch, iters]`` spec, with
+    the curve's floor protocol (one warmup only when it measures more than once).
+    """
+    import math
+    import statistics
+
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    from llm_infer.benchmarks import gpu_snapshot, library_versions
+    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
+    from llm_infer.benchmarks.esme_three_way import (
+        run_hf_sequential_esme,
+        tie_tolerant_agreement,
+    )
+    from llm_infer.benchmarks.reference_policy import (
+        build_system_evidence_record,
+        normalized_outputs_match,
+    )
+    from llm_infer.benchmarks.report import total_output_tokens
+    from llm_infer.model.decode import greedy_decode
+    from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.runtime import load_model_runtime
+    from llm_infer.serving import InferenceEngine, Request
+
+    assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    esme_bundles.reload()
+    oracle_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
+    )
+    engine_runtime = load_model_runtime(
+        "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
+    )
+    eos = oracle_runtime.eos_token_ids
+    model = engine_runtime.model
+    capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
+    piecewise_runner = model.decode_graphs
+    if piecewise_runner is None:
+        raise RuntimeError("piecewise decode graphs did not enable on the CUDA bundle model")
+    print(f"[ladder] piecewise buckets {CAPTURE_SIZES} captured in {capture_s:.1f} s")
+
+    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
+
+    def reference_for(requests) -> dict[str, list[int]]:
+        for req in requests:
+            if req.prompt_ids not in reference_by_prompt:
+                reference_by_prompt[req.prompt_ids] = greedy_decode(
+                    oracle_runtime.model,
+                    list(req.prompt_ids),
+                    max_new_tokens=max_new_tokens,
+                    eos_token_ids=set(eos),
+                )
+        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+
+    def gated_row(system: str, size: int, requests, outputs, per_iter: list[float]) -> dict:
+        agreement = tie_tolerant_agreement(
+            oracle_runtime.model, requests, outputs, reference_for(requests), eos
+        )
+        tokens = total_output_tokens(outputs, eos)
+        median_s = statistics.median(per_iter)
+        return {
+            "system": system,
+            "batch_size": size,
+            "agreement": dataclasses.asdict(agreement),
+            "median_seconds": median_s,
+            "per_iter_seconds": per_iter,
+            "total_output_tokens": tokens,
+            **build_system_evidence_record(
+                agreement=agreement, median_seconds=median_s, total_tokens=tokens
+            ),
+        }
+
+    def timed(
+        decode_once, warmup_runs: int, measured_runs: int
+    ) -> tuple[list[float], dict[str, list[int]]]:
+        for _ in range(warmup_runs):
+            decode_once()
+            torch.cuda.synchronize()
+        per_iter: list[float] = []
+        outputs: dict[str, list[int]] = {}
+        for _ in range(measured_runs):
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            outputs = decode_once()
+            torch.cuda.synchronize()
+            per_iter.append(time.perf_counter() - start)
+        return per_iter, outputs
+
+    pad_id = sorted(eos)[0]
+    hf_model = (
+        AutoModelForCausalLM.from_pretrained(
+            REMOTE_HF_PATH, dtype=torch.bfloat16, local_files_only=True
+        )
+        .eval()
+        .to("cuda")
+    )
+
+    def hf_batched_once(requests) -> dict[str, list[int]]:
+        width = max(len(req.prompt_ids) for req in requests)
+        input_ids = torch.full((len(requests), width), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((len(requests), width), dtype=torch.long)
+        for row, req in enumerate(requests):
+            input_ids[row, width - len(req.prompt_ids) :] = torch.tensor(req.prompt_ids)
+            attention_mask[row, width - len(req.prompt_ids) :] = 1
+        generated = hf_model.generate(
+            input_ids.to("cuda"),
+            attention_mask=attention_mask.to("cuda"),
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+            eos_token_id=sorted(eos),
+            pad_token_id=pad_id,
+        )
+        return {req.request_id: generated[row, width:].tolist() for row, req in enumerate(requests)}
+
+    rows: list[dict] = []
+    floor_batch, floor_iters = hf_floor_spec
+    floor_requests = build_requests(engine_runtime.tokenizer, floor_batch, HEADLINE_PROMPTS)
+    per_iter, outputs = timed(
+        run_hf_sequential_esme(
+            Path(REMOTE_HF_PATH),
+            floor_requests,
+            max_new_tokens=max_new_tokens,
+            eos_token_ids=eos,
+            device="cuda",
+        ),
+        1 if floor_iters > 1 else 0,
+        floor_iters,
+    )
+    rows.append(gated_row("hf_sequential", floor_batch, floor_requests, outputs, per_iter))
+
+    for size in batch_sizes:
+        requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
+        per_iter, outputs = timed(
+            lambda requests=requests: hf_batched_once(requests), warmup, iters
+        )
+        rows.append(gated_row("hf_batched", size, requests, outputs, per_iter))
+        print(f"[ladder] batch={size} hf_batched: median {statistics.median(per_iter):.3f} s")
+
+        needed = sum(
+            math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
+        )
+        num_blocks = needed + max(4, len(requests))
+        engines: dict[str, tuple[InferenceEngine, bool]] = {}
+        for name, kwargs, graphs, grouped in LADDER_RUNGS:
+            model.decode_graphs = piecewise_runner if graphs else None
+            grouped_kwargs = (
+                {"grouped_decode_graphs": True, "grouped_capture_sizes": (size,)} if grouped else {}
+            )
+            engine = InferenceEngine(
+                model,
+                block_size=BLOCK_SIZE,
+                num_blocks=num_blocks,
+                device="cuda",
+                capabilities=engine_runtime.capabilities,
+                **kwargs,
+                **grouped_kwargs,
+            )
+            engines[name] = (engine, graphs)
+
+        names = list(engines)
+        timings: dict[str, list[float]] = {name: [] for name in names}
+        rung_outputs: dict[str, dict[str, list[int]]] = {}
+        for iteration in range(warmup + iters):
+            shift = iteration % len(names)
+            for name in names[shift:] + names[:shift]:
+                engine, graphs = engines[name]
+                model.decode_graphs = piecewise_runner if graphs else None
+                for req in requests:
+                    engine.add_request(
+                        Request(req.request_id, list(req.prompt_ids), max_new_tokens, eos)
+                    )
+                torch.cuda.synchronize()
+                start = time.perf_counter()
+                result = engine.run()
+                torch.cuda.synchronize()
+                if iteration >= warmup:
+                    timings[name].append(time.perf_counter() - start)
+                    rung_outputs[name] = result
+
+        grouped_runner = engines["+grouped_graphs"][0].grouped_decode_runners[size]
+        if grouped_runner.steps_handled == 0:
+            raise RuntimeError(f"grouped runner never fired at batch {size}")
+        previous: dict | None = None
+        for name in names:
+            row = gated_row(name, size, requests, rung_outputs[name], timings[name])
+            if name == "+grouped_graphs":
+                row["grouped_capture_seconds"] = grouped_runner.total_capture_seconds
+                row["grouped_steps_handled"] = grouped_runner.steps_handled
+            if previous is not None:
+                parity = normalized_outputs_match(
+                    rung_outputs[previous["system"]], rung_outputs[name], eos
+                )
+                ratio = previous["median_seconds"] / row["median_seconds"]
+                row["vs_previous_rung"] = {
+                    "rung": previous["system"],
+                    "parity_status": "exact" if parity else "review_required",
+                    "raw_speedup": ratio,
+                    "speedup": ratio if parity else None,
+                }
+            rows.append(row)
+            previous = row
+            print(
+                f"[ladder] batch={size} {name}: median {row['median_seconds']:.3f} s, "
+                f"raw tok/s {row['raw_tokens_per_second']:.1f}, ref {row['reference_status']}"
+            )
+        del engines
+        torch.cuda.empty_cache()
+
+    return json.dumps(
+        {
+            "probe": "ablation-ladder",
+            "policy_version": 2,
+            "rows": rows,
+            "rungs": [
+                {
+                    "name": name,
+                    "engine_kwargs": kwargs,
+                    "piecewise_graphs": graphs,
+                    "grouped": grouped,
+                }
+                for name, kwargs, graphs, grouped in LADDER_RUNGS
+            ],
+            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
+            "protocol": (
+                "one container; persistent engine per (batch, rung), rung order rotated per "
+                "iteration; per-iteration add+drain wall including prefill; real EOS; "
+                "grouped capture excluded at engine construction"
+            ),
+            "attention_backend": type(model.backend).__name__,
+            "gpu": gpu_snapshot(),
+            "versions": library_versions(),
+        }
+    )
+
+
 @app.local_entrypoint()
 def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False) -> None:
     """Stage + convert the bundle, run the (optional) vLLM rows, then the one-container sweep."""
@@ -1023,15 +1292,58 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         hf_specs = []
         vllm_batches = []
         max_new_tokens, warmup, iters = 16, 1, 1
+    elif command == "ladder":
+        llm_infer_batches = [8, 64, 256]
+        context_lengths = []
+        hf_specs = [[8, 3]]
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 256, 1, 5
+    elif command == "ladder-smoke":
+        llm_infer_batches = [8]
+        context_lengths = []
+        hf_specs = [[2, 1]]
+        vllm_batches = []
+        max_new_tokens, warmup, iters = 16, 0, 1
     else:
         raise ValueError(
             "command must be 'smoke', 'curve', 'baseline', 'baseline-smoke', "
-            "'flashinfer-smoke', 'flashinfer-curve', 'grouped-ab', "
-            f"or 'grouped-ab-smoke', got {command!r}"
+            "'flashinfer-smoke', 'flashinfer-curve', 'grouped-ab', 'grouped-ab-smoke', "
+            f"'ladder', or 'ladder-smoke', got {command!r}"
         )
 
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-curve")
+    if command.startswith("ladder"):
+        print(f"[esme-curve] {convert_bundle_to_hf.remote()}")
+        print(f"[esme-curve] ablation ladder: batches {llm_infer_batches}, HF floor {hf_specs[0]}")
+        sweep_res = json.loads(
+            sweep_ladder.remote(llm_infer_batches, hf_specs[0], max_new_tokens, warmup, iters)
+        )
+        record = {
+            **sweep_res,
+            "config": {
+                "command": command,
+                "model": "Esme-214M-Chat",
+                "prompt_pool": "headline",
+                "max_new_tokens": max_new_tokens,
+                "warmup": warmup,
+                "iters": iters,
+                "block_size": BLOCK_SIZE,
+                "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant",
+                "same_container": {"hf_and_every_rung": True},
+                "repro_command": (
+                    f"modal run scripts/modal_esme_batch_curve.py --command {command}"
+                ),
+            },
+        }
+        out_dir = REPO_ROOT / "bench-results"
+        out_dir.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        out_path = out_dir / f"esme-ablation-{command}-{stamp}.json"
+        out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        print(f"[esme-curve] wrote {out_path}")
+        return
+
     if command.startswith("grouped-ab"):
         print(f"[esme-curve] grouped A/B: batches {llm_infer_batches}")
         sweep_res = json.loads(

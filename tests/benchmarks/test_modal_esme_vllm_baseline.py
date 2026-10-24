@@ -9,8 +9,10 @@ import pytest
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
 from llm_infer.benchmarks.esme_three_way import EsmeAgreement, vllm_decode_closure
 from scripts.modal_esme_vllm_baseline import (
+    ENGINE_SYSTEMS,
     VLLM_PYTHON,
     _command_config,
+    _parse_worker_args,
     build_context_workloads,
     finalize_row,
     gate_outputs,
@@ -94,6 +96,23 @@ def test_worker_command_launches_this_script_in_a_fresh_python_process(tmp_path:
 
     oracle_command = worker_command("oracle", tmp_path / "input.json", tmp_path / "output.json")
     assert oracle_command[0] == sys.executable
+    grouped_command = worker_command(
+        "llm_infer_grouped", tmp_path / "input.json", tmp_path / "output.json"
+    )
+    assert grouped_command[0] == sys.executable
+
+
+@pytest.mark.parametrize("system", ["oracle", *ENGINE_SYSTEMS])
+def test_worker_parser_accepts_every_launched_system(
+    system: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = worker_command(system, tmp_path / "input.json", tmp_path / "output.json")
+    monkeypatch.setattr(sys, "argv", command[1:])
+
+    args = _parse_worker_args()
+
+    assert args is not None
+    assert args.worker == system
 
 
 def test_same_host_validation_requires_distinct_pid_and_matching_gpu() -> None:

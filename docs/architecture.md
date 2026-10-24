@@ -166,13 +166,12 @@ assets.
 
 ## Benchmarks
 
-Current Esme measurements compare:
+Current Esme measurements compare `llm_infer` on the Esme paged-KV path with batched HF
+`generate()` and vLLM on the converted checkpoint, with naive sequential HF as the floor.
 
-- naive HF sequential generation on the converted checkpoint,
-- `llm_infer` on the Esme paged-KV path.
-
-The repo's claim is narrow: a small, legible, reference-checked paged engine measured
-against the naive baseline. See [benchmark.md](benchmark.md).
+The repo's claim is narrow: a small, legible, reference-checked paged engine whose speed is
+measured against an honest baseline and a mature engine on the same GPU. See
+[benchmark.md](benchmark.md).
 
 ## Design References
 

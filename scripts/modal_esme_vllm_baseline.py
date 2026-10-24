@@ -6,6 +6,10 @@ system as a fresh child process inside that function. Process exit releases vLLM
 while the parent keeps the host reservation. Hostname and GPU UUID are recorded for the parent,
 the fp32 oracle, and both engine children and must match before a result is accepted.
 
+Three engine arms run: ``llm_infer`` with the raw-engine defaults (piecewise decode graphs),
+``llm_infer_grouped`` with exact-batch grouped decode graphs (as the HTTP server runs on CUDA), and
+vLLM. vLLM is pinned to ``VLLM_VERSION`` so a rerun measures engine changes, not a vLLM upgrade.
+
 Every speed row is gated against the fp32 ``PretrainBundleModel.logits()`` oracle. Exact output
 matches pass. A first divergence passes only when the fp32 top-two gap is within the audited
 Esme bf16 tolerance used by the existing three-way benchmark. A non-tie divergence leaves
@@ -58,6 +62,9 @@ MAX_NEW_TOKENS = 128
 WARMUPS = 2
 MEASURED_ITERS = 10
 VLLM_PYTHON = "/opt/vllm/bin/python"
+# The 2026-07-09 record used 0.24.0; keep it so reruns stay comparable with that record.
+VLLM_VERSION = "0.24.0"
+ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "vllm")
 
 
 class RequestSpec(TypedDict):
@@ -107,6 +114,7 @@ class WorkerResult(TypedDict):
     graph_capture_seconds: float | None
     attention_backend: str | None
     vllm_config: NotRequired[dict[str, object]]
+    grouped_steps_handled: NotRequired[dict[str, int]]
 
 
 class OracleStep(TypedDict):
@@ -134,12 +142,12 @@ class OracleResult(TypedDict):
 app = modal.App("llm-infer-esme-vllm-baseline")
 
 # Keep two Python environments on one host. The base environment is the exact pinned
-# llm_infer/FlashInfer stack used by the headline. The vLLM environment installs the current
-# release and its own pinned Torch/CUDA stack. Sequential child processes select the matching
+# llm_infer/FlashInfer stack used by the headline. The vLLM environment installs the pinned
+# ``VLLM_VERSION`` and its own Torch/CUDA stack. Sequential child processes select the matching
 # interpreter, so neither engine rewrites the other's dependencies or retains CUDA memory.
 comparison_image = FLASH_IMAGE.run_commands(
     f"python -m venv {VLLM_PYTHON.rsplit('/', 2)[0]}",
-    f"{VLLM_PYTHON} -m pip install vllm modal==1.5.0",
+    f"{VLLM_PYTHON} -m pip install vllm=={VLLM_VERSION} modal==1.5.0",
     f"{VLLM_PYTHON} -m pip install --no-deps -e {REMOTE_ROOT}",
 ).env(
     {
@@ -252,7 +260,7 @@ def validate_child_identity(parent: ProcessIdentity, child: ProcessIdentity, sys
 
 
 def worker_command(system: str, input_path: Path, output_path: Path) -> list[str]:
-    if system not in {"oracle", "llm_infer", "vllm"}:
+    if system != "oracle" and system not in ENGINE_SYSTEMS:
         raise ValueError(f"unknown worker system {system!r}")
     return [
         VLLM_PYTHON if system == "vllm" else sys.executable,
@@ -297,8 +305,8 @@ def run_oracle_process(worker_input: WorkerInput, directory: Path) -> OracleResu
 
 
 def run_engine_process(system: str, worker_input: WorkerInput, directory: Path) -> WorkerResult:
-    if system not in {"llm_infer", "vllm"}:
-        raise ValueError(f"engine system must be 'llm_infer' or 'vllm'; got {system!r}")
+    if system not in ENGINE_SYSTEMS:
+        raise ValueError(f"engine system must be one of {ENGINE_SYSTEMS}; got {system!r}")
     return _run_child_process(system, worker_input, directory)
 
 
@@ -375,7 +383,7 @@ def _run_oracle_worker(worker_input: WorkerInput) -> OracleResult:
     }
 
 
-def _run_llm_infer_worker(worker_input: WorkerInput) -> WorkerResult:
+def _run_llm_infer_worker(worker_input: WorkerInput, *, grouped: bool) -> WorkerResult:
     import torch
 
     from llm_infer.benchmarks.report import library_versions
@@ -409,6 +417,10 @@ def _run_llm_infer_worker(worker_input: WorkerInput) -> WorkerResult:
         longest_context + worker_input["max_new_tokens"] + worker_input["block_size"] - 1
     ) // worker_input["block_size"]
     num_blocks = largest_batch * blocks_per_request + largest_batch
+    batch_sizes = tuple(sorted({workload["batch_size"] for workload in worker_input["workloads"]}))
+    grouped_kwargs: dict[str, object] = (
+        {"grouped_decode_graphs": True, "grouped_capture_sizes": batch_sizes} if grouped else {}
+    )
     engine_start = time.perf_counter()
     engine = InferenceEngine(
         runtime.model,
@@ -416,7 +428,12 @@ def _run_llm_infer_worker(worker_input: WorkerInput) -> WorkerResult:
         num_blocks=num_blocks,
         device="cuda",
         capabilities=runtime.capabilities,
+        **grouped_kwargs,
     )
+    if grouped and set(engine.grouped_decode_runners) != set(batch_sizes):
+        raise AssertionError(
+            f"grouped runners {sorted(engine.grouped_decode_runners)} do not cover {batch_sizes}"
+        )
     torch.cuda.synchronize()
     engine_startup_seconds = time.perf_counter() - engine_start
 
@@ -455,8 +472,8 @@ def _run_llm_infer_worker(worker_input: WorkerInput) -> WorkerResult:
                 "outputs": final_outputs,
             }
         )
-    return {
-        "system": "llm_infer",
+    result: WorkerResult = {
+        "system": "llm_infer_grouped" if grouped else "llm_infer",
         "identity": process_identity(),
         "rows": rows,
         "versions": library_versions(),
@@ -465,6 +482,15 @@ def _run_llm_infer_worker(worker_input: WorkerInput) -> WorkerResult:
         "graph_capture_seconds": graph_capture_seconds,
         "attention_backend": type(runtime.model.backend).__name__,
     }
+    if grouped:
+        steps = {
+            str(size): runner.steps_handled
+            for size, runner in engine.grouped_decode_runners.items()
+        }
+        if not all(steps.values()):
+            raise AssertionError(f"a grouped runner never fired: {steps}")
+        result["grouped_steps_handled"] = steps
+    return result
 
 
 def _run_vllm_worker(worker_input: WorkerInput) -> WorkerResult:
@@ -535,8 +561,8 @@ def _worker_main(system: str, input_path: Path, output_path: Path) -> None:
     worker_input: WorkerInput = json.loads(input_path.read_text(encoding="utf-8"))
     if system == "oracle":
         result = _run_oracle_worker(worker_input)
-    elif system == "llm_infer":
-        result = _run_llm_infer_worker(worker_input)
+    elif system in ("llm_infer", "llm_infer_grouped"):
+        result = _run_llm_infer_worker(worker_input, grouped=system == "llm_infer_grouped")
     elif system == "vllm":
         result = _run_vllm_worker(worker_input)
     else:
@@ -738,7 +764,7 @@ def run_same_host(
         directory = Path(temp_dir)
         oracle_result = run_oracle_process(worker_input, directory)
         validate_child_identity(parent_identity, oracle_result["identity"], "oracle")
-        for system in ("llm_infer", "vllm"):
+        for system in ENGINE_SYSTEMS:
             child = run_engine_process(system, worker_input, directory)
             validate_child_identity(parent_identity, child["identity"], system)
             worker_results.append(child)
@@ -801,6 +827,7 @@ def run_same_host(
                     "versions": result["versions"],
                     "attention_backend": result["attention_backend"],
                     "vllm_config": result.get("vllm_config"),
+                    "grouped_steps_handled": result.get("grouped_steps_handled"),
                 }
                 for result in worker_results
             },
@@ -847,6 +874,8 @@ def main(command: str = "focused", bundle_path: str = "") -> None:
             "separate_processes": True,
             "prefix_caching": False,
             "ignore_eos": True,
+            "engine_systems": list(ENGINE_SYSTEMS),
+            "vllm_version_pin": VLLM_VERSION,
             "repro_command": (f"modal run scripts/modal_esme_vllm_baseline.py --command {command}"),
         },
     }
@@ -862,7 +891,7 @@ def _parse_worker_args() -> argparse.Namespace | None:
     if "--worker" not in sys.argv:
         return None
     parser = argparse.ArgumentParser()
-    parser.add_argument("--worker", choices=("oracle", "llm_infer", "vllm"), required=True)
+    parser.add_argument("--worker", choices=("oracle", *ENGINE_SYSTEMS), required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()

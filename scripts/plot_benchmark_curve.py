@@ -6,17 +6,19 @@
 #   "kaleido>=1.0",
 # ]
 # ///
-"""Render the README batch-size throughput curve from a batch-curve benchmark record.
+"""Render the README benchmark figures from committed benchmark records.
 
-Reads the JSON that ``scripts/modal_esme_batch_curve.py --command curve`` writes and
-exports one static SVG card into ``assets/``:
+Exports two static SVG cards into ``assets/``:
 
-- fig-esme-batch-curve.svg: llm_infer tok/s vs concurrent requests, against the flat
-  naive HF-sequential floor. The record's mature-engine rows are deliberately not
-  plotted; the public story measures distance from the naive baseline only.
+- fig-esme-batch-curve.svg: llm_infer tok/s vs concurrent requests against the flat naive
+  HF-sequential floor, from ``scripts/modal_esme_batch_curve.py --command curve``. It shows
+  batch scaling; the headline comparisons are HF batched generate() and vLLM.
+- fig-esme-ablation-ladder.svg: what each engine technique adds over HF batched generate(),
+  one panel per batch size, from ``scripts/modal_esme_batch_curve.py --command ladder``.
 
-The committed input lives at ``assets/esme-batch-curve.json`` (a curated copy of the
-bench-results record), so the figure regenerates from repo state alone:
+The committed inputs live at ``assets/esme-batch-curve.json`` and
+``assets/esme-ablation-ladder.json`` (curated copies of bench-results records), so the
+figures regenerate from repo state alone:
 
     uv run scripts/plot_benchmark_curve.py
     uv run scripts/plot_benchmark_curve.py --input bench-results/esme-batch-curve-curve-<stamp>.json
@@ -31,6 +33,7 @@ import sys
 from pathlib import Path
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Style contract: match esme-pretrain scripts/plot_run_telemetry.py (the shared card spec).
 FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
@@ -45,6 +48,16 @@ NEUTRAL = "#64748b"
 CARD_WIDTH = 920
 CARD_HEIGHT = 560
 
+# Ladder rows top to bottom: the HF batched baseline, then each cumulative engine rung.
+LADDER_SYSTEMS = (
+    ("hf_batched", "HF batched generate()"),
+    ("paged_continuous", "paged KV + continuous batching"),
+    ("+batched_prefill", "+ batched prefill"),
+    ("+decode_window", "+ decode window"),
+    ("+piecewise_graphs", "+ piecewise CUDA graphs"),
+    ("+grouped_graphs", "+ grouped graphs"),
+)
+
 
 def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
     """Read the policy-v2 benchmark rows."""
@@ -52,6 +65,14 @@ def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError(f"{path}: expected a rows list")
     return rows
+
+
+def _require_headline_row(path: Path, row: dict) -> None:
+    if row.get("policy_version") != 2 or row.get("headline_eligible") is not True:
+        raise ValueError(
+            f"{path}: {row['system']} batch={row['batch_size']} is not a headline-eligible "
+            "policy-v2 row"
+        )
 
 
 def load_rows(path: Path) -> dict[str, list[dict]]:
@@ -67,11 +88,7 @@ def load_rows(path: Path) -> dict[str, list[dict]]:
         system = row["system"]
         if system not in by_system:
             continue
-        if row.get("policy_version") != 2 or row.get("headline_eligible") is not True:
-            raise ValueError(
-                f"{path}: {system} batch={row['batch_size']} is not a headline-eligible "
-                "policy-v2 row"
-            )
+        _require_headline_row(path, row)
         if row.get("tokens_per_second") is None:
             raise ValueError(
                 f"{path}: {system} batch={row['batch_size']} reports no tok/s "
@@ -176,8 +193,7 @@ def _series(rows: list[dict]) -> tuple[list[int], list[float]]:
 
 
 def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
-    """The engine curve against the naive-HF floor — the repo's claim is distance from
-    the naive baseline, so nothing else is drawn."""
+    """The engine curve against the naive-HF floor: batch-scaling evidence, not the headline."""
     llm_x, llm_y = _series(by_system["llm_infer"])
     hf_x, hf_y = _series(by_system["hf_sequential"])
     hf_by_batch = dict(zip(hf_x, hf_y, strict=True))
@@ -273,19 +289,112 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
     return figure
 
 
+def load_ladder_rows(path: Path) -> dict[int, dict[str, float]]:
+    """Raw tok/s per batch and ladder system; any ungated row is a hard error."""
+    record = json.loads(path.read_text(encoding="utf-8"))
+    wanted = {system for system, _ in LADDER_SYSTEMS}
+    by_batch: dict[int, dict[str, float]] = {}
+    for row in _record_rows(record, path):
+        system = row["system"]
+        if system not in wanted:
+            continue
+        _require_headline_row(path, row)
+        by_batch.setdefault(int(row["batch_size"]), {})[system] = float(row["tokens_per_second"])
+    if not by_batch:
+        raise ValueError(f"{path}: no ladder rows")
+    for batch, systems in by_batch.items():
+        missing = wanted - set(systems)
+        if missing:
+            raise ValueError(f"{path}: batch {batch} is missing {sorted(missing)}")
+    return dict(sorted(by_batch.items()))
+
+
+def build_ladder_figure(by_batch: dict[int, dict[str, float]]) -> go.Figure:
+    """One horizontal-bar panel per batch size; each panel keeps its own tok/s scale."""
+    batches = list(by_batch)
+    labels = [label for _, label in LADDER_SYSTEMS]
+    gains = [values["+grouped_graphs"] / values["hf_batched"] for values in by_batch.values()]
+    figure = make_subplots(rows=1, cols=len(batches), shared_yaxes=True, horizontal_spacing=0.08)
+    figure.update_layout(
+        card_layout(
+            title="Esme-214M-Chat: what each engine technique adds",
+            subtitle=(
+                "One A100-80GB container - output tok/s on chat requests, real EOS, "
+                "every row reference-gated"
+            ),
+            conclusion=(
+                "Full engine vs HF batched generate(): "
+                + " / ".join(f"{gain:.1f}x" for gain in gains)
+                + f" at {' / '.join(str(b) for b in batches)} requests."
+                " CUDA graphs are the largest single step."
+            ),
+        )
+    )
+    margin = {"l": 206, "r": 48, "t": 118, "b": 118}
+    figure.update_layout(margin=margin, bargap=0.28)
+    # The wide label margin would push the card's title and subtitle right; pin them to
+    # the same 36 px left inset the batch-curve card's title sits at.
+    title_x = (36 - margin["l"]) / (CARD_WIDTH - margin["l"] - margin["r"])
+    for annotation in figure.layout.annotations[:2]:
+        annotation.x = title_x
+    for column, (batch, values) in enumerate(by_batch.items(), start=1):
+        tok_s = [values[system] for system, _ in LADDER_SYSTEMS]
+        text = [
+            f"{value:,.0f}" if system in ("hf_batched", "+grouped_graphs") else ""
+            for (system, _), value in zip(LADDER_SYSTEMS, tok_s, strict=True)
+        ]
+        figure.add_trace(
+            go.Bar(
+                x=tok_s,
+                y=labels,
+                orientation="h",
+                marker={
+                    "color": [NEUTRAL] + [BLUE] * (len(LADDER_SYSTEMS) - 1),
+                    "cornerradius": 4,
+                },
+                text=text,
+                textposition="outside",
+                textfont={"family": FONT_FAMILY, "size": 12, "color": TITLE_COLOR},
+                cliponaxis=False,
+                hovertemplate="%{y}: %{x:,.0f} tok/s<extra></extra>",
+            ),
+            row=1,
+            col=column,
+        )
+        figure.update_xaxes(
+            styled_axis(
+                title={"text": f"{batch} requests"},
+                range=[0, max(tok_s) * 1.3],
+                tickformat="~s",
+                nticks=4,
+            ),
+            row=1,
+            col=column,
+        )
+    figure.update_yaxes(styled_axis(showgrid=False, autorange="reversed", ticks=""))
+    return figure
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Render the README batch-curve SVG.")
+    parser = argparse.ArgumentParser(description="Render the README benchmark SVGs.")
     parser.add_argument(
         "--input",
         type=Path,
         default=Path("assets/esme-batch-curve.json"),
         help="Batch-curve benchmark record (modal_esme_batch_curve.py output).",
     )
+    parser.add_argument(
+        "--ladder-input",
+        type=Path,
+        default=Path("assets/esme-ablation-ladder.json"),
+        help="Ablation-ladder benchmark record (modal_esme_batch_curve.py --command ladder).",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("assets"))
     args = parser.parse_args(argv)
 
     try:
         by_system = load_rows(args.input)
+        ladder = load_ladder_rows(args.ladder_input)
     except (OSError, ValueError, KeyError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -296,6 +405,11 @@ def main(argv: list[str] | None = None) -> int:
         output, format="svg", width=CARD_WIDTH, height=CARD_HEIGHT
     )
     print(f"batch_curve: {output}")
+    ladder_output = args.output_dir / "fig-esme-ablation-ladder.svg"
+    build_ladder_figure(ladder).write_image(
+        ladder_output, format="svg", width=CARD_WIDTH, height=CARD_HEIGHT
+    )
+    print(f"ablation_ladder: {ladder_output}")
     return 0
 
 
