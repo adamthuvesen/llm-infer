@@ -1,0 +1,64 @@
+{
+  "probe": "server-startup",
+  "container_id": "ta-01M5QXP09KXX35J79YVT6E9PER",
+  "cold": {
+    "model_load_s": 24.627634672,
+    "build_app_s": 74.12264733500001,
+    "build_app_reserved_bytes": 1319108608,
+    "buckets": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ]
+  },
+  "warm_grouped_capture": {
+    "grouped4": [
+      {
+        "engine_build_s": 31.963810538000004,
+        "capture_s": 1.2283726910000041,
+        "group_memory_bytes": 42600276
+      },
+      {
+        "engine_build_s": 30.28136387699999,
+        "capture_s": 1.1157250290000604,
+        "group_memory_bytes": 1876
+      }
+    ],
+    "full_step": [
+      {
+        "engine_build_s": 30.456667748,
+        "capture_s": 1.5848824130000025,
+        "group_memory_bytes": 42600276
+      },
+      {
+        "engine_build_s": 29.103575855999992,
+        "capture_s": 1.5307314659999918,
+        "group_memory_bytes": 1876
+      }
+    ]
+  },
+  "gpu": {
+    "name": "NVIDIA A100-SXM4-80GB",
+    "clocks_sm": "1155 MHz",
+    "clocks_max_sm": "1410 MHz",
+    "power_limit": "400.00 W",
+    "memory_total": "81920 MiB",
+    "host_cpu": "model name=unknown; vendor_id=AuthenticAMD; cpu family=25; model=1; cpu MHz=3249.362",
+    "host_cpu_count": 17
+  },
+  "versions": {
+    "python": "3.13.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "transformers": "5.20.2",
+    "flash_attn": "2.8.3.post1",
+    "vllm": "absent",
+    "numpy": "2.5.4"
+  },
+  "config": {
+    "model": "Esme-214M-Chat",
+    "repro_command": "modal run scripts/modal_esme_fusion_ab.py --command startup"
+  }
+}

@@ -1,0 +1,762 @@
+{
+  "probe": "decode-fusion-ab",
+  "container_id": "ta-01M5QWC6DBVCR88N8QR23BXZ7R",
+  "baseline_arm": "full_step",
+  "candidate_arm": "full_step_fused",
+  "configs": {
+    "grouped": [
+      {
+        "batch_size": 1,
+        "full_step": {
+          "walls_s": [
+            0.6075217719999841,
+            0.6079880940000066,
+            0.6082708799999921,
+            0.6078833509999981,
+            0.6079650130000118,
+            0.6077304799999865,
+            0.6078898389999949,
+            0.6076653720000138,
+            0.60777109,
+            0.6077315549999867,
+            0.6077844069999969
+          ],
+          "wall_ms_per_token_step": 4.78570399212596,
+          "raw_tokens_per_second": 208.95567332315693,
+          "engine_build_s": 31.205251787999998,
+          "grouped_steps_handled": 1778,
+          "agreement": {
+            "exact": 0,
+            "tie": 1,
+            "nontie": 0,
+            "total": 1,
+            "ties_sample": [
+              {
+                "request": "esme-000",
+                "step": 80,
+                "fast_token": 81,
+                "golden_token": 6,
+                "fp32_margin": 0.046276092529296875,
+                "reference_gap": 0.046276092529296875,
+                "fast_logit": -1.55463445186615,
+                "golden_logit": -1.508358359336853
+              }
+            ],
+            "divergences_sample": [],
+            "review_required": 0,
+            "failed": 0,
+            "numerical_evidence": [
+              {
+                "request": "esme-000",
+                "step": 80,
+                "fast_token": 81,
+                "golden_token": 6,
+                "fp32_margin": 0.046276092529296875,
+                "reference_gap": 0.046276092529296875,
+                "fast_logit": -1.55463445186615,
+                "golden_logit": -1.508358359336853
+              }
+            ]
+          }
+        },
+        "full_step_fused": {
+          "walls_s": [
+            0.3384101529999839,
+            0.33866611900000976,
+            0.3384922679999818,
+            0.3385775259999946,
+            0.33859484600000656,
+            0.3385158190000084,
+            0.33847991899997965,
+            0.3385998699999959,
+            0.3384410330000094,
+            0.33854630499999416,
+            0.3385471990000042
+          ],
+          "wall_ms_per_token_step": 2.6657189370078282,
+          "raw_tokens_per_second": 375.1333218656815,
+          "engine_build_s": 22.651400490000015,
+          "grouped_steps_handled": 1778,
+          "agreement": {
+            "exact": 1,
+            "tie": 0,
+            "nontie": 0,
+            "total": 1,
+            "ties_sample": [],
+            "divergences_sample": [],
+            "review_required": 0,
+            "failed": 0,
+            "numerical_evidence": []
+          }
+        },
+        "parity_status": "review_required",
+        "identical_requests": 0
+      },
+      {
+        "batch_size": 8,
+        "full_step": {
+          "walls_s": [
+            0.7762207670000123,
+            0.7766803929999924,
+            0.7764947549999874,
+            0.7762842310000053,
+            0.7763438089999966,
+            0.7766439069999933,
+            0.7763505309999914,
+            0.7763143010000135,
+            0.7765109999999993,
+            0.776477854999996,
+            0.7764390140000046
+          ],
+          "wall_ms_per_token_step": 6.1136930236220834,
+          "raw_tokens_per_second": 1308.538058598887,
+          "engine_build_s": 14.545189554999979,
+          "grouped_steps_handled": 1778,
+          "agreement": {
+            "exact": 6,
+            "tie": 2,
+            "nontie": 0,
+            "total": 8,
+            "ties_sample": [
+              {
+                "request": "esme-001",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-005",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              }
+            ],
+            "divergences_sample": [],
+            "review_required": 0,
+            "failed": 0,
+            "numerical_evidence": [
+              {
+                "request": "esme-001",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-005",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              }
+            ]
+          }
+        },
+        "full_step_fused": {
+          "walls_s": [
+            0.4646074970000029,
+            0.46506063000001063,
+            0.4648028189999991,
+            0.4647727309999823,
+            0.4651825859999974,
+            0.4653121229999897,
+            0.4648730240000134,
+            0.46509869300001583,
+            0.4648518899999772,
+            0.46501945500000375,
+            0.46497808099999816
+          ],
+          "wall_ms_per_token_step": 3.6612447322834503,
+          "raw_tokens_per_second": 2185.049234611134,
+          "engine_build_s": 19.093525710999984,
+          "grouped_steps_handled": 1778,
+          "agreement": {
+            "exact": 4,
+            "tie": 4,
+            "nontie": 0,
+            "total": 8,
+            "ties_sample": [
+              {
+                "request": "esme-001",
+                "step": 55,
+                "fast_token": 331,
+                "golden_token": 265,
+                "fp32_margin": 0.014006376266479492,
+                "reference_gap": 0.014006376266479492,
+                "fast_logit": 1.2611682415008545,
+                "golden_logit": 1.275174617767334
+              },
+              {
+                "request": "esme-002",
+                "step": 113,
+                "fast_token": 15,
+                "golden_token": 292,
+                "fp32_margin": 0.03024768829345703,
+                "reference_gap": 0.03024768829345703,
+                "fast_logit": 1.0138506889343262,
+                "golden_logit": 1.0440983772277832
+              },
+              {
+                "request": "esme-005",
+                "step": 55,
+                "fast_token": 331,
+                "golden_token": 265,
+                "fp32_margin": 0.014006376266479492,
+                "reference_gap": 0.014006376266479492,
+                "fast_logit": 1.2611682415008545,
+                "golden_logit": 1.275174617767334
+              }
+            ],
+            "divergences_sample": [],
+            "review_required": 0,
+            "failed": 0,
+            "numerical_evidence": [
+              {
+                "request": "esme-001",
+                "step": 55,
+                "fast_token": 331,
+                "golden_token": 265,
+                "fp32_margin": 0.014006376266479492,
+                "reference_gap": 0.014006376266479492,
+                "fast_logit": 1.2611682415008545,
+                "golden_logit": 1.275174617767334
+              },
+              {
+                "request": "esme-002",
+                "step": 113,
+                "fast_token": 15,
+                "golden_token": 292,
+                "fp32_margin": 0.03024768829345703,
+                "reference_gap": 0.03024768829345703,
+                "fast_logit": 1.0138506889343262,
+                "golden_logit": 1.0440983772277832
+              },
+              {
+                "request": "esme-005",
+                "step": 55,
+                "fast_token": 331,
+                "golden_token": 265,
+                "fp32_margin": 0.014006376266479492,
+                "reference_gap": 0.014006376266479492,
+                "fast_logit": 1.2611682415008545,
+                "golden_logit": 1.275174617767334
+              },
+              {
+                "request": "esme-006",
+                "step": 113,
+                "fast_token": 15,
+                "golden_token": 292,
+                "fp32_margin": 0.03024768829345703,
+                "reference_gap": 0.03024768829345703,
+                "fast_logit": 1.0138506889343262,
+                "golden_logit": 1.0440983772277832
+              }
+            ]
+          }
+        },
+        "parity_status": "review_required",
+        "identical_requests": 4
+      },
+      {
+        "batch_size": 64,
+        "full_step": {
+          "walls_s": [
+            0.8316969699999959,
+            0.8306868800000302,
+            0.8306219459999511,
+            0.8328257269999995,
+            0.8310519130000102,
+            0.8311377580000112,
+            0.8314012289999937,
+            0.8326766829999883,
+            0.8314589430000296,
+            0.8306451029999948,
+            0.8310285539999995
+          ],
+          "wall_ms_per_token_step": 6.544391795275679,
+          "raw_tokens_per_second": 9779.365600666033,
+          "engine_build_s": 15.249478140999997,
+          "grouped_steps_handled": 1778,
+          "agreement": {
+            "exact": 48,
+            "tie": 16,
+            "nontie": 0,
+            "total": 64,
+            "ties_sample": [
+              {
+                "request": "esme-001",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-005",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-009",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              }
+            ],
+            "divergences_sample": [],
+            "review_required": 0,
+            "failed": 0,
+            "numerical_evidence": [
+              {
+                "request": "esme-001",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-005",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-009",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-013",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-017",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-021",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-025",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-029",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-033",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-037",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-041",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-045",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-049",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-053",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-057",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-061",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              }
+            ]
+          }
+        },
+        "full_step_fused": {
+          "walls_s": [
+            0.5223019160000035,
+            0.5198714360000167,
+            0.5232006269999943,
+            0.5229641160000256,
+            0.5221742749999976,
+            0.5182464060000029,
+            0.5181423139999879,
+            0.5200513540000316,
+            0.5201519819999589,
+            0.5192071480000209,
+            0.519822363000003
+          ],
+          "wall_ms_per_token_step": 4.094892551181351,
+          "raw_tokens_per_second": 15629.225724503174,
+          "engine_build_s": 15.313727612000008,
+          "grouped_steps_handled": 1778,
+          "agreement": {
+            "exact": 48,
+            "tie": 16,
+            "nontie": 0,
+            "total": 64,
+            "ties_sample": [
+              {
+                "request": "esme-001",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-005",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-009",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              }
+            ],
+            "divergences_sample": [],
+            "review_required": 0,
+            "failed": 0,
+            "numerical_evidence": [
+              {
+                "request": "esme-001",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-005",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-009",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-013",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-017",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-021",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-025",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-029",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-033",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-037",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-041",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-045",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-049",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-053",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-057",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              },
+              {
+                "request": "esme-061",
+                "step": 22,
+                "fast_token": 712,
+                "golden_token": 4817,
+                "fp32_margin": 0.011902451515197754,
+                "reference_gap": 0.011902451515197754,
+                "fast_logit": 1.1703542470932007,
+                "golden_logit": 1.1822566986083984
+              }
+            ]
+          }
+        },
+        "parity_status": "exact",
+        "identical_requests": 64
+      }
+    ]
+  },
+  "rounds": 11,
+  "compiled_functions": [
+    "rope_utils.rms_norm",
+    "rope_utils.apply_rope"
+  ],
+  "gpu": {
+    "name": "NVIDIA A100-SXM4-80GB",
+    "clocks_sm": "1245 MHz",
+    "clocks_max_sm": "1410 MHz",
+    "power_limit": "400.00 W",
+    "memory_total": "81920 MiB",
+    "host_cpu": "model name=unknown; vendor_id=GenuineIntel; cpu family=6; model=85; cpu MHz=2200.150",
+    "host_cpu_count": 17
+  },
+  "versions": {
+    "python": "3.13.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "transformers": "5.20.2",
+    "flash_attn": "2.8.3.post1",
+    "vllm": "absent",
+    "numpy": "2.5.4"
+  },
+  "config": {
+    "model": "Esme-214M-Chat",
+    "batch_sizes": [
+      1,
+      8,
+      64
+    ],
+    "new_tokens": 128,
+    "warmup_rounds": 2,
+    "measured_rounds": 11,
+    "eos": "ignored",
+    "reference": "fp32 PretrainBundleModel.logits() greedy decode, tie-tolerant, plus direct full_step/full_step_fused parity",
+    "repro_command": "modal run scripts/modal_esme_fusion_ab.py --batch-sizes 1,8,64"
+  }
+}

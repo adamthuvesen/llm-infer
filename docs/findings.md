@@ -42,7 +42,7 @@ Two rules apply to every entry:
 | 20 | What bf16 logit error does the 0.1 tie rule have to cover? | Measured: p99.9 shrink 0.25; 7 of 807 flips exceed 0.1; none where the margin is 0.3+ | Bound stays at 0.1; reviews of near-ties cite entry 20 |
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
-| 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Pending; predictions registered before the run | — |
+| 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Yes: 37–44% less time per step at batch 1–64; full depth adds no meaningful startup time | Next batch-1 lever; a default needs parity review first |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1160,7 +1160,57 @@ Otherwise fusion stays off, and the batch-1 work moves elsewhere. For startup, n
 If full depth exceeds 2x the four-layer capture time or 1 GiB of graph memory, the serve docs
 state that cost.
 
-**Result.** Pending.
+**Result.** The gate passed, and fusion is the next batch-1 lever. It cuts 37–44% of each decode
+step at every batch, in two containers on different hardware: an A100-SXM4 (400 W, Intel family 6,
+model 85) and an A100 PCIe (300 W, AMD family 25, model 1). Both arms have zero non-tie
+divergences from fp32 in all six rows.
+
+| Batch | Container 1 (SXM4) | Container 2 (PCIe) | Identical requests | Verdict |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | −44.3% [−44.3, −44.3] | −43.8% [−43.9, −43.8] | 0 of 1 | Raw gain, **−43.8%** |
+| 8 | −40.1% [−40.1, −40.1] | −40.6% [−40.6, −40.5] | 4 of 8 | Raw gain, **−40.1%** |
+| 64 | −37.4% [−37.6, −37.2] | −41.1% [−41.3, −41.1] | 64 of 64 | Qualified gain, **−37.4%** |
+
+(Median paired change in ms per step, `full_step_fused` against `full_step`, with 95% bootstrap
+intervals. Negative is faster.)
+
+| Batch | `full_step` ms per step | `full_step_fused` ms per step |
+| ---: | ---: | ---: |
+| 1 | 4.70–4.79 | 2.64–2.67 |
+| 8 | 6.11–6.12 | 3.64–3.66 |
+| 64 | 6.43–6.54 | 3.79–4.10 |
+
+- **Parity is not exact (held).** At batch 1 and 8, the fused reduction resolves some bf16
+  near-ties differently, so those rows are raw timing. At batch 64 every request emitted the same
+  tokens in both containers, so that row is a qualified relative result.
+- **Every gain beat its prediction.** The predicted ranges were 10–30%, 15–35%, and 10–30%. The
+  measured gains are 44%, 40%, and 37–41%. Entry 15 cut the kernels by the same amount, so the
+  difference lies in the step around them. A likely reason: with `plan()` no longer syncing and
+  all layers in one graph, little host time sits between kernels, so cutting kernel time cuts the
+  step. This run does not trace the step, so that reason is a hypothesis. It is consistent with
+  entry 15's slowdown coming from the path around the compiled kernels, not from the kernels.
+- **Batch-1 decode is now about 377 tokens per second per stream** (1,000 / 2.65 ms). The vLLM
+  comparison in entry 12 used a different harness, so this does not yet move the 3.1x gap. A
+  same-host rerun with fusion is the measurement that can.
+- **Startup (held).** A cold `build_app_from_runtime` took 74.1 s on an A100-SXM4, including the
+  FlashInfer warmup, piecewise capture, and grouped capture at five buckets. Warm grouped capture
+  for all five buckets took 1.5–1.6 s at full depth and 1.1–1.2 s at four layers, a ratio of 1.35x.
+  Each engine build took about 30 s at either depth, so capture is a small part of it. The
+  allocator delta measured 41 MiB of graph memory on the first capture and 0 MiB on repeats,
+  because the caching allocator reuses freed blocks, so that number is a lower bound only.
+- **Limit:** the fused arm's compile cost is not measured on its own. Compilation runs inside its
+  first engine build, which took 17–23 s against 21–31 s for the plain arm's first build, but the
+  plain arm built first and paid FlashInfer's first-use setup.
+
+**Decision.** By the registered rule, fusion is the next batch-1 lever and stays off for now.
+Making it a default needs three things first: a review of the batch-1 and batch-8 direct-parity
+divergences under the entry-20 precedent, a measured compile cost at server startup, and a
+same-host vLLM rerun to update the headline gap. Full-depth grouping costs no meaningful startup
+time, so the serve docs need no change.
+
+Records: [`assets/esme-fusion-ab-1.json`](../assets/esme-fusion-ab-1.json),
+[`assets/esme-fusion-ab-2.json`](../assets/esme-fusion-ab-2.json), and
+[`assets/esme-server-startup.json`](../assets/esme-server-startup.json).
 
 ## Open questions
 
