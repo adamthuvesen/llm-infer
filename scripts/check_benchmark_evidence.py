@@ -12,7 +12,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CURVE_RECORD = ROOT / "assets" / "esme-batch-curve.json"
+LADDER_RECORD = ROOT / "assets" / "esme-ablation-ladder.json"
+VLLM_RECORD = ROOT / "assets" / "esme-vllm-same-host.json"
 PUBLIC_BENCHMARK_DOC = ROOT / "docs" / "benchmark.md"
+README = ROOT / "README.md"
 PLOT_SCRIPT = ROOT / "scripts" / "plot_benchmark_curve.py"
 EXPECTED_BATCHES = (8, 16, 32, 64, 128, 256)
 PLOTTED_SYSTEMS = ("llm_infer", "hf_sequential")
@@ -66,7 +69,52 @@ def _failures() -> list[str]:
                 errors.append(f"{CURVE_RECORD}: {system} batch={batch} has non-tie divergence")
 
     errors.extend(_doc_table_errors(by_system))
+    errors.extend(_headline_table_errors())
     errors.extend(_figure_regeneration_errors())
+    return errors
+
+
+def _gated_rows(path: Path) -> tuple[dict[tuple[str, int, int], float], list[str]]:
+    """Raw tok/s keyed by (system, context, batch); every row must be gated with no non-tie."""
+    rows = json.loads(path.read_text(encoding="utf-8")).get("rows", [])
+    errors: list[str] = []
+    tok_s: dict[tuple[str, int, int], float] = {}
+    for row in rows:
+        key = (row["system"], int(row.get("context_tokens", 0)), int(row["batch_size"]))
+        if row.get("headline_eligible") is not True or row.get("agreement", {}).get("nontie") != 0:
+            errors.append(f"{path}: {key} is not a headline-eligible, non-tie-free row")
+        tok_s[key] = float(row["raw_tokens_per_second"])
+    return tok_s, errors
+
+
+def _headline_table_errors() -> list[str]:
+    """The ladder and vLLM tables in docs/benchmark.md and README.md must match their records."""
+    ladder, errors = _gated_rows(LADDER_RECORD)
+    vllm, vllm_errors = _gated_rows(VLLM_RECORD)
+    errors.extend(vllm_errors)
+    expected: list[str] = []
+    for batch in (8, 64, 256):
+        hf_sequential = ladder.get(("hf_sequential", 0, batch))
+        hf_batched = ladder[("hf_batched", 0, batch)]
+        engine = ladder[("+grouped_graphs", 0, batch)]
+        floor = f"{hf_sequential:,.1f}" if hf_sequential is not None else "—"
+        expected.append(
+            f"| {batch} | {floor} | {hf_batched:,.1f} | {engine:,.1f} | "
+            f"**{engine / hf_batched:.1f}x** |"
+        )
+    for batch in (1, 8, 64, 256):
+        engine = vllm[("llm_infer_grouped", 256, batch)]
+        reference = vllm[("vllm", 256, batch)]
+        expected.append(
+            f"| {batch} | {engine:,.1f} | {reference:,.1f} | {reference / engine:.2f}x |"
+        )
+    for doc in (PUBLIC_BENCHMARK_DOC, README):
+        lines = set(doc.read_text(encoding="utf-8").splitlines())
+        errors.extend(
+            f"{doc}: missing headline row {line!r} from the committed records"
+            for line in expected
+            if line not in lines
+        )
     return errors
 
 
@@ -125,10 +173,11 @@ def _figure_regeneration_errors() -> list[str]:
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             return [f"{PLOT_SCRIPT}: figure regeneration failed: {detail}"]
-        figure = output_dir / "fig-esme-batch-curve.svg"
-        if not figure.is_file() or figure.stat().st_size == 0:
-            return [f"{PLOT_SCRIPT}: did not write a non-empty SVG to {figure}"]
-    return []
+        return [
+            f"{PLOT_SCRIPT}: did not write a non-empty SVG to {output_dir / name}"
+            for name in ("fig-esme-batch-curve.svg", "fig-esme-ablation-ladder.svg")
+            if not (output_dir / name).is_file() or (output_dir / name).stat().st_size == 0
+        ]
 
 
 def main() -> int:
@@ -137,7 +186,7 @@ def main() -> int:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
         return 1
-    print("benchmark evidence: committed curve, public table, and figure regen are consistent")
+    print("benchmark evidence: committed records, public tables, and figure regen are consistent")
     return 0
 
 
