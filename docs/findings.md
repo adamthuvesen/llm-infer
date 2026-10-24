@@ -37,6 +37,7 @@ Two rules apply to every entry:
 | 14 | Where does a batch-1 decode step go now? | 91% GPU-busy; 67% of the step is small non-GEMM kernels | Reopen fusion (entry 8 was wrong) |
 | 15 | Does compiling the elementwise chains speed up decode? | Kernels halve; raw wall does not follow | Not shipped; see 16 |
 | 16 | Where does the compiled arm's idle time go? | Inconclusive: node tracing reverses the effect it should explain | Measure host issue time without CUPTI next |
+| 17 | Is the compiled arm host-bound or GPU-bound? | Pending; predictions registered before the run | — |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -594,6 +595,37 @@ for each case are written down before that run.
 Record: [`assets/esme-decode-timeline.json`](../assets/esme-decode-timeline.json) (gap buckets
 use the earlier metric). Reproduce:
 `modal run scripts/modal_esme_decode_profile.py --command timeline --batch-sizes 1`.
+
+## 17. Host issue time without CUPTI (predictions registered before the run)
+
+**Question.** Entry 15's compiled arm cut kernel time from 5.0 to 2.7 ms per batch-1 step, yet
+its step got slower. Is that step host-bound, or does the GPU sit idle for a reason on its side?
+
+**Method.** One A100 container, batch 1, both arms, the roofline protocol (persistent engine,
+fixed 128-token output). Three passes per arm. `uninstrumented` measures wall time only. `issue`
+adds two `perf_counter` timers: around `engine.step()`, and around `Event.synchronize()`, the
+window flush's only explicit wait. Host issue time is step time minus that wait. `regions` adds
+host timers around each graph replay, each eager attention region, each FlashInfer `plan()` call,
+and each window open. No CUPTI tracing runs, because entry 16 showed it changes the answer.
+
+**Gate (decided before the run).** Proceed to interpretation only if the compiled arm's
+uninstrumented wall exceeds the eager arm's in this container, and the `issue` pass adds at most
+5% to each arm's wall. Otherwise the result is that the effect did not reproduce, or that this
+instrumentation is too costly, and the question stays open.
+
+**Predictions (written before the run).**
+
+- **Host-bound:** in the compiled arm, host issue time is at least 90% of wall, and
+  `Event.synchronize` is small. The host has not finished issuing when the GPU runs dry. Some host
+  cost that no CUDA counter sees has grown, and the `regions` pass should show where.
+- **GPU-side:** in the compiled arm, host issue time is below 70% of wall, and `Event.synchronize`
+  absorbs most of the rest. The host finishes early and waits, so the idle time sits on the GPU
+  side: between graph nodes or at the boundaries between graphs and eager kernels.
+- **Either way:** the eager arm's host issue time stays below its wall, because entry 14 measured
+  that arm as 91% GPU-busy.
+- **Regions:** an average graph-replay call above 200 µs means a launch blocks on the host.
+
+**Result.** Pending.
 
 ## Open questions
 
