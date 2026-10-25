@@ -1,14 +1,15 @@
 # What the llm-infer Experiments Found
 
-`llm-infer` is a small inference engine for `Esme-214M-Chat`, a 214M-parameter model trained from
-scratch in [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain). It owns the whole
-serving path: paged KV cache, continuous batching, batched prefill, CUDA graphs, FlashInfer
-attention, and an OpenAI-compatible server. On one A100 it serves 4.8x to 6.9x the tokens per
-second of batched HuggingFace `generate()`, which is bound by the host CPU, so that multiple moves
-with the host [25]. vLLM on the same host is 1.2x to 1.6x faster than `llm-infer` [24].
+`llm-infer` is a research inference engine for `Esme-214M-Chat`, a 214M-parameter model trained
+from scratch in [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain). It exists to learn
+how LLM serving works by building each piece and measuring what it buys. It owns the whole serving
+path: paged KV cache, continuous batching, batched prefill, CUDA graphs, FlashInfer attention,
+fused kernels, and an OpenAI-compatible server. On one A100 it reaches 62–83% of vLLM's
+throughput on the same host [24]. Against batched HuggingFace `generate()` it serves 4.8x to 6.9x
+the tokens per second, but HF is bound by the host CPU, so that multiple moves with the host [25].
 
 This page tells the story of the 25 experiments in [findings.md](findings.md). Each entry there
-has the full method and the numbers. Entries 12 to 22 cite records committed in `assets/`.
+has the full method and the numbers. Entries 12 to 25 cite records committed in `assets/`.
 Entries 1 to 11 name raw records that stay outside the repository. Entry numbers appear below in
 brackets.
 

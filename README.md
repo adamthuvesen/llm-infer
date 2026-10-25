@@ -2,15 +2,17 @@
 
 ![License](https://img.shields.io/github/license/adamthuvesen/llm-infer) ![Python](https://img.shields.io/badge/python-3.13-blue)
 
-`llm-infer` is a small Python inference engine for `Esme-214M-Chat`, a model trained from scratch
-in [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain). It owns the whole serving
-path: paged KV cache, continuous batching, batched prefill, CUDA graphs, FlashInfer attention,
-and an OpenAI-compatible server. Every speed claim first matches a known-good reference output.
+`llm-infer` is a research inference engine, built to learn how LLM serving works by building each
+piece and measuring what it buys. It serves `Esme-214M-Chat`, a model trained from scratch in
+[`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain), and owns the whole serving path:
+paged KV cache, continuous batching, batched prefill, CUDA graphs, FlashInfer attention, fused
+kernels, and an OpenAI-compatible server. It is a learning and research project, not a
+production server.
 
-On one A100 it serves **4.8x to 6.9x the tokens per second of batched HuggingFace `generate()`**,
-a multiple that depends on the host CPU. vLLM on the same host is 1.2x to 1.6x faster, and the
-batch-1 gap is the main open question. The
-[two-page write-up](docs/writeup.md) explains what each technique bought and what did not work.
+On one A100 it reaches **62–83% of vLLM's throughput** on the same host, in about 12,000 lines of
+Python, with every output checked against an fp32 reference. The batch-1 gap is the main open
+question. The [two-page write-up](docs/writeup.md) explains what each technique bought and what did
+not work.
 
 ## Quickstart
 
