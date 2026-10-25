@@ -33,3 +33,13 @@ def test_server_rejects_fused_elementwise_off_cuda(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="CUDA bundle model"):
         build_app_from_runtime(runtime, block_size=4, num_blocks=64, fused_elementwise=True)
     assert bundle_module.rms_norm is rope_utils.rms_norm
+
+
+def test_server_without_fusion_restores_the_original_kernels(tmp_path: Path) -> None:
+    runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
+    use_fused_elementwise(True)
+    try:
+        build_app_from_runtime(runtime, block_size=4, num_blocks=64, fused_elementwise=False)
+        assert bundle_module.rms_norm is rope_utils.rms_norm
+    finally:
+        use_fused_elementwise(False)

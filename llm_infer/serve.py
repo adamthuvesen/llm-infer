@@ -85,13 +85,14 @@ def build_app_from_runtime(
     ``fused_elementwise`` compiles RMSNorm and RoPE into fused kernels before any warmup or
     capture (``llm_infer/model/fused_elementwise.py``). It needs a CUDA bundle model.
     """
+    if fused_elementwise and (
+        torch.device(device).type != "cuda" or not isinstance(runtime.model, PretrainBundleModel)
+    ):
+        raise ValueError("--fused-elementwise needs a CUDA bundle model")
+    # The switch is process-wide, so set it either way: an earlier app may have turned it on.
+    # Before any warmup or capture, so every graph records the chosen kernels.
+    use_fused_elementwise(fused_elementwise)
     if fused_elementwise:
-        if torch.device(device).type != "cuda" or not isinstance(
-            runtime.model, PretrainBundleModel
-        ):
-            raise ValueError("--fused-elementwise needs a CUDA bundle model")
-        # Before any warmup or capture, so every graph records the fused kernels.
-        use_fused_elementwise(True)
         print("elementwise kernels: fused with torch.compile")
     warmup_s = _warm_flashinfer_decode_if_needed(
         runtime,
