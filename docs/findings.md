@@ -43,6 +43,7 @@ Two rules apply to every entry:
 | 21 | Does grouping all 30 layers beat the server's four-layer group? | Yes: −2.9% to −4.6% per step at batch 1–64, exact parity, qualified | Full depth becomes the server default |
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
 | 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Yes: 37–44% less time per step at batch 1–64; full depth costs the same startup time and memory as four layers | Next batch-1 lever; a default needs parity review first |
+| 24 | Should fused elementwise kernels be the CUDA server default? | Yes: near-tie parity, +38–47 s cold start, vLLM's lead down to 1.6x at batch 1 and 1.2x at batch 256 | CUDA default; README reports the fused path |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1221,11 +1222,100 @@ Records: [`assets/esme-fusion-ab-1.json`](../assets/esme-fusion-ab-1.json),
 [`assets/esme-fusion-ab-2.json`](../assets/esme-fusion-ab-2.json), and
 [`assets/esme-server-startup.json`](../assets/esme-server-startup.json) (the server-settings run).
 
+## 24. Fused elementwise kernels as the CUDA default (predictions registered before the run)
+
+**Question.** Entry 23 found that fusing RMSNorm and RoPE cuts 37–44% of each decode step, and its
+rule named three checks before fusion can become the CUDA server default: a review of the batch-1
+and batch-8 direct-parity divergences, the compile cost at server startup, and a same-host vLLM
+rerun. Do they pass?
+
+**Part 1: direct-parity review, from entry 23's records.** Every arm's divergences from fp32 are
+near-ties, so each arm follows the fp32 token stream until its first tie flip. Where two arms
+first differ, at least one of them departs from the fp32 stream at that step, unless both flip at
+the same step to the same token. That exception does not occur in these records:
+
+- **Batch 1** (both containers): `full_step` flips at step 80 (fp32 gap 0.046). The fused arm
+  matches fp32 exactly, so the arms first differ at that near-tie.
+- **Batch 8** (both containers): `full_step` flips requests `esme-001` and `esme-005` at step 22
+  (gap 0.012). The fused arm flips them later, at step 55, so the arms first differ at step 22.
+  The fused arm flips `esme-002` at step 113 (gap 0.030) and one more request, where `full_step`
+  matches fp32, so the arms first differ at those flips. The record samples three ties per arm,
+  so the fourth gap is not stored. It counts as a tie, so it is below 0.1.
+
+Every direct divergence is a fp32 near-tie under the 0.1 automatic bound. The divergences need no
+entry-20 precedent, and the direct parity of all four rows is `accepted_numerical`.
+
+**Method for parts 2 and 3.**
+
+- **Startup:** `scripts/modal_esme_fused_startup.py`. In one A100, each arm builds the HTTP app in
+  its own child process with empty `torch.compile` and Triton caches, so the compile cost is real.
+  Then each prompt size (about 24, 200, and 600 words) goes through `/v1/completions` twice, with
+  16 greedy tokens. Two repeats, in alternating arm order.
+- **vLLM:** `modal run scripts/modal_esme_vllm_baseline.py --command full`, entry 12's protocol on
+  one reserved host, now with four arms: `llm_infer` (piecewise graphs), `llm_infer_grouped`
+  (every layer grouped, the current server), `llm_infer_fused` (the same plus fused kernels), and
+  vLLM 0.24.0. Every row gates against the fp32 oracle.
+
+**Predictions (written before the run).**
+
+- **Startup:** the fused cold `build_app_from_runtime` takes 20–90 s longer than plain. No first
+  request takes longer than 10 s, because the graph-capture warmups compile the decode shapes, and
+  dynamic shapes cover new prompt lengths.
+- **vLLM:** the fused arm passes the fp32 gate in every row. At 256 cached prompt tokens, vLLM's
+  lead over the fused arm is 1.6–2.2x at batch 1 (3.11x in entry 12's record) and 1.2–1.6x at
+  batch 256 (1.86x).
+
+**Decision rule (set before the run).** Fusion becomes the CUDA server default for bf16 and fp16
+bundle models when three conditions hold. Part 1 accepts the direct-parity divergences, which it
+does. The fused arm has zero non-tie divergences from fp32 in every vLLM row. The fused cold start
+adds at most 120 s over plain, and no first request takes longer than 10 s. These two limits are
+chosen for this entry and have no external source. If any condition fails, fusion stays opt-in.
+If fusion becomes the default, the README's vLLM table reports the default server path.
+
+**Result.** All three conditions hold, so fusion becomes the CUDA server default for bf16 and
+fp16 bundle models.
+
+- **Part 1 (above):** every direct divergence is a fp32 near-tie under 0.1.
+- **Startup (held).** One A100 PCIe (300 W, Intel family 6, model 106), two repeats per arm:
+
+  | Arm | Cold `build_app_from_runtime` | First request at 30 / 230 / 670 prompt tokens | Repeat request |
+  | --- | ---: | --- | --- |
+  | plain | 61.4–69.2 s | 0.06 / 0.15 / 0.11 s | 0.04 / 0.11 / 0.11 s |
+  | fused | 106.7–108.2 s | 1.22–1.24 / 0.12 / 0.09 s | 0.04 / 0.08 / 0.09 s |
+
+  Fusion adds 38–47 s to a cold start, inside the predicted 20–90 s and under the 120 s limit.
+  The slowest first request takes 1.24 s, at the shortest prompt, so a little compilation is
+  left for serving time. Every later request is as fast or faster than plain.
+- **vLLM (held).** One A100 PCIe host (300 W, AMD family 25, model 1), the full entry-12 matrix.
+  The fused arm has zero non-tie divergences from fp32 in all 12 rows, and every row is
+  headline-eligible. At 256 cached prompt tokens and 128 new tokens:
+
+  | Batch | `llm_infer` tok/s | `llm_infer_grouped` tok/s | `llm_infer_fused` tok/s | vLLM tok/s | vLLM / fused |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 1 | 147.9 | 194.8 | 316.4 | 506.3 | 1.60x |
+  | 8 | 1,177.4 | 1,237.8 | 1,969.0 | 3,068.4 | 1.56x |
+  | 64 | 7,811.5 | 8,205.9 | 13,080.5 | 16,457.3 | 1.26x |
+  | 256 | 18,283.5 | 19,820.7 | 26,187.1 | 31,366.1 | 1.20x |
+
+  Both registered gaps landed at the low end of their predictions: 1.60x at batch 1 (predicted
+  1.6–2.2x) and 1.20x at batch 256 (predicted 1.2–1.6x). Over all three contexts, vLLM's lead over
+  the fused arm is 1.39–1.60x at batch 1 and 1.06–1.20x at batch 256.
+- **Limits.** This host class differs from entry 12's A100-SXM4, so the ratios here compare with
+  the earlier record only loosely. Ratios within this record are same-host. The image rebuild for
+  this run pulled newer releases of the unpinned libraries. The engine's torch, FlashInfer, and
+  vLLM versions stay pinned, and the record stores every version.
+
+**Decision.** Fusion becomes the CUDA server default for bf16 and fp16 bundle models, in a separate
+change, and the README's vLLM table moves to this record's fused rows. `--no-fused-elementwise`
+keeps the unfused path.
+
+Records: [`assets/esme-fused-startup.json`](../assets/esme-fused-startup.json) and
+[`assets/esme-vllm-same-host-fused.json`](../assets/esme-vllm-same-host-fused.json).
+
 ## Open questions
 
 - Can a graphed, planned multi-token verify step make speculation pay on CUDA (entry 22)?
-- How much of the batch-1 gap to vLLM does fusion close on the same host, and what does it cost to
-  compile at server startup (entry 23)?
+- What makes up the remaining 1.6x batch-1 gap to vLLM (entry 24)?
 - Does the grouped-graph gain track the host CPU (entry 18)? Benchmark snapshots record the CPU.
 - Does the cached path add error of its own, or only a different rounding order (entry 20)? It
   needs a control, for example the engine against itself with a perturbed reduction order.

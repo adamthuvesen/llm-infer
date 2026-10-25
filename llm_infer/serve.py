@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from llm_infer.kernels.base import PagedDecodeAttentionBackend
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+from llm_infer.model.fused_elementwise import use_fused_elementwise
 from llm_infer.model.interface import BackendCapabilities, ModelRuntime
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import (
@@ -62,6 +63,7 @@ def build_app_from_runtime(
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
     grouped_decode_graphs: bool | None = None,
+    fused_elementwise: bool = False,
     allow_cors: bool = False,
 ) -> FastAPI:
     """Wire a loaded model runtime into the HTTP app.
@@ -79,7 +81,19 @@ def build_app_from_runtime(
     piecewise graphs on. How much grouping pays depends on the host (entry 18). Explicit
     ``True`` forces it (CPU engines then run the eager grouped path — the test hook);
     ``False`` disables.
+
+    ``fused_elementwise`` compiles RMSNorm and RoPE into fused kernels before any warmup or
+    capture (``llm_infer/model/fused_elementwise.py``). It needs a CUDA bundle model.
     """
+    if fused_elementwise and (
+        torch.device(device).type != "cuda" or not isinstance(runtime.model, PretrainBundleModel)
+    ):
+        raise ValueError("--fused-elementwise needs a CUDA bundle model")
+    # The switch is process-wide, so set it either way: an earlier app may have turned it on.
+    # Before any warmup or capture, so every graph records the chosen kernels.
+    use_fused_elementwise(fused_elementwise)
+    if fused_elementwise:
+        print("elementwise kernels: fused with torch.compile")
     warmup_s = _warm_flashinfer_decode_if_needed(
         runtime,
         block_size=block_size,
@@ -429,6 +443,12 @@ def main() -> None:
         help="Serve without grouped decode graphs (skips their startup capture).",
     )
     parser.add_argument(
+        "--fused-elementwise",
+        action="store_true",
+        help="Compile RMSNorm and RoPE into fused kernels (CUDA bundle models only). Adds "
+        "compile time at startup.",
+    )
+    parser.add_argument(
         "--preemption-policy",
         choices=("off", "recompute"),
         default="off",
@@ -541,6 +561,7 @@ def main() -> None:
             decode_graphs=args.decode_graphs,
             decode_graph_buckets=args.decode_graph_buckets,
             grouped_decode_graphs=args.grouped_decode_graphs,
+            fused_elementwise=args.fused_elementwise,
         )
     except ValueError as exc:
         parser.error(str(exc))
