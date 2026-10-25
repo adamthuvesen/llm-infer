@@ -6,9 +6,11 @@ system as a fresh child process inside that function. Process exit releases vLLM
 while the parent keeps the host reservation. Hostname and GPU UUID are recorded for the parent,
 the fp32 oracle, and both engine children and must match before a result is accepted.
 
-Three engine arms run: ``llm_infer`` with the raw-engine defaults (piecewise decode graphs),
-``llm_infer_grouped`` with exact-batch grouped decode graphs (as the HTTP server runs on CUDA), and
-vLLM. vLLM is pinned to ``VLLM_VERSION`` so a rerun measures engine changes, not a vLLM upgrade.
+Four engine arms run: ``llm_infer`` with the raw-engine defaults (piecewise decode graphs),
+``llm_infer_grouped`` with exact-batch grouped decode graphs over every layer (as the HTTP server
+runs on CUDA), ``llm_infer_fused`` with the same graphs and fused elementwise kernels
+(``--fused-elementwise``), and vLLM. vLLM is pinned to ``VLLM_VERSION`` so a rerun measures
+engine changes, not a vLLM upgrade.
 
 Every speed row is gated against the fp32 ``PretrainBundleModel.logits()`` oracle. Exact output
 matches pass. A first divergence passes only when the fp32 top-two gap is within the audited
@@ -43,6 +45,7 @@ import modal
 if TYPE_CHECKING:
     from llm_infer.benchmarks.esme_three_way import EsmeAgreement
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -64,7 +67,8 @@ MEASURED_ITERS = 10
 VLLM_PYTHON = "/opt/vllm/bin/python"
 # The version in assets/esme-vllm-same-host.json, so reruns stay comparable with that record.
 VLLM_VERSION = "0.24.0"
-ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "vllm")
+ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused", "vllm")
+LLM_INFER_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused")
 
 
 class RequestSpec(TypedDict):
@@ -383,12 +387,13 @@ def _run_oracle_worker(worker_input: WorkerInput) -> OracleResult:
     }
 
 
-def _run_llm_infer_worker(worker_input: WorkerInput, *, grouped: bool) -> WorkerResult:
+def _run_llm_infer_worker(worker_input: WorkerInput, *, system: str) -> WorkerResult:
     import torch
 
     from llm_infer.benchmarks.report import library_versions
     from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.fused_elementwise import use_fused_elementwise
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
@@ -408,6 +413,9 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, grouped: bool) -> Worker
             f"resolved {type(runtime.model.backend).__name__}"
         )
 
+    grouped = system != "llm_infer"
+    # Before any capture, so every graph records the fused kernels, as the server does.
+    use_fused_elementwise(system == "llm_infer_fused")
     graph_capture_seconds = enable_decode_graphs_if_cuda(
         runtime.model, tuple(worker_input["capture_sizes"])
     )
@@ -419,7 +427,13 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, grouped: bool) -> Worker
     num_blocks = largest_batch * blocks_per_request + largest_batch
     batch_sizes = tuple(sorted({workload["batch_size"] for workload in worker_input["workloads"]}))
     grouped_kwargs: dict[str, object] = (
-        {"grouped_decode_graphs": True, "grouped_capture_sizes": batch_sizes} if grouped else {}
+        {
+            "grouped_decode_graphs": True,
+            "grouped_capture_sizes": batch_sizes,
+            "grouped_layers": runtime.model.num_layers,
+        }
+        if grouped
+        else {}
     )
     engine_start = time.perf_counter()
     engine = InferenceEngine(
@@ -473,7 +487,7 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, grouped: bool) -> Worker
             }
         )
     result: WorkerResult = {
-        "system": "llm_infer_grouped" if grouped else "llm_infer",
+        "system": system,
         "identity": process_identity(),
         "rows": rows,
         "versions": library_versions(),
@@ -561,8 +575,8 @@ def _worker_main(system: str, input_path: Path, output_path: Path) -> None:
     worker_input: WorkerInput = json.loads(input_path.read_text(encoding="utf-8"))
     if system == "oracle":
         result = _run_oracle_worker(worker_input)
-    elif system in ("llm_infer", "llm_infer_grouped"):
-        result = _run_llm_infer_worker(worker_input, grouped=system == "llm_infer_grouped")
+    elif system in LLM_INFER_SYSTEMS:
+        result = _run_llm_infer_worker(worker_input, system=system)
     elif system == "vllm":
         result = _run_vllm_worker(worker_input)
     else:
@@ -724,6 +738,8 @@ def run_same_host(
     from llm_infer.model.runtime import TokenizersJsonTokenizer
     from scripts.convert_esme_to_hf import convert
 
+    # Each child can take tens of minutes; progress() after every child resets the limit.
+    stall_guard.arm(limit_s=60 * 60)
     esme_bundles.reload()
     parent_identity = process_identity()
 
@@ -764,10 +780,13 @@ def run_same_host(
         directory = Path(temp_dir)
         oracle_result = run_oracle_process(worker_input, directory)
         validate_child_identity(parent_identity, oracle_result["identity"], "oracle")
+        stall_guard.progress()
         for system in ENGINE_SYSTEMS:
             child = run_engine_process(system, worker_input, directory)
             validate_child_identity(parent_identity, child["identity"], system)
             worker_results.append(child)
+            print(f"[vllm-baseline] {system} done")
+            stall_guard.progress()
 
     workloads_by_shape = {
         (workload["batch_size"], workload["context_tokens"]): workload for workload in workloads

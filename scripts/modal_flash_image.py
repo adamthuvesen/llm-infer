@@ -105,6 +105,7 @@ def _build_flash_base(*, cuda_image: str = CUDA_IMAGE) -> modal.Image:
             "pytest>=8.0",
             "fastapi>=0.110",
             "uvicorn>=0.29",
+            "httpx>=0.27",
         )
     )
 
