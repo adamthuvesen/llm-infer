@@ -1,7 +1,7 @@
 # llm-infer Scope
 
-`llm-infer` is a small inference engine focused on real serving techniques and clear
-measurement. The primary path is Esme, with `Esme-214M-Chat` loaded from
+`llm-infer` is a research inference engine, built to learn how LLM serving works by building
+real serving techniques and measuring each one clearly. The primary path is Esme, with `Esme-214M-Chat` loaded from
 `llm_pretrain_dense_v1` export bundles. Qwen2.5-Coder is kept as the independent
 HuggingFace reference for correctness regression.
 
@@ -69,8 +69,10 @@ The repo is in its intended state when these remain true:
 ## Non-Goals
 
 - No production-readiness claim.
-- No claim to approach mature production serving engines.
-- No custom Triton/CUDA kernel in the current engine.
+- Matching vLLM or other mature serving engines is not a goal. The same-host vLLM comparison
+  measures the distance.
+- No hand-written Triton or CUDA kernels. The fused RMSNorm and RoPE kernels come from
+  `torch.compile`.
 - No quantization or multi-GPU serving in the current engine.
 
 ## Layout
