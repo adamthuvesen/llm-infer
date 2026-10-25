@@ -44,7 +44,7 @@ Two rules apply to every entry:
 | 22 | Does prompt-lookup speculation pay on the CUDA engine? | No: 3.5x to 4.2x slower per request; an eager verify step costs about ten graphed decode steps | Stays off; a graphed verify path is open |
 | 23 | Does fusing the elementwise chains pay on full-depth graphs? What does full depth cost at startup? | Yes: 37–44% less time per step at batch 1–64; full depth costs the same startup time and memory as four layers | Next batch-1 lever; a default needs parity review first |
 | 24 | Should fused elementwise kernels be the CUDA server default? | Yes: near-tie parity, +38–47 s cold start, vLLM's lead down to 1.6x at batch 1 and 1.2x at batch 256 | CUDA default; README reports the fused path |
-| 25 | What does the HF ablation ladder show with fused kernels? | Pending; predictions registered before the run | — |
+| 25 | What does the HF ablation ladder show with fused kernels? | Fused rung 1.18–1.25x over grouped; engine 4.8–6.9x over HF batched on a slow-CPU host | HF tables report the fused rung, with the host caveat |
 
 ## 1. Cross-container variance sets the comparison rule
 
@@ -1343,7 +1343,39 @@ The fp32 oracle runs with fusion off. Every row gates against it.
 batches, the README and `benchmark.md` HF tables report it as the engine column. Otherwise they
 keep the grouped rung and state that the fused rung failed the gate.
 
-**Result.** Pending.
+**Result.** Every row passed the fp32 gate with zero non-tie divergences, so by the rule the HF
+tables report the fused rung. One A100-SXM4 container (400 W, Intel family 6, model 106, 2.0 GHz),
+raw tok/s:
+
+| System | Batch 8 | Batch 64 | Batch 256 |
+| --- | ---: | ---: | ---: |
+| HF sequential `generate()` | 34.0 | — | — |
+| HF batched `generate()` | 140.8 | 1,142.3 | 4,601.0 |
+| Paged KV + continuous batching | 153.9 | 967.7 | 2,071.7 |
+| + batched prefill | 165.0 | 1,243.3 | 4,289.3 |
+| + decode window | 172.2 | 1,358.9 | 5,077.6 |
+| + piecewise CUDA graphs | 768.8 | 5,780.0 | 17,762.4 |
+| + grouped graphs (every layer) | 789.8 | 5,917.5 | 18,321.6 |
+| + fused elementwise kernels | 975.8 | 7,361.2 | 21,882.4 |
+| **Full engine / HF batched** | **6.93x** | **6.44x** | **4.76x** |
+
+- **The gate held.** All 22 rows passed. The fused rung's direct parity against the grouped rung
+  is `review_required` at all three batches, as predicted, and exact nowhere.
+- **Grouping every layer adds about nothing under real EOS (held):** 1.03x, 1.02x, and 1.03x.
+- **The fused rung gains slightly less than predicted (failed):** 1.25x at batch 8, 1.25x at
+  batch 64, and 1.18x at batch 256, each just under its predicted range. Prefill and the drain
+  after EOS take a larger share of the wall time than the prediction assumed.
+- **The multiple over HF beat its prediction (failed), and most of that is the host.** The
+  graphed engine rungs match entry 13 within 5%, but HF batched ran 24–45% slower here. HF
+  `generate()` is bound by the host CPU, and this container's CPU ran at 2.0 GHz. So the jump
+  from about 3x to 4.8–6.9x is mostly a slower baseline. Fusion's own share is the 1.18–1.25x
+  step above.
+
+**Decision.** The README and `benchmark.md` HF tables report this record's fused rung, as the rule
+says, and state that the multiple depends on the host CPU. The per-rung steps are the
+host-independent result.
+
+Record: [`assets/esme-ablation-ladder-fused.json`](../assets/esme-ablation-ladder-fused.json).
 
 ## Open questions
 
