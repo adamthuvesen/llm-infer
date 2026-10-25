@@ -1,0 +1,216 @@
+{
+  "probe": "fused-startup",
+  "container_id": "ta-01M5RQHG02W2K4JRC1MATRG7HR",
+  "runs": [
+    {
+      "arm": "plain",
+      "model_load_s": 22.30461311,
+      "build_app_s": 69.153016009,
+      "requests": [
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "first",
+          "latency_s": 0.06008193200000278
+        },
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "repeat",
+          "latency_s": 0.037485509999996225
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.15356996500000264
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.11003384700001106
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.11468843699999809
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.11455541099999778
+        }
+      ],
+      "process_s": 98.753126192
+    },
+    {
+      "arm": "fused",
+      "model_load_s": 2.688950128000002,
+      "build_app_s": 108.19546197599999,
+      "requests": [
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "first",
+          "latency_s": 1.2158022710000012
+        },
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "repeat",
+          "latency_s": 0.04010765599997512
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.11790171399999849
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.08213100699998677
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.08689665399998603
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.08540773300001092
+        }
+      ],
+      "process_s": 119.19256710200001
+    },
+    {
+      "arm": "fused",
+      "model_load_s": 2.6081284980000135,
+      "build_app_s": 106.68613614199998,
+      "requests": [
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "first",
+          "latency_s": 1.243309001
+        },
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "repeat",
+          "latency_s": 0.04010323900001822
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.11935094500000787
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.08204959299996517
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.08796996600000284
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.08573645299998134
+        }
+      ],
+      "process_s": 117.42563137099998
+    },
+    {
+      "arm": "plain",
+      "model_load_s": 2.718329906000008,
+      "build_app_s": 61.379645563000054,
+      "requests": [
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "first",
+          "latency_s": 0.06353390499998568
+        },
+        {
+          "prompt_tokens": 30,
+          "completion_tokens": 1,
+          "attempt": "repeat",
+          "latency_s": 0.03565137000003915
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.15030533599997398
+        },
+        {
+          "prompt_tokens": 230,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.1105285699999854
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "first",
+          "latency_s": 0.11345195300003752
+        },
+        {
+          "prompt_tokens": 670,
+          "completion_tokens": 16,
+          "attempt": "repeat",
+          "latency_s": 0.11337185799999361
+        }
+      ],
+      "process_s": 70.08595429500002
+    }
+  ],
+  "gpu": {
+    "name": "NVIDIA A100 80GB PCIe",
+    "clocks_sm": "1410 MHz",
+    "clocks_max_sm": "1410 MHz",
+    "power_limit": "300.00 W",
+    "memory_total": "81920 MiB",
+    "host_cpu": "model name=unknown; vendor_id=GenuineIntel; cpu family=6; model=106; cpu MHz=3300.000",
+    "host_cpu_count": 17
+  },
+  "versions": {
+    "python": "3.13.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "transformers": "5.20.2",
+    "flash_attn": "2.8.3.post1",
+    "vllm": "absent",
+    "numpy": "2.5.4"
+  },
+  "config": {
+    "model": "Esme-214M-Chat",
+    "arms": [
+      "plain",
+      "fused"
+    ],
+    "repeats": 2,
+    "prompt_words": [
+      24,
+      200,
+      600
+    ],
+    "max_tokens": 16,
+    "server": "build_app_from_runtime defaults on CUDA bf16",
+    "repro_command": "modal run scripts/modal_esme_fused_startup.py"
+  }
+}
