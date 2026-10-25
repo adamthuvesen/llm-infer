@@ -43,3 +43,9 @@ def test_server_without_fusion_restores_the_original_kernels(tmp_path: Path) -> 
         assert bundle_module.rms_norm is rope_utils.rms_norm
     finally:
         use_fused_elementwise(False)
+
+
+def test_server_default_leaves_cpu_serving_unfused(tmp_path: Path) -> None:
+    runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
+    build_app_from_runtime(runtime, block_size=4, num_blocks=64)
+    assert bundle_module.rms_norm is rope_utils.rms_norm

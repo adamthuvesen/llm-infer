@@ -63,7 +63,7 @@ def build_app_from_runtime(
     decode_graphs: bool = True,
     decode_graph_buckets: tuple[int, ...] = DEFAULT_DECODE_GRAPH_BUCKETS,
     grouped_decode_graphs: bool | None = None,
-    fused_elementwise: bool = False,
+    fused_elementwise: bool | None = None,
     allow_cors: bool = False,
 ) -> FastAPI:
     """Wire a loaded model runtime into the HTTP app.
@@ -83,8 +83,18 @@ def build_app_from_runtime(
     ``False`` disables.
 
     ``fused_elementwise`` compiles RMSNorm and RoPE into fused kernels before any warmup or
-    capture (``llm_infer/model/fused_elementwise.py``). It needs a CUDA bundle model.
+    capture (``llm_infer/model/fused_elementwise.py``). ``None`` (the serve default) enables it
+    for CUDA bundle models in bf16 or fp16: it cut 37-44% of each decode step, passed the
+    near-tie gate, and adds about 40 s of compile time to a cold start (docs/findings.md entries
+    23 and 24). The fp32 CUDA config stays the unfused reference. Explicit ``True`` needs a CUDA
+    bundle model, and ``False`` disables it.
     """
+    if fused_elementwise is None:
+        fused_elementwise = (
+            torch.device(device).type == "cuda"
+            and isinstance(runtime.model, PretrainBundleModel)
+            and runtime.model.dtype in (torch.bfloat16, torch.float16)
+        )
     if fused_elementwise and (
         torch.device(device).type != "cuda" or not isinstance(runtime.model, PretrainBundleModel)
     ):
@@ -444,9 +454,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--fused-elementwise",
+        dest="fused_elementwise",
         action="store_true",
-        help="Compile RMSNorm and RoPE into fused kernels (CUDA bundle models only). Adds "
-        "compile time at startup.",
+        default=None,
+        help="Force fused RMSNorm and RoPE kernels on (CUDA bundle models only). The default "
+        "enables them for CUDA bf16/fp16 bundle models; they add about 40 s of compile time "
+        "at startup.",
+    )
+    parser.add_argument(
+        "--no-fused-elementwise",
+        dest="fused_elementwise",
+        action="store_false",
+        help="Serve with the unfused elementwise kernels (skips their startup compile).",
     )
     parser.add_argument(
         "--preemption-policy",
