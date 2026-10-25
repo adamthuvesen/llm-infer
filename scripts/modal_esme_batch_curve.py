@@ -977,13 +977,16 @@ def sweep_flashinfer_compare(
 
 # Cumulative ablation ladder: each rung adds one technique to the rung before it. The
 # graphs flag selects the model-owned piecewise runner; grouped adds exact-batch grouped
-# graphs on top. Paged KV and continuous batching are present on every engine rung.
-LADDER_RUNGS: tuple[tuple[str, dict[str, object], bool, bool], ...] = (
-    ("paged_continuous", {"batched_prefill": False, "decode_window_size": 1}, False, False),
-    ("+batched_prefill", {"batched_prefill": True, "decode_window_size": 1}, False, False),
-    ("+decode_window", {"batched_prefill": True, "decode_window_size": 8}, False, False),
-    ("+piecewise_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, False),
-    ("+grouped_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, True),
+# graphs over every layer, as the HTTP server runs them; fused swaps in the compiled RMSNorm
+# and RoPE kernels, with their own piecewise runner. Paged KV and continuous batching are
+# present on every engine rung.
+LADDER_RUNGS: tuple[tuple[str, dict[str, object], bool, bool, bool], ...] = (
+    ("paged_continuous", {"batched_prefill": False, "decode_window_size": 1}, False, False, False),
+    ("+batched_prefill", {"batched_prefill": True, "decode_window_size": 1}, False, False, False),
+    ("+decode_window", {"batched_prefill": True, "decode_window_size": 8}, False, False, False),
+    ("+piecewise_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, False, False),
+    ("+grouped_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, True, False),
+    ("+fused_elementwise", {"batched_prefill": True, "decode_window_size": 8}, True, True, True),
 )
 
 
@@ -1029,6 +1032,7 @@ def sweep_ladder(
     from llm_infer.benchmarks.report import total_output_tokens
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
+    from llm_infer.model.fused_elementwise import use_fused_elementwise
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
@@ -1049,6 +1053,15 @@ def sweep_ladder(
     if piecewise_runner is None:
         raise RuntimeError("piecewise decode graphs did not enable on the CUDA bundle model")
     print(f"[ladder] piecewise buckets {CAPTURE_SIZES} captured in {capture_s:.1f} s")
+    # The fused rung needs piecewise graphs that recorded the fused kernels. The switch is
+    # process-wide and the fp32 oracle shares it, so it is on only while a fused rung builds
+    # or runs.
+    use_fused_elementwise(True)
+    fused_capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
+    fused_piecewise_runner = model.decode_graphs
+    use_fused_elementwise(False)
+    model.decode_graphs = piecewise_runner
+    print(f"[ladder] fused piecewise buckets captured in {fused_capture_s:.1f} s")
 
     reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
 
@@ -1154,11 +1167,23 @@ def sweep_ladder(
             math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
         )
         num_blocks = needed + max(4, len(requests))
-        engines: dict[str, tuple[InferenceEngine, bool]] = {}
-        for name, kwargs, graphs, grouped in LADDER_RUNGS:
-            model.decode_graphs = piecewise_runner if graphs else None
+        engines: dict[str, tuple[InferenceEngine, bool, bool]] = {}
+
+        def select_rung(graphs: bool, fused: bool) -> None:
+            use_fused_elementwise(fused)
+            runner = fused_piecewise_runner if fused else piecewise_runner
+            model.decode_graphs = runner if graphs else None
+
+        for name, kwargs, graphs, grouped, fused in LADDER_RUNGS:
+            select_rung(graphs, fused)
             grouped_kwargs = (
-                {"grouped_decode_graphs": True, "grouped_capture_sizes": (size,)} if grouped else {}
+                {
+                    "grouped_decode_graphs": True,
+                    "grouped_capture_sizes": (size,),
+                    "grouped_layers": model.num_layers,
+                }
+                if grouped
+                else {}
             )
             engine = InferenceEngine(
                 model,
@@ -1169,7 +1194,8 @@ def sweep_ladder(
                 **kwargs,
                 **grouped_kwargs,
             )
-            engines[name] = (engine, graphs)
+            engines[name] = (engine, graphs, fused)
+        select_rung(True, False)
 
         names = list(engines)
         timings: dict[str, list[float]] = {name: [] for name in names}
@@ -1177,8 +1203,8 @@ def sweep_ladder(
         for iteration in range(warmup + iters):
             shift = iteration % len(names)
             for name in names[shift:] + names[:shift]:
-                engine, graphs = engines[name]
-                model.decode_graphs = piecewise_runner if graphs else None
+                engine, graphs, fused = engines[name]
+                select_rung(graphs, fused)
                 for req in requests:
                     engine.add_request(
                         Request(req.request_id, list(req.prompt_ids), max_new_tokens, eos)
@@ -1191,10 +1217,13 @@ def sweep_ladder(
                     timings[name].append(time.perf_counter() - start)
                     rung_outputs[name] = result
                 stall_guard.progress()
+        # Off before gating: the fp32 oracle runs through the same module functions.
+        select_rung(True, False)
 
+        for grouped_rung in ("+grouped_graphs", "+fused_elementwise"):
+            if engines[grouped_rung][0].grouped_decode_runners[size].steps_handled == 0:
+                raise RuntimeError(f"{grouped_rung}: grouped runner never fired at batch {size}")
         grouped_runner = engines["+grouped_graphs"][0].grouped_decode_runners[size]
-        if grouped_runner.steps_handled == 0:
-            raise RuntimeError(f"grouped runner never fired at batch {size}")
         previous: dict | None = None
         for name in names:
             row = gated_row(name, size, requests, rung_outputs[name], timings[name])
@@ -1232,10 +1261,15 @@ def sweep_ladder(
                     "engine_kwargs": kwargs,
                     "piecewise_graphs": graphs,
                     "grouped": grouped,
+                    "fused_elementwise": fused,
                 }
-                for name, kwargs, graphs, grouped in LADDER_RUNGS
+                for name, kwargs, graphs, grouped, fused in LADDER_RUNGS
             ],
-            "decode_graphs": {"capture_sizes": list(CAPTURE_SIZES), "capture_s": capture_s},
+            "decode_graphs": {
+                "capture_sizes": list(CAPTURE_SIZES),
+                "capture_s": capture_s,
+                "fused_capture_s": fused_capture_s,
+            },
             "protocol": (
                 "one container; persistent engine per (batch, rung), rung order rotated per "
                 "iteration; per-iteration add+drain wall including prefill; real EOS; "
