@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CURVE_RECORD = ROOT / "assets" / "esme-batch-curve.json"
-LADDER_RECORD = ROOT / "assets" / "esme-ablation-ladder.json"
+LADDER_RECORD = ROOT / "assets" / "esme-ablation-ladder-fused.json"
 VLLM_RECORD = ROOT / "assets" / "esme-vllm-same-host-fused.json"
 PUBLIC_BENCHMARK_DOC = ROOT / "docs" / "benchmark.md"
 README = ROOT / "README.md"
@@ -157,7 +157,7 @@ def _headline_table_errors() -> list[str]:
     required = [
         (LADDER_RECORD, ladder, (system, 0, batch))
         for batch in (8, 64, 256)
-        for system in ("hf_batched", "+grouped_graphs")
+        for system in ("hf_batched", "+fused_elementwise")
     ] + [
         (VLLM_RECORD, vllm, (system, 256, batch))
         for batch in (1, 8, 64, 256)
@@ -172,7 +172,7 @@ def _headline_table_errors() -> list[str]:
     for batch in (8, 64, 256):
         hf_sequential = ladder.get(("hf_sequential", 0, batch))
         hf_batched = ladder[("hf_batched", 0, batch)]
-        engine = ladder[("+grouped_graphs", 0, batch)]
+        engine = ladder[("+fused_elementwise", 0, batch)]
         floor = f"{hf_sequential:,.1f}" if hf_sequential is not None else "—"
         expected.append(
             f"| {batch} | {floor} | {hf_batched:,.1f} | {engine:,.1f} | "

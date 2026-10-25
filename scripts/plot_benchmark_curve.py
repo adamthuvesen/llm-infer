@@ -56,7 +56,9 @@ LADDER_SYSTEMS = (
     ("+decode_window", "+ decode window"),
     ("+piecewise_graphs", "+ piecewise CUDA graphs"),
     ("+grouped_graphs", "+ grouped graphs"),
+    ("+fused_elementwise", "+ fused elementwise kernels"),
 )
+FULL_ENGINE = LADDER_SYSTEMS[-1][0]
 
 
 def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
@@ -313,7 +315,7 @@ def build_ladder_figure(by_batch: dict[int, dict[str, float]]) -> go.Figure:
     """One horizontal-bar panel per batch size; each panel keeps its own tok/s scale."""
     batches = list(by_batch)
     labels = [label for _, label in LADDER_SYSTEMS]
-    gains = [values["+grouped_graphs"] / values["hf_batched"] for values in by_batch.values()]
+    gains = [values[FULL_ENGINE] / values["hf_batched"] for values in by_batch.values()]
     figure = make_subplots(rows=1, cols=len(batches), shared_yaxes=True, horizontal_spacing=0.08)
     figure.update_layout(
         card_layout(
@@ -340,7 +342,7 @@ def build_ladder_figure(by_batch: dict[int, dict[str, float]]) -> go.Figure:
     for column, (batch, values) in enumerate(by_batch.items(), start=1):
         tok_s = [values[system] for system, _ in LADDER_SYSTEMS]
         text = [
-            f"{value:,.0f}" if system in ("hf_batched", "+grouped_graphs") else ""
+            f"{value:,.0f}" if system in ("hf_batched", FULL_ENGINE) else ""
             for (system, _), value in zip(LADDER_SYSTEMS, tok_s, strict=True)
         ]
         figure.add_trace(
@@ -386,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ladder-input",
         type=Path,
-        default=Path("assets/esme-ablation-ladder.json"),
+        default=Path("assets/esme-ablation-ladder-fused.json"),
         help="Ablation-ladder benchmark record (modal_esme_batch_curve.py --command ladder).",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("assets"))

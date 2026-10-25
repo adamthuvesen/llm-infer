@@ -23,30 +23,34 @@ divergence on the fp32 reference.
 
 The headline compares `llm_infer` with batched HF `generate()` and with vLLM, each on one GPU in
 one run. A multiple over the naive floor is kept below as batch-scaling evidence, but it mostly
-measures plain batching and the host CPU: batched `generate()` alone is 4.2x faster than
-sequential `generate()`, and the sequential floor measured 22.1 tok/s on one host and 59.9 tok/s
-on another.
+measures plain batching and the host CPU: batched `generate()` alone is about 4x faster than
+sequential `generate()`, and the sequential floor measured between 22.1 and 59.9 tok/s across
+hosts. HF batched `generate()` is host-bound too, so the engine's multiple over it moves with the
+host CPU, while each rung's step over the rung below stays close across hosts.
 
 ### Against HF: the ablation ladder
 
-Run `2026-10-24`, one A100-SXM4-80GB container. Chat prompts from the headline pool, up to 256 new
+Run `2026-10-25`, one A100-SXM4-80GB container. Chat prompts from the headline pool, up to 256 new
 tokens, real EOS, greedy, prefix caching off. Every row passed the fp32 reference gate with zero
-non-tie divergences. Record: [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json).
+non-tie divergences. Record:
+[`assets/esme-ablation-ladder-fused.json`](../assets/esme-ablation-ladder-fused.json).
 
 | Concurrent requests | HF sequential tok/s | HF batched tok/s | `llm_infer` tok/s | vs HF batched |
 | ---: | ---: | ---: | ---: | ---: |
-| 8 | 59.9 | 249.4 | 777.7 | **3.1x** |
-| 64 | — | 2,079.3 | 5,867.8 | **2.8x** |
-| 256 | — | 6,070.9 | 18,784.9 | **3.1x** |
+| 8 | 34.0 | 140.8 | 975.8 | **6.9x** |
+| 64 | — | 1,142.3 | 7,361.2 | **6.4x** |
+| 256 | — | 4,601.0 | 21,882.4 | **4.8x** |
 
 The engine rungs add one technique at a time on the same requests:
 
 ![Esme ablation ladder: tok/s added by each engine technique](../assets/fig-esme-ablation-ladder.svg)
 
-CUDA graphs are the largest step: 2.2–2.5x by median wall time. The first engine rung prefills
-requests one at a time and syncs every decode step, and it runs below HF batched at 64 and 256
-requests. Adding batched prefill alone brings it level with HF batched, so that deficit is serial
-prefill. See
+CUDA graphs are the largest step: 3.5–4.5x by median wall time on this host. Fused elementwise
+kernels add 1.18–1.25x on top of the grouped graphs, and grouping every layer adds about nothing
+under real EOS (1.02–1.03x). The first engine rung prefills requests one at a time and syncs every
+decode step, and it runs below HF batched at 64 and 256 requests. Adding batched prefill alone
+brings it close to HF batched, so that deficit is serial prefill. See
+[findings entry 25](findings.md) and
 [findings entry 13](findings.md#13-ablation-ladder-what-each-technique-buys-on-one-gpu).
 
 ### Against vLLM: same host

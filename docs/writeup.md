@@ -3,10 +3,11 @@
 `llm-infer` is a small inference engine for `Esme-214M-Chat`, a 214M-parameter model trained from
 scratch in [`esme-pretrain`](https://github.com/adamthuvesen/esme-pretrain). It owns the whole
 serving path: paged KV cache, continuous batching, batched prefill, CUDA graphs, FlashInfer
-attention, and an OpenAI-compatible server. On one A100 it serves 3.1x the tokens per second of
-batched HuggingFace `generate()`. vLLM on the same host is 1.2x to 1.6x faster than `llm-infer`.
+attention, and an OpenAI-compatible server. On one A100 it serves 4.8x to 6.9x the tokens per
+second of batched HuggingFace `generate()`, which is bound by the host CPU, so that multiple moves
+with the host [25]. vLLM on the same host is 1.2x to 1.6x faster than `llm-infer` [24].
 
-This page tells the story of the 24 experiments in [findings.md](findings.md). Each entry there
+This page tells the story of the 25 experiments in [findings.md](findings.md). Each entry there
 has the full method and the numbers. Entries 12 to 22 cite records committed in `assets/`.
 Entries 1 to 11 name raw records that stay outside the repository. Entry numbers appear below in
 brackets.
@@ -23,7 +24,7 @@ full-recompute oracle on the same prompts. Numerical ties are the only allowed d
 [1]. So every A/B runs both arms in one container, in alternating order where possible, and a
 ratio never crosses containers.
 
-**Predictions before the run.** Entries 17 and 19 to 24 committed their predictions and decision
+**Predictions before the run.** Entries 17 and 19 to 25 committed their predictions and decision
 rule before any GPU time was spent. For the paired A/Bs (entries 19, 21, 22, and 23), a script,
 `scripts/judge_paired_ab.py`, applies the rule to the records from two containers. The statistic
 is the median paired change per round, with a 95% bootstrap interval [19]. A qualified claim needs
@@ -40,7 +41,7 @@ At 214M parameters, a decode step is about 2,100 small kernel launches [2]. The 
 number of kernels, not FLOPs. Most of the gains came from launching less.
 
 - **Piecewise CUDA graphs** replay the step as a few launches. Throughput rose 177% at batch 8
-  and 16% at batch 256 [3]. The ablation ladder shows graphs are the largest single lever [13].
+  and 16% at batch 256 [3]. The ablation ladder shows graphs are the largest single lever [13, 25].
 - **`torch.compile` lost.** It cut launches by the same amount but ran at 118.7 tok/s against
   425.0 for manual graphs at batch 8 [4]. It was removed.
 - **Ragged batched prefill** replaced a serial prefill loop that took 67% to 84% of the profile
