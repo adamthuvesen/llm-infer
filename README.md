@@ -8,7 +8,7 @@ path: paged KV cache, continuous batching, batched prefill, CUDA graphs, FlashIn
 and an OpenAI-compatible server. Every speed claim first matches a known-good reference output.
 
 On one A100 it serves **3.1x the tokens per second of batched HuggingFace `generate()`**. vLLM on
-the same host is 1.9x to 3.1x faster, and the batch-1 gap is the main open question. The
+the same host is 1.2x to 1.6x faster, and the batch-1 gap is the main open question. The
 [two-page write-up](docs/writeup.md) explains what each technique bought and what did not work.
 
 ## Quickstart
@@ -38,6 +38,8 @@ is ignored.
 - **Prefix caching** for prompts that share leading blocks, including follow-up chat turns.
 - **CUDA graphs** for decode: piecewise graphs per batch bucket, and grouped graphs that capture
   every layer, including KV writes and FlashInfer attention, as one graph per exact batch.
+- **Fused elementwise kernels**: RMSNorm and RoPE compiled with `torch.compile`, which cut 37–44%
+  of each graphed decode step ([findings entries 23 and 24](docs/findings.md)).
 - **Prompt-lookup speculative decoding** with a greedy verifier. Local CPU serving turns it on.
   CUDA keeps it off, because it measured 3.5x to 4.2x slower per request there
   ([findings entry 22](docs/findings.md)).
@@ -63,23 +65,25 @@ a committed record and passed that gate.
 
 HF sequential is the naive floor: one `generate()` call per request. Plain batching already gives
 a 4.2x gain over it, so the engine is measured against batched `generate()`. The figure shows where
-the remaining gain comes from:
+the remaining gain comes from. The ladder was measured before fused elementwise kernels, which
+the vLLM table below includes.
 
 ![Esme ablation ladder: tok/s added by each engine technique](assets/fig-esme-ablation-ladder.svg)
 
-**Against vLLM.** `2026-10-24`, vLLM 0.24.0 and `llm_infer` (grouped and piecewise CUDA graphs
-captured at each measured batch size) on one reserved A100-SXM4-80GB host,
-256 cached prompt tokens, 128 new tokens per request, EOS ignored, median of 10 runs:
+**Against vLLM.** `2026-10-25`, vLLM 0.24.0 and `llm_infer` (fused elementwise kernels, with
+grouped and piecewise CUDA graphs captured at each measured batch size) on one reserved A100 80GB
+PCIe host, 256 cached prompt tokens, 128 new tokens per request, EOS ignored, median of 10 runs:
 
 | Concurrent requests | `llm_infer` tok/s | vLLM tok/s | vLLM / `llm_infer` |
 | ---: | ---: | ---: | ---: |
-| 1 | 180.9 | 563.1 | 3.11x |
-| 8 | 1,188.6 | 3,298.7 | 2.78x |
-| 64 | 7,858.5 | 20,000.4 | 2.55x |
-| 256 | 18,911.1 | 35,181.0 | 1.86x |
+| 1 | 316.4 | 506.3 | 1.60x |
+| 8 | 1,969.0 | 3,068.4 | 1.56x |
+| 64 | 13,080.5 | 16,457.3 | 1.26x |
+| 256 | 26,187.1 | 31,366.1 | 1.20x |
 
-vLLM's lead shrinks with batch size, from 3.1x at batch 1 to 1.9x at batch 256
-([findings entry 12](docs/findings.md)). The HTTP server captures graphs up to 16 concurrent
+vLLM's lead shrinks with batch size, from 1.6x at batch 1 to 1.2x at batch 256
+([findings entry 24](docs/findings.md)). In the same run, the unfused server path trailed vLLM by
+2.6x at batch 1, so fused kernels closed most of that gap. The HTTP server captures graphs up to 16 concurrent
 requests by default. Pass `--decode-graph-buckets` to serve larger batches from graphs.
 
 ## How the Claims Are Checked
@@ -105,13 +109,15 @@ The server picks its defaults from the device:
 | Device | Weights | Attention | Decode | Prefix cache and speculation |
 | --- | --- | --- | --- | --- |
 | CPU (default) | fp16 | `torch_sdpa` | eager, with prompt-lookup speculation | on |
-| CUDA with `--dtype bfloat16` | bf16 | FlashInfer | 8-step decode windows on piecewise and grouped CUDA graphs | off |
+| CUDA with `--dtype bfloat16` | bf16 | FlashInfer | 8-step decode windows on piecewise and grouped CUDA graphs, fused RMSNorm and RoPE | off |
 
 - On CPU, fp16 is about 12% faster than fp32, with byte-identical output on the 8-turn chat
   benchmark. `--dtype float32` gives the exact fp32 reference config.
 - On CUDA, the fp32 default is the reference config. `--dtype bfloat16` (or `float16`) selects
   FlashInfer, which needs the `gpu` extra (`uv sync --extra gpu`). Pass
   `--attention-backend torch_naive` to opt out.
+- On CUDA bf16 or fp16, the fused kernels add about 40 s of compile time to a cold start.
+  `--no-fused-elementwise` skips it.
 - Every automatic choice has an explicit flag or a `--no-*` override.
 
 Engine flags: `--block-size`, `--num-blocks`, `--decode-window-size` (decode steps per EOS host

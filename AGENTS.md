@@ -26,8 +26,9 @@ share a numerical review.
   reference for the paged path: exact greedy-token parity on the real bundle, with cached logits
   within documented fp32 BLAS reduction-order noise and well below any decision margin. On CUDA
   fp16/bf16 bundles `auto` selects `FlashInferPagedAttention` for batched decode (see
-  `_resolve_attention_backend` in `llm_infer/model/runtime.py`); `torch_naive` stays the fp32/CPU
-  reference oracle. See `BackendCapabilities` in `llm_infer/model/interface.py`.
+  `_resolve_attention_backend` in `llm_infer/model/runtime.py`), and the HTTP server compiles
+  RMSNorm and RoPE into fused kernels (`llm_infer/model/fused_elementwise.py`). `torch_naive`
+  stays the fp32/CPU reference oracle. See `BackendCapabilities` in `llm_infer/model/interface.py`.
 - `dense`: compatibility alias for the same internal bundle loader. Public docs/examples
   use `esme`.
 - `qwen`: independent HF reference backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
