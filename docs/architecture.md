@@ -125,6 +125,12 @@ serving admission provides and ragged EOS-terminating benchmark drains do not
 ([findings entries 7 and 13](findings.md)). The runner counts its own hits
 (`llm_infer_grouped_decode_steps_total` on `/metrics`) so a silent fall-through is visible.
 
+Both graph tiers record whichever RMSNorm and RoPE kernels are active when they capture.
+`llm_infer/model/fused_elementwise.py` swaps in `torch.compile` versions, and the HTTP server does
+so before any warmup or capture on CUDA bf16 and fp16 bundle models. That cuts 37-44% of each
+graphed decode step and adds about 40 s of compile time to a cold start
+([findings entries 23 and 24](findings.md)). `--no-fused-elementwise` keeps the unfused kernels.
+
 ## Paged KV Cache
 
 K/V rows live in fixed-size physical blocks. Each request has a `BlockTable` mapping logical

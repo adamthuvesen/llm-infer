@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CURVE_RECORD = ROOT / "assets" / "esme-batch-curve.json"
 LADDER_RECORD = ROOT / "assets" / "esme-ablation-ladder.json"
-VLLM_RECORD = ROOT / "assets" / "esme-vllm-same-host.json"
+VLLM_RECORD = ROOT / "assets" / "esme-vllm-same-host-fused.json"
 PUBLIC_BENCHMARK_DOC = ROOT / "docs" / "benchmark.md"
 README = ROOT / "README.md"
 PLOT_SCRIPT = ROOT / "scripts" / "plot_benchmark_curve.py"
@@ -161,7 +161,7 @@ def _headline_table_errors() -> list[str]:
     ] + [
         (VLLM_RECORD, vllm, (system, 256, batch))
         for batch in (1, 8, 64, 256)
-        for system in ("llm_infer_grouped", "vllm")
+        for system in ("llm_infer_fused", "vllm")
     ]
     missing = [
         f"{path}: missing headline row {key}" for path, rows, key in required if key not in rows
@@ -179,7 +179,7 @@ def _headline_table_errors() -> list[str]:
             f"**{engine / hf_batched:.1f}x** |"
         )
     for batch in (1, 8, 64, 256):
-        engine = vllm[("llm_infer_grouped", 256, batch)]
+        engine = vllm[("llm_infer_fused", 256, batch)]
         reference = vllm[("vllm", 256, batch)]
         expected.append(
             f"| {batch} | {engine:,.1f} | {reference:,.1f} | {reference / engine:.2f}x |"

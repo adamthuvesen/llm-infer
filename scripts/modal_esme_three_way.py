@@ -2,7 +2,7 @@
 
 The HF and llm_infer legs share one container, and vLLM runs in a second, so the two
 containers can land on different A100 hosts. The same-host vLLM comparison in README.md
-(``assets/esme-vllm-same-host.json``) comes from ``scripts/modal_esme_vllm_baseline.py``.
+(``assets/esme-vllm-same-host-fused.json``) comes from ``scripts/modal_esme_vllm_baseline.py``.
 
 Esme has no public HF/vLLM checkpoint, so this harness converts the ``llm_pretrain_dense_v1``
 bundle to a ``Qwen3ForCausalLM`` checkpoint (``scripts/convert_esme_to_hf.py``). The local

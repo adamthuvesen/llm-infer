@@ -65,7 +65,7 @@ MAX_NEW_TOKENS = 128
 WARMUPS = 2
 MEASURED_ITERS = 10
 VLLM_PYTHON = "/opt/vllm/bin/python"
-# The version in assets/esme-vllm-same-host.json, so reruns stay comparable with that record.
+# The version in the committed assets/esme-vllm-same-host*.json records, so reruns stay comparable.
 VLLM_VERSION = "0.24.0"
 ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused", "vllm")
 LLM_INFER_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused")

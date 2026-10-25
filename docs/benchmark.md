@@ -51,27 +51,30 @@ prefill. See
 
 ### Against vLLM: same host
 
-Run `2026-10-24`, one reserved A100-SXM4-80GB host. The fp32 oracle, `llm_infer`, and vLLM 0.24.0
-ran as sequential child processes with matching hostname and GPU UUID. Each request has 256 cached
-prompt tokens and generates 128 tokens with EOS ignored; two warmups, median of 10 runs. The
-`llm_infer` column has grouped and piecewise CUDA graphs captured at each measured batch size.
+Run `2026-10-25`, one reserved A100 80GB PCIe host. The fp32 oracle, three `llm_infer` arms, and
+vLLM 0.24.0 ran as sequential child processes with matching hostname and GPU UUID. Each request has
+256 cached prompt tokens and generates 128 tokens with EOS ignored; two warmups, median of 10 runs.
+The `llm_infer` column is the CUDA server path: fused elementwise kernels, with grouped graphs over
+every layer and piecewise CUDA graphs captured at each measured batch size.
 The HTTP server's default graph buckets stop at 16, so it needs `--decode-graph-buckets` to match
 these rows at 64 and 256 requests. All rows are
-headline-eligible. Record: [`assets/esme-vllm-same-host.json`](../assets/esme-vllm-same-host.json),
-which also holds contexts 32 and 768 and the piecewise-only arm.
+headline-eligible. Record:
+[`assets/esme-vllm-same-host-fused.json`](../assets/esme-vllm-same-host-fused.json), which also
+holds contexts 32 and 768, the piecewise-only arm, and the unfused grouped arm.
 
 | Concurrent requests | `llm_infer` tok/s | vLLM tok/s | vLLM / `llm_infer` |
 | ---: | ---: | ---: | ---: |
-| 1 | 180.9 | 563.1 | 3.11x |
-| 8 | 1,188.6 | 3,298.7 | 2.78x |
-| 64 | 7,858.5 | 20,000.4 | 2.55x |
-| 256 | 18,911.1 | 35,181.0 | 1.86x |
+| 1 | 316.4 | 506.3 | 1.60x |
+| 8 | 1,969.0 | 3,068.4 | 1.56x |
+| 64 | 13,080.5 | 16,457.3 | 1.26x |
+| 256 | 26,187.1 | 31,366.1 | 1.20x |
 
-vLLM stays faster at every batch size. The gap narrows to 1.86x at 256 requests and is widest
-at batch 1 (3.11x). Batch 1 has no batching effect, so batching cannot explain that gap. The two
+vLLM stays faster at every batch size. The gap narrows to 1.20x at 256 requests and is widest
+at batch 1 (1.60x). Batch 1 has no batching effect, so batching cannot explain that gap. The two
 systems use different dependency stacks (Torch 2.8 / CUDA 12.8 against Torch 2.11 / CUDA 13.0).
-[Findings entry 12](findings.md#12-the-comparison-that-matters-vllm-on-the-same-host) compares
-these ratios with an earlier run of the same harness.
+[Findings entry 24](findings.md) has every arm, and
+[findings entry 12](findings.md#12-the-comparison-that-matters-vllm-on-the-same-host) has the
+run before fused kernels, on an A100-SXM4 host.
 
 `FlashInferPagedAttention` is the `auto` choice for CUDA fp16/bf16 Esme bundles and needs the
 `gpu` extra (`uv sync --extra gpu`); the Modal harnesses bake it into the shared GPU image. To
