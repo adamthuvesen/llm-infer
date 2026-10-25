@@ -26,7 +26,6 @@ import json
 import math
 import os
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import modal
@@ -53,44 +52,14 @@ app = modal.App("llm-infer-esme-fusion-ab")
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
-class Elementwise:
-    """Switches the model modules between the original and ``torch.compile`` elementwise functions.
-
-    The bundle model and the decode graphs look ``rms_norm`` and ``apply_rope`` up as module
-    globals at call time, so a switch before an engine captures routes its graphs through that
-    version, and a switch before each decode routes that arm's eager prefill the same way.
-    The compiled functions are built once, so switching back does not recompile.
-    """
-
-    def __init__(self) -> None:
-        import torch
-
-        import llm_infer.model.decode_graph as decode_graph_module
-        import llm_infer.model.pretrain_bundle as bundle_module
-        from llm_infer.model import rope_utils
-
-        self._bundle = bundle_module
-        self._decode_graph = decode_graph_module
-        compiled_rms_norm = torch.compile(rope_utils.rms_norm, dynamic=True)
-        self._versions: dict[bool, tuple[Callable, Callable]] = {
-            False: (rope_utils.rms_norm, rope_utils.apply_rope),
-            True: (compiled_rms_norm, torch.compile(rope_utils.apply_rope, dynamic=True)),
-        }
-
-    def use(self, *, fused: bool) -> None:
-        rms_norm, apply_rope = self._versions[fused]
-        self._bundle.rms_norm = rms_norm
-        self._bundle.apply_rope = apply_rope
-        self._decode_graph.rms_norm = rms_norm
-
-
-def _arm_rows(runtime, batch_sizes: list[int], elementwise: Elementwise):
+def _arm_rows(runtime, batch_sizes: list[int]):
     """Per-batch walls for both arms on persistent engines, plus each arm's final outputs."""
     import statistics
 
     import torch
 
     from llm_infer.benchmarks.esme_paged import build_requests
+    from llm_infer.model.fused_elementwise import use_fused_elementwise
     from llm_infer.serving import InferenceEngine, Request
 
     model = runtime.model
@@ -103,7 +72,7 @@ def _arm_rows(runtime, batch_sizes: list[int], elementwise: Elementwise):
         engines = {}
         build_s = {}
         for arm in ARMS:
-            elementwise.use(fused=arm == "full_step_fused")
+            use_fused_elementwise(arm == "full_step_fused")
             start = time.perf_counter()
             engines[arm] = InferenceEngine(
                 model,
@@ -126,7 +95,7 @@ def _arm_rows(runtime, batch_sizes: list[int], elementwise: Elementwise):
                 )
 
         def decode(arm: str, engines=engines) -> float:
-            elementwise.use(fused=arm == "full_step_fused")
+            use_fused_elementwise(arm == "full_step_fused")
             engine = engines[arm]
             submit(engine)
             engine.step()
@@ -146,7 +115,7 @@ def _arm_rows(runtime, batch_sizes: list[int], elementwise: Elementwise):
                 walls[arm].append(decode(arm))
         row: dict[str, object] = {"batch_size": size}
         for arm in ARMS:
-            elementwise.use(fused=arm == "full_step_fused")
+            use_fused_elementwise(arm == "full_step_fused")
             submit(engines[arm])
             outputs[arm][size] = engines[arm].run()
             runner = engines[arm].grouped_decode_runners[size]
@@ -162,7 +131,7 @@ def _arm_rows(runtime, batch_sizes: list[int], elementwise: Elementwise):
             }
             if runner.steps_handled == 0:
                 raise AssertionError(f"{arm}: the grouped runner never ran at batch {size}")
-        elementwise.use(fused=False)
+        use_fused_elementwise(False)
         rows.append(row)
         print(
             f"[fusion] b{size}: full_step {row['full_step']['wall_ms_per_token_step']:.3f} -> "
@@ -199,11 +168,10 @@ def fusion_ab(batch_sizes: list[int]) -> str:
     runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    elementwise = Elementwise()
     # Piecewise buckets serve ramp-up steps below the exact batch. They are captured with the
     # original functions, so both arms share them.
     enable_decode_graphs_if_cuda(runtime.model, tuple(sorted(set(batch_sizes))))
-    rows, outputs = _arm_rows(runtime, batch_sizes, elementwise)
+    rows, outputs = _arm_rows(runtime, batch_sizes)
     stall_guard.progress()
 
     oracle_runtime = load_model_runtime(
