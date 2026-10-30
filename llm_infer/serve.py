@@ -122,7 +122,7 @@ def build_app_from_runtime(
         # Auto-enable only where grouped steps can actually run: capture needs a CUDA
         # bundle model on a native paged backend, and dispatch happens only inside
         # deferred decode windows — which per-step windows, preemption, and speculative
-        # decoding all disable (see ``_window_eligible`` in serving/engine_decode.py).
+        # decoding all disable (see ``_window_eligible`` in serving/engine.py).
         # Anything else would pay capture time and memory for a permanently-zero hit
         # counter. Explicit ``True`` still forces it for tests and debugging.
         grouped_decode_graphs = (

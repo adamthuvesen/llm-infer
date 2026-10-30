@@ -149,16 +149,24 @@ checkout `../esme-posttrain/exports/esme-214m-chat`.
 
 ## Development
 
+Use Python 3.13, `uv`, and Node 24. CI uses the same `make check` command.
+
 ```bash
 uv sync --extra dev --extra serving
 make check
 ```
 
-`make check` runs lint, format check, types, and the CPU test suite. The slow 3B Qwen reference
-checks are opt-in: `uv run pytest tests/correctness -q -m slow`. `make reproduce` re-derives the
+`make help` lists commands and their purpose. `make check` first checks the policy import boundary.
+It then runs lint, formatting, package and evidence CLI types, CPU tests, benchmark evidence checks,
+and visualizer tests. The slow 3B Qwen reference checks are opt-in:
+`uv run pytest tests/correctness -q -m slow`. `make reproduce` re-derives the
 committed benchmark verdicts without a GPU. GPU benchmarks run on Modal A100s through the
 `scripts/modal_esme_*` harnesses. Findings entries 12 onward name the command that produced
 their record.
+
+Import Linter reports a forbidden dependency with its source line.
+Policy readers use `benchmarks.reference_policy.EsmeAgreement` without importing inference execution.
+Correct the dependency, then run `make architecture-check` and `make check`.
 
 ## Documentation
 

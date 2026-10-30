@@ -18,6 +18,7 @@ import pytest
 
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
+from llm_infer.serving.server.app import _template_token_ids
 from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 VOCAB = 37
@@ -53,6 +54,20 @@ class TinyTokenizer:
             text += "\nassistant:"
         ids = self.encode(text)
         return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+
+@pytest.mark.parametrize("rendered", [[1, 2], {"input_ids": [1, 2]}, {"input_ids": [[1, 2]]}])
+def test_chat_template_token_ids_accept_tokenizer_outputs(rendered: object) -> None:
+    assert _template_token_ids(rendered) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [None, "12", {"input_ids": "12"}, [1.5], ["1"], [True], [[1, "2"]]],
+)
+def test_chat_template_token_ids_reject_malformed_outputs(rendered: object) -> None:
+    with pytest.raises(TypeError, match="chat template token ids"):
+        _template_token_ids(rendered)
 
 
 def _build_app(*, block_size: int = 8, num_blocks: int = 64):

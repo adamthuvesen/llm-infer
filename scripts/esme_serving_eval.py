@@ -1322,7 +1322,7 @@ def _reference_summary(
     group is ``replay_divergent`` and sends the row to review — real nondeterminism and
     admission-composition drift both land there rather than passing silently.
     """
-    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
+    from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     details: list[dict[str, object]] = []

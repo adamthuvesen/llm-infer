@@ -20,6 +20,10 @@ import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 
+# The nsys child and its record use the same execution counts (findings entry 16).
+TIMELINE_WARMUP_RUNS = 3
+TIMELINE_MEASURED_RUNS = 1
+
 
 def normalize_at_eos(token_ids: Iterable[int], eos_token_ids: frozenset[int]) -> list[int]:
     """The scored continuation: tokens up to and including the first EOS (or all of them).

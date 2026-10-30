@@ -18,13 +18,13 @@ import torch
 import llm_infer.model.decode_graph as decode_graph_module
 import llm_infer.model.pretrain_bundle as bundle_module
 from llm_infer.benchmarks.esme_paged import build_requests
+from llm_infer.benchmarks.report import TIMELINE_MEASURED_RUNS, TIMELINE_WARMUP_RUNS
 from llm_infer.model import rope_utils
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serving import InferenceEngine, Request
 
 BLOCK_SIZE = 128
-WARMUP_RUNS = 3
 
 
 def main() -> None:
@@ -71,14 +71,15 @@ def main() -> None:
         prefill()
         decode()
     enable_decode_graphs_if_cuda(runtime.model, (args.batch,))
-    for _ in range(WARMUP_RUNS):
+    for _ in range(TIMELINE_WARMUP_RUNS):
         prefill()
         decode()
 
-    prefill()
-    torch.cuda.profiler.start()
-    decode()
-    torch.cuda.profiler.stop()
+    for _ in range(TIMELINE_MEASURED_RUNS):
+        prefill()
+        torch.cuda.profiler.start()
+        decode()
+        torch.cuda.profiler.stop()
 
 
 if __name__ == "__main__":

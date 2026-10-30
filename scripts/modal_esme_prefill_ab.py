@@ -39,6 +39,7 @@ from pathlib import Path
 
 import modal
 
+from llm_infer.benchmarks.reference_policy import EsmeAgreement, reference_status
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -202,22 +203,9 @@ def stability_summary(
     return summary
 
 
-def agreement_dict(agreement) -> dict[str, object]:  # noqa: ANN001 - EsmeAgreement is remote-only
+def agreement_dict(agreement: EsmeAgreement) -> dict[str, object]:
     """Flatten an ``EsmeAgreement`` into the JSON status/counts a row records."""
-    from llm_infer.benchmarks.reference_policy import reference_status
-
-    return {
-        "status": reference_status(agreement),
-        "exact": agreement.exact,
-        "tie": agreement.tie,
-        "nontie": agreement.nontie,
-        "total": agreement.total,
-        "ties_sample": agreement.ties_sample,
-        "divergences_sample": agreement.divergences_sample,
-        "review_required": agreement.review_required,
-        "failed": agreement.failed,
-        "numerical_evidence": agreement.numerical_evidence,
-    }
+    return {"status": reference_status(agreement), **agreement.as_dict()}
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -1102,7 +1090,7 @@ def diagnose_prefill_divergence(
         reference_outputs,
         requests_at_context_length,
     )
-    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
+    from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
     from llm_infer.kv_cache.block_table import BlockTable
     from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda

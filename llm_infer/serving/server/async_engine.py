@@ -6,7 +6,7 @@ import asyncio
 import itertools
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -56,7 +56,7 @@ class _Stream:
     eos_token_ids: frozenset[int] = field(default_factory=frozenset)
     # Set when the engine refuses this submission on the background thread; the consumer
     # re-raises it so the failure surfaces loudly instead of hanging on an empty stream.
-    error: Exception | None = None
+    error: BaseException | None = None
 
 
 class AsyncInferenceEngine:
@@ -167,7 +167,7 @@ class AsyncInferenceEngine:
         eos_token_ids: frozenset[int],
         sampling: SamplingParams = GREEDY,
         prefix_group_id: str | None = None,
-    ) -> AsyncIterator[TokenStreamItem]:
+    ) -> AsyncGenerator[TokenStreamItem]:
         """Yield generated tokens for one request until it finishes or the caller cancels.
 
         Submits the request to the loop (carrying its per-request ``sampling`` and optional

@@ -101,7 +101,7 @@ def test_window_runs_per_scheduler_pass_and_flushes_one_window_behind(runtime) -
     # flush, but its tokens are not visible yet — the copy is consumed one window behind.
     staged = engine.step()
     assert not staged.tokens
-    assert engine._pending_flush is not None
+    assert engine._decode_windows.pending is not None
 
     # The next window pipelines behind the stage (budget 8-4=4); flushing it consumes the
     # first window's tokens.
@@ -114,7 +114,7 @@ def test_window_runs_per_scheduler_pass_and_flushes_one_window_behind(runtime) -
     second_burst = engine.step()
     assert [len(tokens) for tokens in second_burst.tokens.values()] == [4]
     assert second_burst.finished == ["r0"]
-    assert engine._pending_flush is None
+    assert engine._decode_windows.pending is None
 
 
 def test_window_budget_respects_length_cap(runtime) -> None:
@@ -212,11 +212,12 @@ def test_prefix_group_reenters_window_after_sibling_releases(runtime) -> None:
     assert ("long",) in opened_for
 
 
-def test_abort_flush_lands_in_next_step_result(runtime) -> None:
+@pytest.mark.parametrize("decode_steps", [1, 3])
+def test_abort_flush_lands_in_next_step_result(runtime, decode_steps: int) -> None:
     """Aborting mid-window flushes survivors' deferred tokens into the next step result."""
     # num_blocks=4 admits only two of the three 2-block requests, so the waiting queue
     # pauses the multi-step loop and the window genuinely spans passes before the abort.
-    engine = _engine(runtime, window=8, num_blocks=4)
+    engine = _engine(runtime, window=2, num_blocks=4)
     keep = Request("keep", [1, 4, 7], 14, frozenset())
     engine.add_request(keep)
     engine.add_request(Request("drop", [2, 5], 14, frozenset()))
@@ -224,13 +225,20 @@ def test_abort_flush_lands_in_next_step_result(runtime) -> None:
 
     first = engine.step()  # prefill keep+drop; waiter held back by the block budget
     assert first.admitted == ["keep", "drop"]
-    engine.step()  # one deferred decode step, tokens pending on device
-    assert engine._decode_window is not None
+    delivered = list(first.tokens["keep"])
+    for _ in range(decode_steps):
+        delivered.extend(engine.step().tokens.get("keep", []))
+    assert engine._decode_windows.active is not None
+    assert (engine._decode_windows.pending is not None) == (decode_steps == 3)
     assert engine.abort("drop") is True
+    assert engine._decode_windows.active is None
+    assert engine._decode_windows.pending is None
 
     result = engine.step()  # carries the abort-time flush for the surviving requests
     assert result.tokens.get("keep"), "abort-time flush must reach the next step result"
+    delivered.extend(result.tokens.get("keep", []))
     while engine.scheduler.has_work():
-        engine.step()
+        delivered.extend(engine.step().tokens.get("keep", []))
     reference = greedy_decode(runtime.model, [1, 4, 7], max_new_tokens=14, eos_token_ids=set())
     assert keep.generated == reference
+    assert delivered == reference

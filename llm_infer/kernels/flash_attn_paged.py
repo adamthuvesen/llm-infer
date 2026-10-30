@@ -29,16 +29,38 @@ key positions ``0 .. kv_len - q_len + i`` — lower-triangular on prefill
 
 from __future__ import annotations
 
+import importlib
 import math
+from typing import Protocol, cast
 
 import torch
 
 from llm_infer.kernels.base import validate_packed_prefill_inputs
 
+
+class _FlashAttnVarlen(Protocol):
+    def __call__(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        dropout_p: float,
+        softmax_scale: float,
+        causal: bool,
+    ) -> torch.Tensor: ...
+
+
 # flash-attn only builds/imports on CUDA. Importing this module on a CPU-only host (the
 # dev Mac) must not explode at import time — only at construction, with a clear message.
 try:
-    from flash_attn import flash_attn_varlen_func
+    flash_attn_varlen_func: _FlashAttnVarlen | None = cast(
+        _FlashAttnVarlen, importlib.import_module("flash_attn").flash_attn_varlen_func
+    )
 except ImportError:  # pragma: no cover - exercised only on the CPU dev host
     flash_attn_varlen_func = None
 
@@ -61,6 +83,7 @@ class FlashAttnPagedAttention:
                 "flash-attn is not available; FlashAttnPagedAttention needs a CUDA build "
                 "of flash-attn. Run it on the target GPU (Modal A100), not the CPU host."
             )
+        self._varlen = flash_attn_varlen_func
         # Decode-batch cu_seqlens_q is always 0..B — cache the arange instead of launching a
         # fresh one per layer per decode step. Sliced views serve any batch up to the cached
         # size; the cache regrows (and re-pins its device) when a bigger batch arrives.
@@ -91,7 +114,7 @@ class FlashAttnPagedAttention:
         cu_seqlens_q = torch.tensor([0, q_len], dtype=torch.int32, device=q.device)
         cu_seqlens_k = torch.tensor([0, kv_len], dtype=torch.int32, device=k.device)
 
-        out = flash_attn_varlen_func(
+        out = self._varlen(
             q,
             k,
             v,
@@ -126,7 +149,7 @@ class FlashAttnPagedAttention:
         v = value.contiguous().to(_KERNEL_DTYPE)
 
         cu_seqlens_q = self._decode_arange(batch + 1, q.device)
-        out = flash_attn_varlen_func(
+        out = self._varlen(
             q,
             k,
             v,
@@ -155,7 +178,7 @@ class FlashAttnPagedAttention:
         q = query.contiguous().to(_KERNEL_DTYPE)
         k = key.contiguous().to(_KERNEL_DTYPE)
         v = value.contiguous().to(_KERNEL_DTYPE)
-        out = flash_attn_varlen_func(
+        out = self._varlen(
             q,
             k,
             v,

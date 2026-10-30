@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 
 from llm_infer.model.decode import greedy_decode
-from llm_infer.model.interface import CausalLMBackend
+from llm_infer.model.interface import CausalLMBackend, TokenizerLike
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ HEADLINE_PROMPTS = (
 
 
 def build_requests(
-    tokenizer: object, num_requests: int, prompts: tuple[str, ...] = DEFAULT_PROMPTS
+    tokenizer: TokenizerLike, num_requests: int, prompts: tuple[str, ...] = DEFAULT_PROMPTS
 ) -> list[EsmeBenchRequest]:
     """Render ``num_requests`` chat prompts to token ids, cycling the prompt pool."""
     if num_requests < 1:
@@ -116,7 +116,7 @@ def requests_at_context_length(
 
 
 def single_request_prompt_coverage(
-    tokenizer: object,
+    tokenizer: TokenizerLike,
     context_lengths: tuple[int, ...],
     prompts: tuple[str, ...] = HEADLINE_PROMPTS,
 ) -> list[tuple[int, EsmeBenchRequest]]:

@@ -23,6 +23,7 @@ sequence grows); the scheduler tracks a *budget* against the pool size.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -70,10 +71,35 @@ class Scheduler:
         self.num_blocks = num_blocks
         self.block_size = block_size
         self.preemption = preemption
-        self.waiting: deque[Request] = deque()
-        self.running: list[Request] = []
+        self._waiting: deque[Request] = deque()
+        self._running: list[Request] = []
         self.committed_blocks = 0
         self._committed_by_request: dict[str, int] = {}
+
+    @property
+    def waiting(self) -> Collection[Request]:
+        """Read-only queue view. Queue mutations belong to the scheduler."""
+        return self._waiting
+
+    @property
+    def running(self) -> Sequence[Request]:
+        """Read-only running view. Membership changes belong to the scheduler."""
+        return self._running
+
+    def is_running(self, request: Request) -> bool:
+        """Check live membership by identity, including during preemption."""
+        return any(candidate is request for candidate in self._running)
+
+    def cancel(self, request: Request) -> bool:
+        """Remove a waiting or running request and release its reservation."""
+        if self.is_running(request):
+            self.release(request)
+            return True
+        for candidate in self._waiting:
+            if candidate is request:
+                self._waiting.remove(candidate)
+                return True
+        return False
 
     def add(self, request: Request) -> None:
         """Queue a request. Rejects one too large to ever fit the whole pool.
@@ -88,7 +114,7 @@ class Scheduler:
                 f"request {request.request_id!r} needs up to {need} blocks but the pool "
                 f"holds {self.num_blocks}; it can never be admitted"
             )
-        self.waiting.append(request)
+        self._waiting.append(request)
 
     def requeue(self, request: Request) -> None:
         """Return a preempted request to the *front* of the queue for prompt re-admission.
@@ -96,9 +122,9 @@ class Scheduler:
         Front, not back: a preempted request has already made progress, so it should
         reclaim a slot ahead of never-started newcomers rather than starve behind them.
         """
-        self.running.remove(request)
+        self._running.remove(request)
         self.committed_blocks -= self._pop_committed_budget(request)
-        self.waiting.appendleft(request)
+        self._waiting.appendleft(request)
 
     def admit(self, *, free_blocks: int | None = None) -> list[Request]:
         """Move waiting requests into the running set while their budget fits.
@@ -113,8 +139,8 @@ class Scheduler:
             raise ValueError("preemption admission needs the current free-block count")
         admitted: list[Request] = []
         remaining_free = free_blocks if free_blocks is not None else 0
-        while self.waiting:
-            request = self.waiting[0]
+        while self._waiting:
+            request = self._waiting[0]
             if self.preemption:
                 need = blocks_for_footprint(request, self.block_size)
                 if need > remaining_free:
@@ -124,8 +150,8 @@ class Scheduler:
                 need = max_blocks_for(request, self.block_size)
                 if self.committed_blocks + need > self.num_blocks:
                     break
-            self.waiting.popleft()
-            self.running.append(request)
+            self._waiting.popleft()
+            self._running.append(request)
             self.committed_blocks += need
             self._committed_by_request[request.request_id] = need
             admitted.append(request)
@@ -133,7 +159,7 @@ class Scheduler:
 
     def release(self, request: Request) -> None:
         """Drop a finished request from the running set and return its block budget."""
-        self.running.remove(request)
+        self._running.remove(request)
         self.committed_blocks -= self._pop_committed_budget(request)
 
     def _pop_committed_budget(self, request: Request) -> int:
@@ -154,10 +180,10 @@ class Scheduler:
         evicting it would both discard a completed output and raise (recompute refuses a finished
         request). The engine releases finishers promptly, so this is also a belt-and-suspenders.
         """
-        for request in reversed(self.running):
+        for request in reversed(self._running):
             if request is not exclude and not request.finished:
                 return request
         return None
 
     def has_work(self) -> bool:
-        return bool(self.waiting or self.running)
+        return bool(self._waiting or self._running)

@@ -6,8 +6,9 @@ import pytest
 import torch
 
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
-from llm_infer.benchmarks.esme_three_way import EsmeAgreement, tie_tolerant_agreement
+from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from llm_infer.benchmarks.reference_policy import (
+    EsmeAgreement,
     build_reference_only_record,
     build_system_evidence_record,
     normalized_outputs_match,
@@ -68,16 +69,21 @@ def test_reference_status_rejects_an_empty_agreement() -> None:
 
 def test_reference_status_rejects_counts_that_do_not_add_up() -> None:
     short = EsmeAgreement(exact=1, tie=0, nontie=0, total=2, ties_sample=[], divergences_sample=[])
-    with pytest.raises(ValueError, match="must equal total"):
+    with pytest.raises(ValueError, match="must equal total") as error:
         reference_status(short)
+    assert "exact=1, tie=0, nontie=0, total=2" in str(error.value)
+    assert "Classify every measured request once" in str(error.value)
+    assert "build_system_evidence_record()" in str(error.value)
 
 
 def test_reference_status_rejects_an_unclassified_nontie() -> None:
     unclassified = EsmeAgreement(
         exact=0, tie=0, nontie=1, total=1, ties_sample=[], divergences_sample=[]
     )
-    with pytest.raises(ValueError, match="review_required \\+ failed"):
+    with pytest.raises(ValueError, match="review_required \\+ failed") as error:
         reference_status(unclassified)
+    assert "nontie=1, review_required=0, failed=0" in str(error.value)
+    assert "Classify every non-tie as review_required or failed" in str(error.value)
 
 
 def test_normalized_outputs_match_truncates_at_eos() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -14,10 +14,18 @@ from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kernels.torch_sdpa import TorchSdpaAttention
+from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+from llm_infer.model.grouped_decode_graph import (
+    EngineOwnedGroupedDecodeGraphRunner,
+    build_engine_grouped_runners,
+)
 from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
+    QWEN_CAPABILITIES,
     BackendCapabilities,
+    CausalLMBackend,
+    DeclaredCapabilitiesBackend,
     ModelRuntime,
     TokenizerLike,
 )
@@ -102,6 +110,56 @@ def available_backends() -> tuple[str, ...]:
     return tuple(sorted(_LOADERS))
 
 
+def resolve_backend_capabilities(model: CausalLMBackend) -> BackendCapabilities:
+    """Resolve known models or require an injected backend's explicit declaration."""
+    if isinstance(model, PretrainBundleModel):
+        return replace(
+            DENSE_CAPABILITIES,
+            flash_attention=isinstance(
+                model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
+            ),
+            batched_prefill=isinstance(model.backend, PackedPrefillAttentionBackend),
+        )
+    if isinstance(model, QwenModel):
+        return replace(
+            QWEN_CAPABILITIES,
+            flash_attention=isinstance(
+                model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
+            ),
+        )
+    if isinstance(model, DeclaredCapabilitiesBackend):
+        return model.capabilities
+    raise ValueError(
+        f"backend {type(model).__name__!r} must declare capabilities or pass capabilities="
+    )
+
+
+def prepare_engine_grouped_decode(
+    model: CausalLMBackend,
+    cache: PagedKVCache,
+    capabilities: BackendCapabilities,
+    *,
+    capture_sizes: tuple[int, ...],
+    grouped_layers: int | None,
+    shared_workspace: bool,
+) -> dict[int, EngineOwnedGroupedDecodeGraphRunner]:
+    """Construct model-specific grouped graphs against the engine-owned cache."""
+    if not capabilities.planned_decode or not isinstance(model, PretrainBundleModel):
+        raise ValueError(
+            "grouped_decode_graphs requires a bundle model with planned decode; "
+            "omit it for this backend"
+        )
+    # Four layers preserves the raw-engine benchmark configuration. Serving passes all layers.
+    layers = min(4, model.num_layers) if grouped_layers is None else grouped_layers
+    return build_engine_grouped_runners(
+        model,
+        cache,
+        capture_sizes,
+        grouped_layers=layers,
+        shared_workspace=shared_workspace,
+    )
+
+
 def load_model_runtime(
     backend: str,
     *,
@@ -169,14 +227,7 @@ def _load_qwen_runtime(
         model_id=resolved_model_id,
         revision=resolved_revision,
     )
-    capabilities = BackendCapabilities(
-        paged_kv=True,
-        prefix_caching=True,
-        speculative=True,
-        flash_attention=isinstance(
-            model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
-        ),
-    )
+    capabilities = resolve_backend_capabilities(model)
     eos_token_ids = _generation_eos_ids(
         model_id=resolved_model_id,
         revision=resolved_revision,
@@ -289,18 +340,7 @@ def _load_bundle_runtime(
         default_add_special_tokens=tokenizer_metadata.add_special_tokens,
         chat_template=tokenizer_metadata.chat_template,
     )
-    # Bundle backends expose the full shared-engine capability set; flash_attention reflects
-    # the actual backend (torch_naive unless a flash backend is passed in).
-    capabilities = BackendCapabilities(
-        paged_kv=DENSE_CAPABILITIES.paged_kv,
-        prefix_caching=DENSE_CAPABILITIES.prefix_caching,
-        speculative=DENSE_CAPABILITIES.speculative,
-        flash_attention=isinstance(
-            model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
-        ),
-        planned_decode=DENSE_CAPABILITIES.planned_decode,
-        batched_prefill=isinstance(model.backend, PackedPrefillAttentionBackend),
-    )
+    capabilities = resolve_backend_capabilities(model)
     return ModelRuntime(
         backend_id=backend_id,
         model_id=_dense_model_id(manifest, root),

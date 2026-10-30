@@ -183,7 +183,7 @@ def sweep_baseline(
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.profiling import TimingProfiler, attach_host_method_profile
+    from llm_infer.profiling import TimingProfiler
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
@@ -312,12 +312,6 @@ def sweep_baseline(
             )
             # KV peak is diagnostic. Keep allocator callbacks out of steady-state timing.
             profile_engine.cache.allocator.observer = peak
-            attach_host_method_profile(
-                profiler,
-                profile_engine,
-                "window_flushing",
-                ("_stage_window_flush", "_consume_window_flush"),
-            )
             for request in requests:
                 profile_engine.add_request(
                     Request(

@@ -22,7 +22,7 @@ from llm_infer.benchmarks.esme_gallery import (
     run_prefix_cache_on_off,
     run_speculative_batch1,
 )
-from llm_infer.benchmarks.esme_three_way import EsmeAgreement
+from llm_infer.benchmarks.reference_policy import EsmeAgreement
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serving.speculative import SpeculativeDecodingConfig

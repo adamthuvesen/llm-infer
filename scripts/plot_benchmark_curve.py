@@ -35,6 +35,14 @@ from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+# PEP 723 runs in an isolated environment, without installing the inference package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from llm_infer.benchmarks.reference_policy import (  # noqa: E402
+    benchmark_rows,
+    headline_tokens_per_second,
+)
+
 # Style contract: match esme-pretrain scripts/plot_run_telemetry.py (the shared card spec).
 FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
 TITLE_COLOR = "#1f2937"
@@ -61,20 +69,11 @@ LADDER_SYSTEMS = (
 FULL_ENGINE = LADDER_SYSTEMS[-1][0]
 
 
-def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
-    """Read the policy-v2 benchmark rows."""
-    rows = record.get("rows")
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise ValueError(f"{path}: expected a rows list")
-    return rows
-
-
 def _require_headline_row(path: Path, row: dict) -> None:
-    if row.get("policy_version") != 2 or row.get("headline_eligible") is not True:
-        raise ValueError(
-            f"{path}: {row['system']} batch={row['batch_size']} is not a headline-eligible "
-            "policy-v2 row"
-        )
+    try:
+        headline_tokens_per_second(row)
+    except ValueError as error:
+        raise ValueError(f"{path}: {row['system']} batch={row['batch_size']}: {error}") from error
 
 
 def load_rows(path: Path) -> dict[str, list[dict]]:
@@ -86,16 +85,11 @@ def load_rows(path: Path) -> dict[str, list[dict]]:
     """
     record = json.loads(path.read_text(encoding="utf-8"))
     by_system: dict[str, list[dict]] = {"llm_infer": [], "hf_sequential": []}
-    for row in _record_rows(record, path):
+    for row in benchmark_rows(record):
         system = row["system"]
         if system not in by_system:
             continue
         _require_headline_row(path, row)
-        if row.get("tokens_per_second") is None:
-            raise ValueError(
-                f"{path}: {system} batch={row['batch_size']} reports no tok/s "
-                "(reference gate failed); the figure only plots gated rows"
-            )
         by_system[system].append(row)
     for system, rows in by_system.items():
         if not rows:
@@ -292,11 +286,11 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
 
 
 def load_ladder_rows(path: Path) -> dict[int, dict[str, float]]:
-    """Raw tok/s per batch and ladder system; any ungated row is a hard error."""
+    """Qualified tok/s per batch and ladder system; any ungated row is a hard error."""
     record = json.loads(path.read_text(encoding="utf-8"))
     wanted = {system for system, _ in LADDER_SYSTEMS}
     by_batch: dict[int, dict[str, float]] = {}
-    for row in _record_rows(record, path):
+    for row in benchmark_rows(record):
         system = row["system"]
         if system not in wanted:
             continue

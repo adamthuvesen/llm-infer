@@ -74,16 +74,23 @@ experiment only to move its record to a newer policy format.
 
 ## Development
 
-Managed with [`uv`](https://docs.astral.sh/uv/). Python 3.13 only, to match the GPU image.
+Use Python 3.13 to match the GPU image, [`uv`](https://docs.astral.sh/uv/), and Node 24 for
+visualizer tests. CI installs Node 24 and runs the same check command.
 
 ```bash
-uv sync --extra dev --extra serving   # dev tests + HTTP server deps
-uv run ruff check                     # lint (must be clean)
-uv run mypy llm_infer                 # package type check
-uv run pytest tests/correctness -q    # fast CPU reference check (slow 3B reference checks deselected)
-make check                            # lint, format, types, and full fast suite before merge
-uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU reference check
+uv sync --extra dev --extra serving
+make check
 ```
+
+`make help` lists commands from their target descriptions.
+`make check` first checks policy imports, then runs lint, formatting, types, and the fast Python suite.
+It also runs benchmark evidence checks and visualizer tests.
+`make reproduce` runs the benchmark evidence check alone.
+Use `uv run pytest tests/correctness -q -m slow` for the opt-in 3B reference check.
+
+An architecture failure lists the forbidden import path and its source line.
+Keep agreement data in `benchmarks.reference_policy.EsmeAgreement` and execution code outside policy readers.
+After correcting the import, run `make architecture-check`, then `make check`.
 
 The local check is **CPU-runnable**: no GPU required. The slow 3B reference checks are opt-in
 because they load the pinned Qwen model and can take minutes on CPU.
@@ -96,6 +103,32 @@ calls `stall_guard.arm()` from `scripts/modal_stall_guard.py` and `stall_guard.p
 each row or batch, so a stall exits with thread stacks instead of running to its timeout. Run
 GPU jobs one at a time unless the experiment needs them together. Whoever launches a background
 run also watches its log and raises an alarm after 10 minutes without output.
+
+## Enforced Rules
+
+| Rule | Enforcement | Proof | Added |
+| --- | --- | --- | --- |
+| Policy readers must not import inference execution | Import Linter checks direct and indirect imports in `pyproject.toml` | `make architecture-check` | 2026-11-04 |
+| Package and evidence CLI code must typecheck | `pyproject.toml` lists checked paths without package exclusions | `make typecheck` | 2026-11-04 |
+| Public tok/s requires qualified fp32 reference evidence | `benchmarks/reference_policy.py` constructs and reads policy-v2 evidence | `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
+| A/B parity and fp32 reference status stay separate | `benchmarks/paired_ab.py` judges records through the reference policy | `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
+| Deferred tokens survive abort and batch changes | `serving/decode_window.py` owns staged buffers, `serving/engine.py` consumes them | `tests/serving/test_decode_window.py` | 2026-11-04 |
+| Scheduler membership changes use scheduler methods | `Scheduler.waiting` and `Scheduler.running` expose read-only collection types | `make typecheck`, `tests/scheduler/test_scheduler.py` | 2026-11-04 |
+| Trace replay rejects malformed events | `tracing.py` defines events, `visualizer/trace_loader.js` validates input | `tests/serving/test_tracing.py`, `make visualizer-test` | 2026-11-04 |
+
+Module paths in these tables start inside `llm_infer/`.
+Test paths, visualizer paths, and `pyproject.toml` start at the repository root.
+The scheduler views restrict typed callers. They expose live collections and do not enforce
+runtime immutability. Change membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
+
+## Change Navigation
+
+| Change | Start here | Check |
+| --- | --- | --- |
+| Backend support or grouped graph construction | `model/interface.py`, `model/runtime.py` | `tests/model/test_runtime.py`, `tests/serving/test_engine_grouped_decode.py` |
+| Request lifecycle, decode windows, or KV release | `serving/engine.py`, `serving/decode_window.py`, `scheduler/scheduler.py` | `tests/serving/test_decode_window.py`, `tests/correctness/` |
+| Benchmark qualification or A/B verdicts | `benchmarks/reference_policy.py`, `benchmarks/paired_ab.py` | `tests/benchmarks/`, `make evidence-check` |
+| Trace events or replay | `tracing.py`, `visualizer/trace_loader.js` | `tests/serving/test_tracing.py`, `make visualizer-test` |
 
 ## Conventions
 

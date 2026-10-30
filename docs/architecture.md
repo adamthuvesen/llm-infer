@@ -75,9 +75,9 @@ flowchart TB
 | [`kernels/`](../llm_infer/kernels/) | causal attention implementations behind `AttentionBackend` | RoPE, GQA expansion, paging |
 | [`kv_cache/`](../llm_infer/kv_cache/) | physical K/V tensor pool, block ids, scatter/gather | attention math, admission policy |
 | [`scheduler/`](../llm_infer/scheduler/) | waiting queue, running set, block budget reservation | physical block allocation |
-| [`serving/`](../llm_infer/serving/) | request lifecycle, engine step loop, sampler, server integration | model weights, backend choice |
+| [`serving/`](../llm_infer/serving/) | request lifecycle, decode windows, engine step loop, sampler, server integration | model weights, backend choice |
 | [`tracing.py`](../llm_infer/tracing.py) | schema-versioned engine events for JSONL replay | visualizer rendering state |
-| [`benchmarks/`](../llm_infer/benchmarks/) | Esme and Qwen reference timing wrappers | reference correctness itself |
+| [`benchmarks/`](../llm_infer/benchmarks/) | workloads, timing, reference qualification, record validation, A/B verdicts | model execution inside the policy module |
 
 Dependency direction stays simple:
 
@@ -87,6 +87,23 @@ scripts/tests/server -> serving -> scheduler + model -> kv_cache + kernels
 
 The main swap point is [`AttentionBackend`](../llm_infer/kernels/base.py). Model backends
 prepare tensors, paging, RoPE positions, and GQA layout; attention backends compute attention.
+
+[`InferenceEngine`](../llm_infer/serving/engine.py) owns request mutation, scheduler transitions,
+KV release, and trace emission. Its methods keep admission, prefill, decode, preemption, and
+completion in one lifecycle owner.
+
+[`DecodeWindows`](../llm_infer/serving/decode_window.py) owns active windows, staged host copies,
+and cached EOS tensors. It retains device matrices until the engine consumes each stage.
+The engine records tokens, finishes requests, and releases KV after consumption.
+
+The scheduler exposes `waiting` as `Collection[Request]` and `running` as `Sequence[Request]`.
+These live views restrict typed callers without enforcing runtime immutability.
+Scheduler methods own membership and reservation changes, including `cancel()` for aborts.
+
+[`prepare_engine_grouped_decode()`](../llm_infer/model/runtime.py) resolves bundle-specific graph
+construction. The engine owns the resulting runners, which capture against that engine's KV cache.
+`resolve_backend_capabilities()` centralizes capability inference for registered and explicitly declared backends.
+Optional model operations use the protocols in [`model/interface.py`](../llm_infer/model/interface.py).
 
 ## Engine Step
 
@@ -102,11 +119,12 @@ prepare tensors, paging, RoPE positions, and GQA layout; attention backends comp
 The batch changes over time: finished requests leave, waiting requests enter, and long prompts
 can prefill across several steps without fully blocking decode work.
 
-For an all-greedy batch with no speculation, preemption, tracing, or prefix sharing, the
-engine runs decode in **deferred windows** (`decode_window_size`, default 8; 1 restores the
-per-step path). Up to a window of decode steps runs per scheduler pass with sampled tokens
-kept on device, EOS/stop decided at one host sync per window, and, on bundle backends,
-per-step paging bookkeeping replaced by preallocated window buffers
+For greedy or penalty-free sampled batches without speculation, preemption, tracing, or prefix
+sharing, the engine runs decode in deferred windows. `decode_window_size` defaults to 8.
+A value of 1 restores the per-step path.
+Up to a window of decode steps runs per scheduler pass with sampled tokens kept on device.
+The engine checks EOS after one host synchronization per window.
+Bundle backends replace per-step paging bookkeeping with preallocated window buffers
 (`llm_infer/model/decode_plan.py`). Outputs are token-for-token identical to the per-step
 path; tokens become visible in window-sized bursts. Benchmark impact is summarized in
 [benchmark.md](benchmark.md).
@@ -155,6 +173,16 @@ review, while malformed output and confirmed bugs fail. Exact candidate/baseline
 a same-run relative claim even when both paths share a reference review. This distinction keeps
 correctness checks useful without suppressing evidence about whether an optimization changed the
 model's behavior.
+
+[`reference_policy.py`](../llm_infer/benchmarks/reference_policy.py) owns `EsmeAgreement` and typed
+policy records. It classifies agreement without importing model execution.
+`build_system_evidence_record()` constructs records with raw timing and qualified public timing.
+`headline_tokens_per_second()` validates persisted agreement and status before public tables read speed.
+
+[`paired_ab.py`](../llm_infer/benchmarks/paired_ab.py) validates paired records and applies their
+registered decision rule. The CLI in [`judge_paired_ab.py`](../scripts/judge_paired_ab.py) supplies
+file input and exit status. [`check_benchmark_evidence.py`](../scripts/check_benchmark_evidence.py)
+checks committed records, public tables, regenerated figures, and registered verdicts.
 
 ## Serving Surface
 

@@ -10,6 +10,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from llm_infer.benchmarks.reference_policy import (
+    POLICY_VERSION,
+    benchmark_rows,
+    headline_tokens_per_second,
+)
+from llm_infer.benchmarks.report import TIMELINE_MEASURED_RUNS, TIMELINE_WARMUP_RUNS
+
 ROOT = Path(__file__).resolve().parents[1]
 CURVE_RECORD = ROOT / "assets" / "esme-batch-curve.json"
 LADDER_RECORD = ROOT / "assets" / "esme-ablation-ladder-fused.json"
@@ -67,14 +74,10 @@ AB_VERDICTS = (
 )
 EXPECTED_BATCHES = (8, 16, 32, 64, 128, 256)
 PLOTTED_SYSTEMS = ("llm_infer", "hf_sequential")
-QUALIFIED_REFERENCE_STATUSES = frozenset({"exact", "accepted_numerical"})
 
 
 def _failures() -> list[str]:
-    record = json.loads(CURVE_RECORD.read_text(encoding="utf-8"))
-    rows = record.get("rows")
-    if not isinstance(rows, list):
-        return [f"{CURVE_RECORD}: expected top-level rows list"]
+    rows = benchmark_rows(json.loads(CURVE_RECORD.read_text(encoding="utf-8")))
 
     errors: list[str] = []
     by_system: dict[str, list[dict]] = {system: [] for system in PLOTTED_SYSTEMS}
@@ -82,7 +85,7 @@ def _failures() -> list[str]:
         system = row.get("system")
         if system in by_system:
             by_system[system].append(row)
-        if row.get("policy_version") != 2:
+        if row.get("policy_version") != POLICY_VERSION:
             errors.append(
                 f"{CURVE_RECORD}: {system} batch={row.get('batch_size')} does not declare "
                 "policy_version 2"
@@ -106,21 +109,32 @@ def _failures() -> list[str]:
             )
         for row in system_rows:
             batch = row.get("batch_size")
-            if row.get("reference_status") not in QUALIFIED_REFERENCE_STATUSES:
-                errors.append(f"{CURVE_RECORD}: {system} batch={batch} is not reference-gated")
-            if row.get("headline_eligible") is not True:
-                errors.append(f"{CURVE_RECORD}: {system} batch={batch} is not headline-eligible")
-            if row.get("tokens_per_second") is None:
-                errors.append(f"{CURVE_RECORD}: {system} batch={batch} has no tok/s")
-            agreement = row.get("agreement", {})
-            if agreement.get("nontie") != 0:
-                errors.append(f"{CURVE_RECORD}: {system} batch={batch} has non-tie divergence")
+            try:
+                headline_tokens_per_second(row)
+            except ValueError as error:
+                errors.append(f"{CURVE_RECORD}: {system} batch={batch}: {error}")
 
+    if errors:
+        return errors
     errors.extend(_doc_table_errors(by_system))
     errors.extend(_headline_table_errors())
     errors.extend(_figure_regeneration_errors())
     errors.extend(_ab_verdict_errors())
+    errors.extend(_timeline_config_errors())
     return errors
+
+
+def _timeline_config_errors() -> list[str]:
+    path = ROOT / "assets" / "esme-decode-timeline.json"
+    config = json.loads(path.read_text(encoding="utf-8"))["config"]
+    expected = {"warmup": TIMELINE_WARMUP_RUNS, "iters": TIMELINE_MEASURED_RUNS}
+    return [
+        f"{path}: {field}={config.get(field)} differs from child execution count {count}. "
+        "Record the shared TIMELINE_WARMUP_RUNS and TIMELINE_MEASURED_RUNS from "
+        "llm_infer/benchmarks/report.py; keep the measured timing unchanged."
+        for field, count in expected.items()
+        if config.get(field) != count
+    ]
 
 
 def _gated_rows(path: Path) -> tuple[dict[tuple[str, int, int], float], list[str]]:
@@ -130,22 +144,33 @@ def _gated_rows(path: Path) -> tuple[dict[tuple[str, int, int], float], list[str
     non-tie divergences, and carries the gated ``tokens_per_second``. Raw timing never feeds a
     public table, so an internally inconsistent record cannot pass as a speed claim.
     """
-    rows = json.loads(path.read_text(encoding="utf-8")).get("rows", [])
+    rows = benchmark_rows(json.loads(path.read_text(encoding="utf-8")))
     errors: list[str] = []
     tok_s: dict[tuple[str, int, int], float] = {}
     for row in rows:
-        key = (row["system"], int(row.get("context_tokens", 0)), int(row["batch_size"]))
-        gated = (
-            row.get("policy_version") == 2
-            and row.get("reference_status") in QUALIFIED_REFERENCE_STATUSES
-            and row.get("headline_eligible") is True
-            and row.get("agreement", {}).get("nontie") == 0
-            and row.get("tokens_per_second") is not None
-        )
-        if not gated:
-            errors.append(f"{path}: {key} is not a reference-gated, headline-eligible row")
+        system = row.get("system")
+        context_tokens = row.get("context_tokens", 0)
+        batch_size = row.get("batch_size")
+        if (
+            not isinstance(system, str)
+            or type(context_tokens) is not int
+            or context_tokens < 0
+            or type(batch_size) is not int
+            or batch_size < 1
+        ):
+            errors.append(
+                f"{path}: invalid row key: system={system!r}, expected a string; "
+                f"context_tokens={context_tokens!r}, expected an integer >= 0; "
+                f"batch_size={batch_size!r}, expected an integer >= 1. "
+                "Preserve the measured row's system, context, and batch when serializing evidence."
+            )
             continue
-        tok_s[key] = float(row["tokens_per_second"])
+        key = (system, context_tokens, batch_size)
+        try:
+            tok_s[key] = headline_tokens_per_second(row)
+        except ValueError as error:
+            errors.append(f"{path}: {key}: {error}")
+
     return tok_s, errors
 
 
@@ -281,7 +306,11 @@ def _ab_verdict_errors() -> list[str]:
 
 
 def main() -> int:
-    errors = _failures()
+    try:
+        errors = _failures()
+    except (OSError, ValueError, KeyError, TypeError) as failure:
+        print(f"error: {failure}", file=sys.stderr)
+        return 1
     if errors:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)

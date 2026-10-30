@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 import modal
 
 if TYPE_CHECKING:
-    from llm_infer.benchmarks.esme_three_way import EsmeAgreement
+    from llm_infer.benchmarks.reference_policy import EsmeAgreement
 
 from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
@@ -317,7 +317,7 @@ def run_engine_process(system: str, worker_input: WorkerInput, directory: Path) 
 def _run_oracle_worker(worker_input: WorkerInput) -> OracleResult:
     import torch
 
-    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
+    from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "fp32 oracle worker needs CUDA"
@@ -597,7 +597,7 @@ def gate_outputs(
     recorded set is exactly the same check as recomputing the step in
     ``compare_under_tie_tolerance``. The parent can therefore gate without owning a CUDA context.
     """
-    from llm_infer.benchmarks.esme_three_way import EsmeAgreement
+    from llm_infer.benchmarks.reference_policy import EsmeAgreement
     from llm_infer.benchmarks.report import normalize_at_eos
 
     expected_ids = {request["request_id"] for request in requests}

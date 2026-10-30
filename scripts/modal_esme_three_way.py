@@ -240,17 +240,7 @@ def bench_hf_and_engine(
         return {
             "system": t.system,
             "mode": t.mode,
-            "agreement": {
-                "exact": agreement.exact,
-                "tie": agreement.tie,
-                "nontie": agreement.nontie,
-                "total": agreement.total,
-                "ties_sample": agreement.ties_sample,
-                "divergences_sample": agreement.divergences_sample,
-                "review_required": agreement.review_required,
-                "failed": agreement.failed,
-                "numerical_evidence": agreement.numerical_evidence,
-            },
+            "agreement": agreement.as_dict(),
             "median_seconds": t.median_seconds,
             "total_output_tokens": t.total_output_tokens,
             **build_system_evidence_record(
@@ -368,15 +358,18 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
         if row["system"] == "vllm":
             row["median_seconds"] = vllm_res["median_seconds"]
             tokens = main_res["vllm_total_output_tokens"]
-            raw_tps = (
-                tokens / vllm_res["median_seconds"] if vllm_res["median_seconds"] > 0 else None
+            from llm_infer.benchmarks.reference_policy import (
+                EsmeAgreement,
+                build_system_evidence_record,
             )
-            # Literal set: the local modal-run client has no torch, so it cannot import
-            # llm_infer.benchmarks.reference_policy here.
-            qualified = row["reference_status"] in {"exact", "accepted_numerical"}
-            row["raw_tokens_per_second"] = raw_tps
-            row["headline_eligible"] = qualified and raw_tps is not None and raw_tps > 0
-            row["tokens_per_second"] = raw_tps if row["headline_eligible"] else None
+
+            row.update(
+                build_system_evidence_record(
+                    agreement=EsmeAgreement.from_record(row["agreement"]),
+                    median_seconds=vllm_res["median_seconds"],
+                    total_tokens=tokens,
+                )
+            )
 
     _print_table(rows)
 

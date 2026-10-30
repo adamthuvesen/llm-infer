@@ -22,12 +22,14 @@ import torch
 
 from llm_infer.kernels.flashinfer_graph import (
     FlashInferDecodeShape,
+    FlashInferDecodeWrapper,
     FlashInferPageMetadata,
     PlanCopyFence,
     build_graph_wrapper,
     plan_wrapper,
     run_wrapper_into,
 )
+from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 from llm_infer.model.decode_graph import DecodeGraphRunner
 
 if TYPE_CHECKING:
@@ -92,7 +94,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self._cache_kv_pointer = cache.kv.data_ptr()
         self._static_write_slots = torch.zeros(batch_size, dtype=torch.long, device=model.device)
         self._group_graph: torch.cuda.CUDAGraph | None = None
-        self._graph_wrapper = None
+        self._graph_wrapper: FlashInferDecodeWrapper | None = None
         self._plan_fence = PlanCopyFence()
         self._graph_shape: FlashInferDecodeShape | None = None
         self._graph_workspace: torch.Tensor | None = None
@@ -149,6 +151,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
                 )
                 self.piecewise._run_segment(state, layer + 1)
         else:
+            assert self._graph_wrapper is not None
             self._plan_group_wrapper(read_plan)
             self._group_graph.replay()
             for layer in range(self.grouped_layers, self.model.num_layers):
@@ -205,8 +208,8 @@ class EngineOwnedGroupedDecodeGraphRunner:
 
     def _capture_group(self, capture_plan: DecodeWindowPlan) -> None:
         backend = self.model._paged_backend
-        if backend is None:
-            raise ValueError("graph mode needs a native paged attention backend")
+        if not isinstance(backend, FlashInferPagedAttention):
+            raise ValueError("graph mode needs a FlashInfer paged attention backend")
         write_slots, read_plan = capture_plan.begin_step(include_pages=True, include_packed=False)
         if read_plan.page_plan is None:
             raise RuntimeError("capture plan did not produce native page metadata")

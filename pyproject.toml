@@ -19,6 +19,7 @@ dev = [
     "httpx>=0.27",
     "modal==1.5.0",
     "mypy>=1.19",
+    "import-linter>=2.15",
 ]
 serving = [
     "fastapi>=0.110",
@@ -44,19 +45,33 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
 python_version = "3.13"
-files = ["llm_infer"]
+files = ["llm_infer", "scripts/check_benchmark_evidence.py", "scripts/judge_paired_ab.py"]
 check_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_defs = true
 strict_equality = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-exclude = [
-    "^llm_infer/benchmarks/",
-    "^llm_infer/kernels/(flash_attn_paged|flashinfer_graph|flashinfer_paged)\\.py$",
-    "^llm_infer/model/grouped_decode_graph\\.py$",
-    "^llm_infer/serving/engine_(decode|prefill|preemption|trace)\\.py$",
-    "^llm_infer/serving/server/(app|async_engine|streaming)\\.py$",
+
+[tool.importlinter]
+root_package = "llm_infer"
+
+[[tool.importlinter.contracts]]
+name = "Policy readers use reference_policy.EsmeAgreement without execution imports"
+type = "forbidden"
+source_modules = [
+    "llm_infer.benchmarks.reference_policy",
+    "llm_infer.benchmarks.paired_ab",
+]
+forbidden_modules = [
+    "llm_infer.model",
+    "llm_infer.serving",
+    "llm_infer.scheduler",
+    "llm_infer.kv_cache",
+    "llm_infer.kernels",
+    "llm_infer.benchmarks.esme_paged",
+    "llm_infer.benchmarks.esme_three_way",
+    "llm_infer.benchmarks.esme_gallery",
 ]
 
 [tool.pytest.ini_options]

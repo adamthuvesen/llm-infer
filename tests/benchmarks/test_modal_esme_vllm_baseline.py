@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
-from llm_infer.benchmarks.esme_three_way import EsmeAgreement, vllm_decode_closure
+from llm_infer.benchmarks.esme_three_way import vllm_decode_closure
+from llm_infer.benchmarks.reference_policy import EsmeAgreement
 from scripts.modal_esme_vllm_baseline import (
     ENGINE_SYSTEMS,
     VLLM_PYTHON,

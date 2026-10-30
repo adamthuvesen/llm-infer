@@ -11,6 +11,7 @@ import torch
 from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.model.decode_plan import DecodeWindowPlan
 from llm_infer.profiling import TimingProfiler
 
 
@@ -119,6 +120,28 @@ class BatchedPrefillBackend(Protocol):
         tables: list[BlockTable],
     ) -> torch.Tensor:
         """Cache every prompt and return one final-token logits row per request."""
+
+
+@runtime_checkable
+class DeclaredCapabilitiesBackend(Protocol):
+    """An injected backend's explicit feature declaration."""
+
+    capabilities: BackendCapabilities
+
+
+@runtime_checkable
+class PlannedDecodeBackend(Protocol):
+    """Optional preallocated-buffer decode surface for deferred windows."""
+
+    def open_decode_window(
+        self, cache: PagedKVCache, tables: list[BlockTable], budget: int
+    ) -> DecodeWindowPlan | None:
+        """Reserve a window plan, or decline when its tables are not plan-safe."""
+
+    def decode_window_step(
+        self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Advance a planned batch by one token."""
 
 
 class TokenizerLike(Protocol):

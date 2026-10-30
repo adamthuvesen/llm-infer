@@ -42,6 +42,7 @@ from pathlib import Path
 
 import modal
 
+from llm_infer.benchmarks.report import TIMELINE_MEASURED_RUNS, TIMELINE_WARMUP_RUNS
 from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
@@ -362,17 +363,11 @@ def _phase_profile(runtime, num_requests: int, config: dict | None = None) -> di
     """One diagnostic generation projected to the ``TimingProfiler`` buckets."""
     import torch
 
-    from llm_infer.profiling import TimingProfiler, attach_host_method_profile
+    from llm_infer.profiling import TimingProfiler
 
     profiler = TimingProfiler("cuda")
     build_config = {**(config or {}), "profiler": profiler}
     engine, _ = _build_engine(runtime, num_requests, "cuda", build_config)
-    attach_host_method_profile(
-        profiler,
-        engine,
-        "window_flushing",
-        ("_stage_window_flush", "_consume_window_flush"),
-    )
     engine.run()
     torch.cuda.synchronize()
     return profiler.summary().as_dict()
@@ -2951,8 +2946,10 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else MAX_NEW_TOKENS
         ),
         "warmup": (
-            3
-            if command in ("flashinfer-graph-probe", "timeline")
+            TIMELINE_WARMUP_RUNS
+            if command == "timeline"
+            else 3
+            if command == "flashinfer-graph-probe"
             else 0
             if command == "four-layer-parity"
             else 2
@@ -2969,8 +2966,10 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
             else WARMUP_ITERS
         ),
         "iters": (
-            1
-            if command in ("flashinfer-graph-probe", "four-layer-parity", "timeline")
+            TIMELINE_MEASURED_RUNS
+            if command == "timeline"
+            else 1
+            if command in ("flashinfer-graph-probe", "four-layer-parity")
             else 10
             if command in ("two-layer-group-ab", "four-layer-group-ab")
             else 6

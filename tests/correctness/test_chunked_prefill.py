@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from llm_infer.kv_cache import BlockTable, PagedKVCache
@@ -108,6 +109,37 @@ def test_active_decode_advances_between_prefill_chunks() -> None:
     assert third.tokens.keys() == {"active", "long"}
     assert active.generated[:3] == [11, 12, 13]
     assert long.generated == [15]
+
+
+def test_unknown_backend_requires_an_explicit_capability_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities = FakeCausalLMBase.capabilities
+    monkeypatch.delattr(FakeCausalLMBase, "capabilities")
+
+    class UndeclaredModel(ChunkedModel):
+        pass
+
+    model = UndeclaredModel()
+
+    with pytest.raises(ValueError, match="must declare capabilities or pass capabilities="):
+        InferenceEngine(model, block_size=4, num_blocks=8)
+
+    engine = InferenceEngine(model, block_size=4, num_blocks=8, capabilities=capabilities)
+    engine.add_request(Request("explicit", [1], 2, frozenset()))
+    assert engine.run() == {"explicit": [11, 12]}
+
+
+def test_rejected_request_does_not_reserve_its_id() -> None:
+    engine = InferenceEngine(ChunkedModel(), block_size=2, num_blocks=1)
+    with pytest.raises(ValueError, match="never be admitted"):
+        engine.add_request(Request("retry", [1, 2, 3], 1, frozenset()))
+
+    engine.add_request(Request("retry", [1], 1, frozenset()))
+
+    assert engine.run() == {"retry": [11]}
+    assert not engine.scheduler.has_work()
+    assert engine._requests == {}
 
 
 def test_chunked_prefill_logits_match_full_prefill() -> None:

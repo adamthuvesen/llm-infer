@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -22,29 +22,6 @@ PHASE_BUCKETS: dict[str, tuple[str, ...]] = {
     "sampling": ("sampling",),
     "window_flushing": ("window_flushing",),
 }
-
-
-def attach_host_method_profile(
-    profiler: TimingProfiler,
-    target: object,
-    bucket: str,
-    method_names: tuple[str, ...],
-) -> None:
-    """Wrap diagnostic-only instance methods in one host timing bucket."""
-    for method_name in method_names:
-        original = getattr(target, method_name)
-        if not callable(original):
-            raise TypeError(f"{type(target).__name__}.{method_name} is not callable")
-
-        def measured(
-            *args: object,
-            _original: Callable[..., object] = original,
-            **kwargs: object,
-        ) -> object:
-            with profiler.host(bucket):
-                return _original(*args, **kwargs)
-
-        setattr(target, method_name, measured)
 
 
 @dataclass

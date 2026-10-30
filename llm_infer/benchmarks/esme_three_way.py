@@ -24,9 +24,10 @@ three-way is deferred.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
+import importlib
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol, cast
 
 import torch
 
@@ -36,16 +37,13 @@ from llm_infer.benchmarks.esme_paged import (
     _time,
     reference_outputs,
 )
+from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE, EsmeAgreement
 from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
 from llm_infer.model.runtime import ModelRuntime
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.validation.tie_tolerance import LogitsOracle
 
 DecodeOnce = Callable[[], dict[str, list[int]]]
-
-# The audited bf16 automatic-acceptance boundary. Larger numerical differences require review;
-# they are not automatically classified as implementation bugs. This is not the fp32 1e-3 rule.
-BF16_AGREEMENT_TOLERANCE = 0.1
 
 
 def run_hf_sequential_esme(
@@ -87,12 +85,26 @@ def run_hf_sequential_esme(
     return decode_once
 
 
+class VllmCompletion(Protocol):
+    token_ids: Sequence[int]
+
+
+class VllmRequestOutput(Protocol):
+    outputs: Sequence[VllmCompletion]
+
+
+class VllmEngine(Protocol):
+    def generate(
+        self, prompts: list[dict[str, list[int]]], params: object, *, use_tqdm: bool
+    ) -> Sequence[VllmRequestOutput]: ...
+
+
 def build_vllm_llm(
     hf_checkpoint: Path | str,
     *,
     max_model_len: int,
     gpu_memory_utilization: float = 0.6,
-) -> tuple[object, dict[str, object]]:
+) -> tuple[VllmEngine, dict[str, object]]:
     """Build ONE vLLM engine (prefix caching off) plus its pinned config.
 
     A process gets exactly one engine: vLLM's memory reservation
@@ -100,16 +112,18 @@ def build_vllm_llm(
     ``LLM()`` in the same process fails engine-core startup on free-memory checks.
     Multi-workload runs reuse this engine via :func:`vllm_decode_closure`.
     """
-    import vllm
-    from vllm import LLM
+    vllm = importlib.import_module("vllm")
 
-    llm = LLM(
-        model=str(hf_checkpoint),
-        dtype="bfloat16",
-        enable_prefix_caching=False,
-        max_model_len=max_model_len,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=gpu_memory_utilization,
+    llm = cast(
+        VllmEngine,
+        vllm.LLM(
+            model=str(hf_checkpoint),
+            dtype="bfloat16",
+            enable_prefix_caching=False,
+            max_model_len=max_model_len,
+            tensor_parallel_size=1,
+            gpu_memory_utilization=gpu_memory_utilization,
+        ),
     )
     config = {
         "version": vllm.__version__,
@@ -124,7 +138,7 @@ def build_vllm_llm(
 
 
 def vllm_decode_closure(
-    llm: object,
+    llm: VllmEngine,
     requests: list[EsmeBenchRequest],
     *,
     max_new_tokens: int,
@@ -132,9 +146,7 @@ def vllm_decode_closure(
     ignore_eos: bool = False,
 ) -> DecodeOnce:
     """The greedy offline-generate closure for one workload on an already-built engine."""
-    from vllm import SamplingParams
-
-    params = SamplingParams(
+    params = importlib.import_module("vllm").SamplingParams(
         temperature=0.0,
         max_tokens=max_new_tokens,
         n=1,
@@ -145,7 +157,7 @@ def vllm_decode_closure(
     ids_by_index = [req.request_id for req in requests]
 
     def decode_once() -> dict[str, list[int]]:
-        results = llm.generate(prompts, params, use_tqdm=False)  # type: ignore[attr-defined]
+        results = llm.generate(prompts, params, use_tqdm=False)
         return {
             ids_by_index[i]: [int(token) for token in results[i].outputs[0].token_ids]
             for i in range(len(results))
@@ -203,26 +215,6 @@ def _llm_infer_decode(
         return engine.run()
 
     return decode_once
-
-
-@dataclass(frozen=True)
-class EsmeAgreement:
-    """One system's tie-tolerant agreement profile against the fp32 oracle (the Qwen pattern)."""
-
-    exact: int
-    tie: int
-    nontie: int
-    total: int
-    ties_sample: list[dict[str, object]]
-    divergences_sample: list[dict[str, object]]
-    review_required: int = 0
-    failed: int = 0
-    numerical_evidence: list[dict[str, object]] = field(default_factory=list)
-
-    @property
-    def all_ties_or_exact(self) -> bool:
-        """True iff every divergence from the fp32 oracle is a genuine tie (or none) — agreement."""
-        return self.nontie == 0
 
 
 def tie_tolerant_agreement(
