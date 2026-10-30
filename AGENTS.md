@@ -1,128 +1,60 @@
 # AGENTS.md: llm-infer
 
-`llm-infer` is a small inference engine focused on building real serving techniques
-and measuring them clearly. `Esme-214M-Chat` is the headline and default documented
-model. Qwen2.5-Coder is kept as the independent HuggingFace reference for
-correctness regression. Full scope and what the repo proves live in
-[`docs/scoping.md`](docs/scoping.md). Read it before proposing work.
+`llm-infer` is a small inference engine that builds real serving techniques and measures them
+clearly. `Esme-214M-Chat` is the headline model. Qwen2.5-Coder-3B-Instruct is the independent
+HuggingFace reference for correctness regression. Read [`docs/scoping.md`](docs/scoping.md)
+before you propose work. [`docs/architecture.md`](docs/architecture.md) maps modules, backends,
+and the reference contract. [`docs/benchmark.md`](docs/benchmark.md) holds the benchmark method.
 
-## Core rule: check the reference before publishing speed
+## Judgment Calls
 
-Raw benchmark timing is always kept. A public headline speed claim first has to qualify against a
-known-good reference output on the same prompt and model. For Esme bundles, the reference is the source bundle
-logits/generation contract. The Qwen reference uses the pinned HuggingFace
-full-recompute greedy output. Experimental paths are allowed, but they must be
-labeled as experimental until they pass those checks. The single-request unit path still requires
-exact token ids. For Esme A/B experiments, keep fp32 reference status separate from direct
-candidate/baseline parity: exact direct parity can support a relative result even when both paths
-share a numerical review.
+- Speed needs a reference. Keep raw timing in every measured row. A public tok/s claim needs a
+  qualified fp32 reference row (`headline_eligible`). Label a path experimental until it passes.
+- The single-request unit path needs exact token ids.
+- Keep fp32 reference status separate from direct candidate/baseline parity. Exact direct parity
+  can support a relative A/B result even when both paths share a numerical review.
+- A difference above the 0.1-logit bf16 bound needs a durable review. `docs/findings.md` entry 20
+  says when a review may cite the measured bf16 error.
+- Do not rerun a settled experiment only to move its record to a newer policy format.
+- Modal runs bill until they finish. Run one GPU job at a time unless the experiment needs more.
+  Whoever starts a background run watches its log and raises an alarm after 10 minutes of silence.
 
-## Backends
+## Commands
 
-- `esme`: Esme export bundles, with `Esme-214M-Chat` as the headline path. Internally these use
-  the `llm_pretrain_dense_v1` DenseBackbone export format. Real paged KV runs through the same
-  engine prefill/decode and scheduler path, with prefix caching, speculative decode, and
-  preemption all checked for parity. `PretrainBundleModel.logits()` stays the full-recompute
-  reference for the paged path: exact greedy-token parity on the real bundle, with cached logits
-  within documented fp32 BLAS reduction-order noise and well below any decision margin. On CUDA
-  fp16/bf16 bundles `auto` selects `FlashInferPagedAttention` for batched decode (see
-  `_resolve_attention_backend` in `llm_infer/model/runtime.py`), and the HTTP server compiles
-  RMSNorm and RoPE into fused kernels (`llm_infer/model/fused_elementwise.py`). `torch_naive`
-  stays the fp32/CPU reference oracle. See `BackendCapabilities` in `llm_infer/model/interface.py`.
-- `dense`: compatibility alias for the same internal bundle loader. Public docs/examples
-  use `esme`.
-- `qwen`: independent HF reference backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
-  `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the **Instruct** variant and its
-  chat template for reference reproduction. Plain `-3B` is a different model and would
-  invalidate the Qwen reference.
-
-Qwen's revision pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
-Backend selection lives in `llm_infer/model/runtime.py`.
-
-## Layout
-
-```
-llm_infer/
-  model/             # backend registry, Esme/DenseBackbone loader, Qwen reference, rope utils
-  kernels/           # AttentionBackend protocol, torch_naive reference, torch_sdpa, FlashInfer, flash-attn
-  kv_cache/          # block allocator, block tables, paged page store
-  scheduler/         # prefill/decode admission, continuous batching, optional preemption
-  serving/           # InferenceEngine step loop, sampler, OpenAI HTTP server, metrics
-  benchmarks/        # Esme workloads, reference policy, timing, and report helpers
-tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
-docs/                # scoping.md, architecture.md, benchmark.md, serving-eval.md, fixture-format.md
-scripts/             # generate_goldens, Qwen reference check, Esme Modal harnesses,
-                     # serving/loadgen tools, benchmark evidence checks, real KV trace generator
-visualizer/          # schema-v3 KV trace replay UI
-```
-
-Implemented features include greedy reference tests, paged KV cache, continuous batching,
-chunked prefill, prefix caching, FlashInfer and flash-attn backends, piecewise and grouped CUDA
-decode graphs, prompt-lookup speculative decode, request preemption, KV trace visualizer, and
-OpenAI-compatible serving with metrics/loadgen.
-
-## Benchmark rules
-
-The single-request unit path must produce exact token ids. Esme policy-v2 statuses are `exact`,
-`accepted_numerical`, `review_required`, and `failed`; direct parity also allows `not_applicable`.
-The 0.1-logit bf16 boundary is automatic acceptance. It stays below the measured bf16 error
-(p99.9 shrink 0.25, `docs/findings.md` entry 20) so the gate can still see a bug. Larger
-numerical differences need a durable review. Entry 20 lists when that review may cite it.
-Missing/extra output and confirmed bugs fail. Keep raw
-timing in all measured rows, gate public tok/s with `headline_eligible`, and do not rerun a settled
-experiment only to move its record to a newer policy format.
-
-## Development
-
-Use Python 3.13 to match the GPU image, [`uv`](https://docs.astral.sh/uv/), and Node 24 for
-visualizer tests. CI installs Node 24 and runs the same check command.
+Use Python 3.13, [`uv`](https://docs.astral.sh/uv/), and Node 24. CI runs the same `make check`.
 
 ```bash
 uv sync --extra dev --extra serving
-make check
+make check        # import contracts, lint, format, types, CPU tests, evidence, visualizer
+make help         # every target with its purpose
+uv run pytest tests/correctness -q -m slow   # opt-in 3B Qwen reference check
 ```
 
-`make help` lists commands from their target descriptions.
-`make check` first checks policy imports, then runs lint, formatting, types, and the fast Python suite.
-It also runs benchmark evidence checks and visualizer tests.
-`make reproduce` runs the benchmark evidence check alone.
-Use `uv run pytest tests/correctness -q -m slow` for the opt-in 3B reference check.
-
-An architecture failure lists the forbidden import path and its source line.
-Keep agreement data in `benchmarks.reference_policy.EsmeAgreement` and execution code outside policy readers.
-After correcting the import, run `make architecture-check`, then `make check`.
-
-The local check is **CPU-runnable**: no GPU required. The slow 3B reference checks are opt-in
-because they load the pinned Qwen model and can take minutes on CPU.
-The FlashInfer and flash-attn backends are GPU-only; Esme and Qwen reference checks run on the target
-GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
-Esme in `scripts/modal_esme_*` and the Qwen flash check in `scripts/modal_reference_check.py`.
-
-Modal runs bill until they finish or time out, and a hung run prints nothing. A GPU function
-calls `stall_guard.arm()` from `scripts/modal_stall_guard.py` and `stall_guard.progress()` after
-each row or batch, so a stall exits with thread stacks instead of running to its timeout. Run
-GPU jobs one at a time unless the experiment needs them together. Whoever launches a background
-run also watches its log and raises an alarm after 10 minutes without output.
+GPU-only paths (FlashInfer, flash-attn) run on Modal A100-80GB through `scripts/modal_*.py`.
+An import contract failure names the forbidden import and its source line. Fix the import, then
+run `make architecture-check` and `make check`.
 
 ## Enforced Rules
 
-| Rule | Enforcement | Proof | Added |
-| --- | --- | --- | --- |
-| Dependencies follow module ownership | Import Linter checks policy isolation and lower-module dependencies, including indirect imports | `make architecture-check` | 2026-11-04 |
-| Package and evidence CLI code must typecheck | `pyproject.toml` lists checked paths without package exclusions | `make typecheck` | 2026-11-04 |
-| Public tok/s requires qualified fp32 reference evidence | `benchmarks/reference_policy.py` constructs and reads policy-v2 evidence | `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
-| A/B parity and fp32 reference status stay separate | `benchmarks/paired_ab.py` judges records through the reference policy | `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
-| Deferred tokens survive abort and batch changes | `serving/decode_window.py` owns staged buffers, `serving/engine.py` consumes them | `tests/serving/test_decode_window.py` | 2026-11-04 |
-| Decode-ready requests always have a KV table | `serving/request.py` uses explicit phases and read-only state views | `make typecheck`, `tests/correctness/test_request_lifecycle.py` | 2026-11-04 |
-| Scheduler membership changes use scheduler methods | `Scheduler.waiting` and `Scheduler.running` expose read-only collection types | `make typecheck`, `tests/scheduler/test_scheduler.py` | 2026-11-04 |
-| Trace replay rejects malformed events | `tracing.py` defines events, `visualizer/trace_loader.js` validates input | `tests/serving/test_tracing.py`, `make visualizer-test` | 2026-11-04 |
+| Rule | Enforced by | Added |
+| --- | --- | --- |
+| Dependencies follow module ownership | `pyproject.toml` `[tool.importlinter]`, `make architecture-check` | 2026-11-04 |
+| Package and evidence CLI code must typecheck | `pyproject.toml` `[tool.mypy]`, `make typecheck` | 2026-11-04 |
+| Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py`, `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
+| A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py`, `tests/benchmarks/test_evidence_contract.py` | 2026-11-04 |
+| Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py`, `tests/serving/test_decode_window.py` | 2026-11-04 |
+| Decode-ready requests always have a KV table | `llm_infer/serving/request.py`, `tests/correctness/test_request_lifecycle.py` | 2026-11-04 |
+| Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py`, `tests/scheduler/test_scheduler.py` | 2026-11-04 |
+| Trace replay rejects malformed events | `llm_infer/tracing.py`, `visualizer/trace_loader.js`, `tests/serving/test_tracing.py` | 2026-11-04 |
+| Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py`, `tests/test_modal_stall_guard.py` | 2026-11-06 |
+| Paths and targets in this table exist | `tests/test_agents_rules_table.py` | 2026-11-06 |
 
-Module paths in these tables start inside `llm_infer/`.
-Test paths, visualizer paths, and `pyproject.toml` start at the repository root.
-The scheduler views restrict typed callers. They expose live collections and do not enforce
-runtime immutability. Change membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
+The scheduler views restrict typed callers but do not enforce runtime immutability. Change
+membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
 
 ## Change Navigation
+
+Paths start inside `llm_infer/`, except `tests/` and `visualizer/`.
 
 | Change | Start here | Check |
 | --- | --- | --- |
@@ -135,9 +67,7 @@ runtime immutability. Change membership through `add`, `admit`, `release`, `requ
 
 ## Conventions
 
-- Atomic [conventional commits](https://www.conventionalcommits.org/) (`type(scope): message`),
-  one per logical unit.
-- Type hints throughout; no `Any` casts. Fix the type.
-- `pathlib.Path` for filesystem work.
-- Comments explain _why_, not _what_. Names use concrete domain terms.
-- Validate untrusted input loudly; keep `try` bodies small.
+- Atomic [conventional commits](https://www.conventionalcommits.org/) (`type(scope): message`).
+- No `Any` casts. Fix the type.
+- Comments explain why, not what. Names use concrete domain terms.
+- Validate untrusted input loudly. Keep `try` bodies small.

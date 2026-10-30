@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 import torch
 
@@ -35,7 +35,7 @@ from llm_infer.model.qwen import QwenModel
 
 RuntimeLoader = Callable[..., ModelRuntime]
 BundleBackendId = Literal["dense", "esme"]
-BUNDLE_BACKENDS = frozenset({"dense", "esme"})
+BUNDLE_BACKENDS: frozenset[str] = frozenset(get_args(BundleBackendId))
 AttentionBackendChoice = Literal["auto", "torch_naive", "torch_sdpa", "flash_attn", "flashinfer"]
 ATTENTION_BACKEND_CHOICES: tuple[AttentionBackendChoice, ...] = (
     "auto",

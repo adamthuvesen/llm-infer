@@ -425,6 +425,7 @@ def profile_decode(batch_sizes: list[int]) -> str:
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     runtime = load_model_runtime(
         "esme",
@@ -434,6 +435,7 @@ def profile_decode(batch_sizes: list[int]) -> str:
     )
     results = []
     for size in batch_sizes:
+        stall_guard.progress()
         wall = _decode_wall(runtime, size)
         kineto = _torch_profile(runtime, size)
         python = _python_profile(runtime, size)
@@ -482,6 +484,7 @@ def profile_sampled_decode(batch_sizes: list[int]) -> str:
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import SamplingParams
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     runtime = load_model_runtime(
         "esme",
@@ -492,6 +495,7 @@ def profile_sampled_decode(batch_sizes: list[int]) -> str:
     sampled_config = {"sampling": SamplingParams(**SAMPLED_SETTINGS)}
     results = []
     for size in batch_sizes:
+        stall_guard.progress()
         # Throwaway generation at this shape first: kernel JIT and per-shape plan warmup must
         # not land in the greedy wall, or the greedy-vs-sampled delta reads backwards.
         _decode_wall(runtime, size)
@@ -541,6 +545,7 @@ def bench_decode(batch_sizes: list[int]) -> str:
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -553,6 +558,7 @@ def bench_decode(batch_sizes: list[int]) -> str:
     )
     rows = []
     for size in batch_sizes:
+        stall_guard.progress()
         row = _bench_batch(oracle_runtime, flash_runtime, size)
         rows.append(row)
         tps = row["tokens_per_second"]
@@ -609,6 +615,7 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -622,6 +629,7 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     graph_runner = _graph_runner(flash_runtime)
     rows = []
     for size in batch_sizes:
+        stall_guard.progress()
         for label, config in ABLATION_CONFIGS.items():
             flash_runtime.model.decode_graphs = _runner_for(config, graph_runner)
             row = _bench_batch(oracle_runtime, flash_runtime, size, config)
@@ -657,6 +665,7 @@ def sync_report(batch_sizes: list[int]) -> str:
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     flash_runtime = load_model_runtime(
         "esme",
@@ -705,6 +714,7 @@ def flashinfer_graph_probe() -> str:
     )
     from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 
+    stall_guard.arm()
     expected_version = "0.6.14"
     actual_version = getattr(flashinfer, "__version__", "unknown")
     if actual_version != expected_version:
@@ -724,6 +734,7 @@ def flashinfer_graph_probe() -> str:
     results: list[dict[str, object]] = []
 
     for batch_size in (1, 8):
+        stall_guard.progress()
         max_length = max(lengths_to_probe)
         fixed_metadata = page_metadata_for_lengths(
             [max_length] * batch_size,
@@ -978,6 +989,7 @@ def grouped_layer_ab(
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     if grouped_layers not in (2, 4):
         raise ValueError(f"grouped_layers must be 2 or 4; got {grouped_layers}")
@@ -1004,6 +1016,7 @@ def grouped_layer_ab(
     )
 
     for batch_size in batch_sizes:
+        stall_guard.progress()
         runtimes = {
             label: load_model_runtime(
                 "esme",
@@ -1363,6 +1376,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     context_length = 256
@@ -1417,6 +1431,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
 
     rows: list[dict[str, object]] = []
     for batch_size in probe_batches:
+        stall_guard.progress()
         labels = ("piecewise_padded", "grouped_exact")
         runtimes = {
             label: load_model_runtime(
@@ -1547,6 +1562,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
         context_length,
     )
     for shared in (False, True):
+        stall_guard.progress()
         torch.cuda.synchronize()
         allocated_before = torch.cuda.memory_allocated()
         start = time.perf_counter()
@@ -1634,6 +1650,7 @@ def serve_smoke() -> str:
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serve import build_app_from_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     runtime = load_model_runtime(
         "esme",
@@ -1703,6 +1720,7 @@ def _roofline_rows(
     rows: list[dict] = []
     outputs_by_batch: dict[int, dict[str, list[int]]] = {}
     for size in batch_sizes:
+        stall_guard.progress()
         requests = build_requests(runtime.tokenizer, size)
         needed = sum(
             math.ceil((len(req.prompt_ids) + ROOFLINE_NEW_TOKENS) / BLOCK_SIZE) for req in requests
@@ -1854,6 +1872,7 @@ def roofline_report(batch_sizes: list[int]) -> str:
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     runtime = load_model_runtime(
@@ -1967,6 +1986,7 @@ def fusion_probe(batch_sizes: list[int]) -> str:
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     gpu = gpu_snapshot()
@@ -2002,6 +2022,7 @@ def fusion_probe(batch_sizes: list[int]) -> str:
     )
     gates: list[dict] = []
     for size in batch_sizes:
+        stall_guard.progress()
         requests = build_requests(tokenizer, size)
         reference: dict[str, list[int]] = {}
         for req in requests:
@@ -2182,6 +2203,7 @@ def timeline_trace(batch_sizes: list[int]) -> str:
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
 
+    stall_guard.arm()
     esme_bundles.reload()
     nsys = next(iter(sorted(glob.glob("/opt/nvidia/nsight-systems/*/bin/nsys"))), None) or next(
         iter(sorted(glob.glob("/usr/local/cuda*/bin/nsys"))), None
@@ -2193,6 +2215,7 @@ def timeline_trace(batch_sizes: list[int]) -> str:
     rows: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="esme-timeline-") as tmp:
         for size in batch_sizes:
+            stall_guard.progress()
             for arm in ("eager", "compiled"):
                 output = Path(tmp) / f"{arm}-b{size}"
                 command = [
@@ -2393,6 +2416,7 @@ def host_timeline(batch_sizes: list[int]) -> str:
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     capture_sizes = tuple(sorted(set(batch_sizes)))
@@ -2400,6 +2424,7 @@ def host_timeline(batch_sizes: list[int]) -> str:
     def measure_arm(runtime) -> list[dict]:
         rows = []
         for size in batch_sizes:
+            stall_guard.progress()
             rows.append(_host_timeline_row(runtime, size))
             torch.cuda.empty_cache()
         return rows
@@ -2677,6 +2702,7 @@ def capture_report(batch_sizes: list[int]) -> str:
     from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -2709,6 +2735,7 @@ def capture_report(batch_sizes: list[int]) -> str:
 
     sync = {}
     for label, active in (("eager-window", None), ("cuda-graphs", graph_runner)):
+        stall_guard.progress()
         model.decode_graphs = active
         sync[label] = _sync_probe(flash_runtime, 8)
         print(f"[sync] {label}: warnings per pass {sync[label]['sync_warnings_per_pass']}")
@@ -2723,6 +2750,7 @@ def capture_report(batch_sizes: list[int]) -> str:
         )
     launches = []
     for size in batch_sizes:
+        stall_guard.progress()
         for label, row_runtime, active in launch_configs:
             row_runtime.model.decode_graphs = active
             profile = _torch_profile(row_runtime, size)
@@ -2737,6 +2765,7 @@ def capture_report(batch_sizes: list[int]) -> str:
 
     bench_rows = []
     for size in batch_sizes:
+        stall_guard.progress()
         for label, config in ABLATION_CONFIGS.items():
             model.decode_graphs = _runner_for(config, graph_runner)
             row = _bench_batch(oracle_runtime, flash_runtime, size, config)

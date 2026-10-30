@@ -20,6 +20,7 @@ from llm_infer.model.interface import BackendCapabilities, ModelRuntime
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import (
     ATTENTION_BACKEND_CHOICES,
+    BUNDLE_BACKENDS,
     AttentionBackendChoice,
     available_backends,
     load_model_runtime,
@@ -40,7 +41,6 @@ DEFAULT_BLOCK_SIZE = 64
 DEFAULT_NUM_BLOCKS = 512
 DEFAULT_DECODE_WINDOW_SIZE = 8
 DEFAULT_BACKEND = "esme"
-BUNDLE_BACKENDS = frozenset({"dense", "esme"})
 # Decode-graph buckets the server captures at startup. Capture costs roughly 5 s per bucket
 # on an A100, so the serve default covers a handful of concurrent chat sessions (~25 s)
 # rather than the benchmark harnesses' full spread; a batch above the largest bucket falls

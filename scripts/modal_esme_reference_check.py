@@ -20,6 +20,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -73,6 +74,7 @@ def check_esme(num_requests: int, max_new_tokens: int) -> str:
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     runtime = load_model_runtime(
         "esme",
         bundle_path=Path(REMOTE_BUNDLE_PATH),
@@ -123,6 +125,7 @@ def check_esme(num_requests: int, max_new_tokens: int) -> str:
         engine.add_request(
             Request(request_id, list(prompt_ids), max_new_tokens, runtime.eos_token_ids)
         )
+    stall_guard.progress()
     outputs = engine.run()
     missing = sorted(set(reference) - set(outputs))
     extra = sorted(set(outputs) - set(reference))

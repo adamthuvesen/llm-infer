@@ -39,6 +39,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -121,6 +122,7 @@ def bench_vllm(
     from llm_infer.benchmarks.esme_three_way import run_vllm_esme
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     esme_bundles.reload()  # pick up the HF checkpoint convert_bundle_to_hf committed to the volume
     # Esme tokenizer + EOS from the bundle on CPU; vLLM owns CUDA in its own spawned worker, so
     # this parent never initializes torch.cuda (that re-init is what aborts a forked engine core).
@@ -135,6 +137,7 @@ def bench_vllm(
         max_new_tokens=max_new_tokens,
         eos_token_ids=runtime.eos_token_ids,
     )
+    stall_guard.progress()
     median_s, outputs = _time(decode_once, warmup=warmup, iters=iters, sync=False)
     return json.dumps(
         {
@@ -176,6 +179,7 @@ def bench_hf_and_engine(
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     esme_bundles.reload()  # pick up the HF checkpoint convert_bundle_to_hf committed to the volume
     # Reference oracle: fp32 PretrainBundleModel.logits() (torch_naive). The llm_infer row
     # uses the same default backend as serving: FlashInfer on CUDA bf16 bundle runs.
@@ -197,6 +201,7 @@ def bench_hf_and_engine(
         f"[esme-3way] {type(engine_runtime.model.backend).__name__}: "
         f"captured {DEFAULT_CAPTURE_SIZES} in {capture_s:.1f} s"
     )
+    stall_guard.progress()
     prompts = HEADLINE_PROMPTS if headline else DEFAULT_PROMPTS
     requests = build_requests(oracle_runtime.tokenizer, num_requests, prompts)
     needed = sum(math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests)
@@ -215,6 +220,7 @@ def bench_hf_and_engine(
         include_vllm=False,
         llm_infer_runtime=engine_runtime,
     )
+    stall_guard.progress()
 
     # Gate the passed-in vLLM tokens with the SAME tie-tolerant rule against the fp32 oracle.
     eos = oracle_runtime.eos_token_ids

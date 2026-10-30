@@ -40,6 +40,7 @@ from pathlib import Path
 import modal
 
 from llm_infer.benchmarks.reference_policy import EsmeAgreement, reference_status
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -396,6 +397,7 @@ def benchmark_prefill_ab(
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     if not batch_sizes or any(size < 1 for size in batch_sizes):
         raise ValueError(f"batch_sizes must contain positive integers; got {batch_sizes}")
     if not output_lengths or any(length < 1 for length in output_lengths):
@@ -563,6 +565,7 @@ def benchmark_prefill_ab(
                         else ("candidate", "baseline")
                     )
                     pair_orders.append(list(order))
+                    stall_guard.progress()
                     for order_position, mode in enumerate(order):
                         measured = run_once(
                             requests,
@@ -661,6 +664,7 @@ def benchmark_prefill_ab(
                     f"candidate={agreement['candidate']['status']}, "
                     f"relative={'eligible' if direct_parity else 'withheld; raw timing only'}"
                 )
+                stall_guard.progress()
                 yield {"kind": "row", **row}
 
 
@@ -710,6 +714,7 @@ def benchmark_mixed_load(
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     if not cells:
         raise ValueError("mixed-load needs at least one workload cell")
     if steady_decoders < 1:
@@ -974,6 +979,7 @@ def benchmark_mixed_load(
         for pair_index in range(iters):
             order = ("baseline", "candidate") if pair_index % 2 == 0 else ("candidate", "baseline")
             pair_orders.append(list(order))
+            stall_guard.progress()
             for order_position, mode in enumerate(order):
                 measured = run_mixed_once(steady, burst, batched_prefill=modes[mode])
                 outputs_by_mode[mode] = measured["outputs"]
@@ -1053,6 +1059,7 @@ def benchmark_mixed_load(
             f"candidate={agreement['candidate']['status']}, "
             f"relative={'eligible' if direct_parity else 'withheld; raw timing only'}"
         )
+        stall_guard.progress()
         yield {"kind": "row", **row}
 
 
@@ -1099,6 +1106,7 @@ def diagnose_prefill_divergence(
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     if repeats < 1:
         raise ValueError(f"repeats must be >= 1; got {repeats}")
     if shape not in ("uniform", "ragged"):
@@ -1286,11 +1294,13 @@ def diagnose_prefill_divergence(
     for attempt in range(repeats):
         serial_kv, serial_tokens = drive_engine(False)
         packed_kv, packed_tokens = drive_engine(True)
+        stall_guard.progress()
         tokens_by_mode = {"baseline": serial_tokens, "candidate": packed_tokens}
         # One full-batch packed prefill replay per attempt, built only if a candidate-mode
         # divergence needs an engine margin; shared across this attempt's diverged requests.
         packed_state: PackedReplayState | None = None
         for r in requests:
+            stall_guard.progress()
             request_id = r.request_id
             golden = reference[request_id]
             prompt_ids = list(r.prompt_ids)

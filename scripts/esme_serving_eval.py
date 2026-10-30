@@ -34,8 +34,7 @@ from llm_infer.model.decode import greedy_decode
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.grouped_decode_graph import DEFAULT_GROUPED_CAPTURE_SIZES
 from llm_infer.model.interface import ModelRuntime
-from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, load_model_runtime
-from llm_infer.serve import BUNDLE_BACKENDS
+from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, BUNDLE_BACKENDS, load_model_runtime
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams

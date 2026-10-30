@@ -26,6 +26,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -95,6 +96,7 @@ def run_gallery(command: str) -> str:
     from llm_infer.serving.speculative import SpeculativeDecodingConfig
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     smoke = command == "smoke"
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
@@ -139,6 +141,7 @@ def run_gallery(command: str) -> str:
     prefix_speedup = results[-1]["wall_speedup_on_vs_off"]
     prefix_label = f"{prefix_speedup:.2f}x wall" if prefix_speedup is not None else "withheld"
     print(f"[gallery] prefix-caching done: {prefix_label}")
+    stall_guard.progress()
 
     # 2. Chunked prefill: short chats decoding, then a burst of long prompts arrives.
     active_prompts = [chat_ids(p) for p in (DEFAULT_PROMPTS if smoke else HEADLINE_PROMPTS)]
@@ -171,6 +174,7 @@ def run_gallery(command: str) -> str:
         f"{row['stall_vs_pre_arrival_step']:.1f} steps ({row['label']})" for row in rows
     )
     print(f"[gallery] chunked-prefill done: stall {stall_summary}")
+    stall_guard.progress()
 
     # 3. Preemption: a starved pool must evict, and completions must stay exact.
     preempt_prompts = [
@@ -190,6 +194,7 @@ def run_gallery(command: str) -> str:
     )
     on_row = results[-1]["rows"][0]
     print(f"[gallery] preemption done: {on_row['preemptions']} preemptions, exact completions")
+    stall_guard.progress()
 
     # 4. Speculative decoding: batch-1 continuation of repetition-heavy plain text.
     spec_prompt = [int(t) for t in tokenizer.encode(_REPEATED_PARAGRAPH * (2 if smoke else 3))]

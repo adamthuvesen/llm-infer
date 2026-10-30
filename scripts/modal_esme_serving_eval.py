@@ -17,6 +17,7 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -70,6 +71,7 @@ def measure_serving(
     from scripts.esme_serving_eval import phase0_http_workloads, run_network_http_workload
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
         "esme",
@@ -140,6 +142,7 @@ def measure_serving(
                     f"TTFT p50/p95={metrics['ttft_p50_s']}/{metrics['ttft_p95_s']} "
                     f"ITL p50/p95={metrics['itl_p50_s']}/{metrics['itl_p95_s']}"
                 )
+                stall_guard.progress()
             if len(cell_rows) == 2:
                 # Direct parity: a throughput delta is an A/B result only when both arms
                 # emitted the same token streams, not merely each passed its own gate.

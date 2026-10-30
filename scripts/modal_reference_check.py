@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
 from scripts.modal_flash_image import FLASH_IMAGE, REMOTE_ROOT
 
 APP_NAME = "llm-infer-reference-check"
@@ -56,6 +57,7 @@ def smoke() -> str:
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     print(f"device: {torch.cuda.get_device_name(0)}; flash-attn imported OK")
 
     fixture = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
@@ -65,6 +67,7 @@ def smoke() -> str:
     model = QwenModel.load(dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda")
     hf_cache.commit()  # persist any freshly downloaded weights
     print("weights loaded on A100 (bf16, flash backend)")
+    stall_guard.progress()
 
     engine = InferenceEngine(model, block_size=128, num_blocks=8, device="cuda")
     engine.add_request(Request("smoke", list(case["prompt_ids"]), 5, eos))
@@ -86,6 +89,8 @@ def check() -> str:
     import torch
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    # One pytest subprocess reports no progress: dump stacks just before the 30-minute timeout.
+    stall_guard.arm(limit_s=28 * 60)
     hf_cache.commit()
     result = subprocess.run(
         [

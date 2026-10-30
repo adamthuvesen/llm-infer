@@ -132,6 +132,18 @@ construction. The engine owns the resulting runners, which capture against that 
 `resolve_backend_capabilities()` centralizes capability inference for registered and explicitly declared backends.
 Optional model operations use the protocols in [`model/interface.py`](../llm_infer/model/interface.py).
 
+## Backend Selection
+
+[`model/runtime.py`](../llm_infer/model/runtime.py) owns backend selection, and
+`BackendCapabilities` in [`model/interface.py`](../llm_infer/model/interface.py) describes each
+backend. On CUDA fp16/bf16 bundles, `auto` selects `FlashInferPagedAttention` for batched decode
+(`_resolve_attention_backend`). `torch_naive` stays the fp32/CPU reference oracle.
+
+`dense` is an alias for the `esme` bundle loader. The esme-posttrain export docs still load bundles
+through it. The Qwen revision pin lives in [`model/config.py`](../llm_infer/model/config.py)
+(`MODEL_ID`, `MODEL_REVISION`). Use the Instruct variant and its chat template. Plain `-3B` is a
+different model and invalidates the Qwen reference.
+
 ## Engine Step
 
 `InferenceEngine.step()` is the heart of the runtime:

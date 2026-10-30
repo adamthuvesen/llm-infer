@@ -115,6 +115,7 @@ def bench_vllm_batches(batch_sizes: list[int], max_new_tokens: int, warmup: int,
     from llm_infer.benchmarks.esme_three_way import build_vllm_llm, vllm_decode_closure
     from llm_infer.model.runtime import load_model_runtime
 
+    stall_guard.arm()
     esme_bundles.reload()
     runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cpu"
@@ -127,6 +128,7 @@ def bench_vllm_batches(batch_sizes: list[int], max_new_tokens: int, warmup: int,
     llm, vllm_config = build_vllm_llm(Path(REMOTE_HF_PATH), max_model_len=max_model_len)
     rows = []
     for size in batch_sizes:
+        stall_guard.progress()
         requests = build_requests(runtime.tokenizer, size, HEADLINE_PROMPTS)
         decode_once = vllm_decode_closure(
             llm,
@@ -186,6 +188,7 @@ def sweep_baseline(
     from llm_infer.profiling import TimingProfiler
     from llm_infer.serving import InferenceEngine, Request
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
@@ -233,6 +236,7 @@ def sweep_baseline(
 
     rows: list[dict] = []
     for context_length in context_lengths:
+        stall_guard.progress()
         for size in batch_sizes:
             requests = matrix_requests(size, context_length)
             needed = sum(
@@ -344,6 +348,7 @@ def sweep_baseline(
     for context_length, request in single_request_prompt_coverage(
         engine_runtime.tokenizer, tuple(context_lengths), HEADLINE_PROMPTS
     ):
+        stall_guard.progress()
         needed = math.ceil((len(request.prompt_ids) + max_new_tokens) / BLOCK_SIZE)
         coverage_engine = InferenceEngine(
             engine_runtime.model,
@@ -433,6 +438,7 @@ def sweep(
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
@@ -475,6 +481,7 @@ def sweep(
     # captured buckets).
     kv_evidence: dict[str, object] = {}
     for size in llm_infer_batches:
+        stall_guard.progress()
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         needed = sum(
             math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
@@ -526,6 +533,7 @@ def sweep(
 
     # HF floor rows, same container: full protocol at the first size, flatness checks after.
     for spec in hf_specs:
+        stall_guard.progress()
         size, hf_iters = spec
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         decode_once = run_hf_sequential_esme(
@@ -551,6 +559,7 @@ def sweep(
     # vLLM ceiling rows measured in their own container; gate their tokens here with the
     # same oracle so a diverging ceiling row reports no tok/s either.
     for vllm_row in vllm_rows:
+        stall_guard.progress()
         size = vllm_row["batch_size"]
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         outputs = {k: normalize_at_eos(v, eos) for k, v in vllm_row["outputs"].items()}
@@ -617,6 +626,7 @@ def sweep_grouped_ab(
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
@@ -635,6 +645,7 @@ def sweep_grouped_ab(
 
     rows: list[dict] = []
     for size in batch_sizes:
+        stall_guard.progress()
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         needed = sum(
             math.ceil((len(req.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for req in requests
@@ -774,6 +785,7 @@ def sweep_flashinfer_compare(
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
+    stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
@@ -803,6 +815,7 @@ def sweep_flashinfer_compare(
     ]
     graph_captures: dict[str, float | None] = {}
     for system, runtime in runtimes:
+        stall_guard.progress()
         capture_s = enable_decode_graphs_if_cuda(runtime.model, CAPTURE_SIZES)
         graph_captures[system] = capture_s
         print(f"[flashinfer-curve] {system}: captured {CAPTURE_SIZES} in {capture_s:.1f} s")
@@ -831,6 +844,7 @@ def sweep_flashinfer_compare(
 
     rows: list[dict] = []
     for size in batch_sizes:
+        stall_guard.progress()
         for system, runtime in runtimes:
             requests = build_requests(runtime.tokenizer, size, HEADLINE_PROMPTS)
             needed = sum(
