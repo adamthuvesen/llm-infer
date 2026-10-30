@@ -62,3 +62,4 @@ scripts/modal_esme_serving_phase5_ab.py
 
 # verify-llm-infer evidence
 /.verify/
+visualizer/node_modules/

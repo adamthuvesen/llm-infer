@@ -24,6 +24,9 @@ jobs:
       - name: Install dev dependencies
         run: uv sync --extra dev --extra serving
 
+      - name: Install visualizer dependencies
+        run: npm ci --prefix visualizer
+
       - name: Run CPU verification checks
         run: make check
 

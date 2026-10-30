@@ -14,6 +14,7 @@ from llm_infer.benchmarks.reference_policy import (
     POLICY_VERSION,
     benchmark_rows,
     headline_tokens_per_second,
+    row_number,
 )
 from llm_infer.benchmarks.report import TIMELINE_MEASURED_RUNS, TIMELINE_WARMUP_RUNS
 
@@ -80,10 +81,10 @@ def _failures() -> list[str]:
     rows = benchmark_rows(json.loads(CURVE_RECORD.read_text(encoding="utf-8")))
 
     errors: list[str] = []
-    by_system: dict[str, list[dict]] = {system: [] for system in PLOTTED_SYSTEMS}
+    by_system: dict[str, list[dict[str, object]]] = {system: [] for system in PLOTTED_SYSTEMS}
     for row in rows:
         system = row.get("system")
-        if system in by_system:
+        if isinstance(system, str) and system in by_system:
             by_system[system].append(row)
         if row.get("policy_version") != POLICY_VERSION:
             errors.append(
@@ -219,11 +220,13 @@ def _headline_table_errors() -> list[str]:
     return errors
 
 
-def _doc_table_errors(by_system: dict[str, list[dict]]) -> list[str]:
+def _doc_table_errors(by_system: dict[str, list[dict[str, object]]]) -> list[str]:
     expected: dict[int, dict[str, float]] = {batch: {} for batch in EXPECTED_BATCHES}
     for system, rows in by_system.items():
         for row in rows:
-            expected[int(row["batch_size"])][system] = round(float(row["tokens_per_second"]), 1)
+            expected[int(row_number(row, "batch_size"))][system] = round(
+                row_number(row, "tokens_per_second"), 1
+            )
 
     found: dict[int, tuple[float, float]] = {}
     pattern = re.compile(r"^\|\s*(\d+)\s*\|\s*([\d,]+\.\d)\s*\|\s*([\d,]+\.\d)\s*\|$")

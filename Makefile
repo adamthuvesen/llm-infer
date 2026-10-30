@@ -1,15 +1,17 @@
 .DEFAULT_GOAL := check
-.PHONY: help install fix lint typecheck architecture-check test visualizer-test evidence-check slow check verify
+.PHONY: help install fix lint typecheck architecture-check test visualizer-test evidence-check visualizer-lint slow check verify
 
 help:  ## List commands and their purpose
 	@awk 'BEGIN {FS = ":.*## "; print "Usage: make <target>\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 install:  ## Sync the dev environment
 	uv sync --extra dev --extra serving
+	npm ci --prefix visualizer
 
 fix:  ## Auto-format and apply safe lint fixes
 	uv run ruff check --fix .
 	uv run ruff format .
+	cd visualizer && npx oxlint --fix --type-aware && npx oxfmt
 
 lint:  ## Lint and format-check (no changes)
 	uv run ruff check .
@@ -37,12 +39,15 @@ verify:  ## Drive the real server, loadgen, and Modal launch paths on CPU (ARGS=
 visualizer-test:  ## Test trace loading in Node
 	node --test visualizer/trace_loader.test.mjs
 
+visualizer-lint:  ## Type-check, lint, and format-check the visualizer
+	cd visualizer && npx oxlint --type-aware --type-check --deny-warnings && npx oxfmt --check
+
 
 # Types, tests, and the evidence check are the slow parts and share no files, so they run in
 # parallel. Type, evidence, and visualizer output is buffered and printed after the tests finish.
 check: architecture-check lint  ## Run all CPU verification checks
 	@log=$$(mktemp); \
-	$(MAKE) --no-print-directory typecheck evidence-check visualizer-test >$$log 2>&1 & side=$$!; \
+	$(MAKE) --no-print-directory typecheck evidence-check visualizer-test visualizer-lint >$$log 2>&1 & side=$$!; \
 	$(MAKE) --no-print-directory test; test_status=$$?; \
 	wait $$side; side_status=$$?; cat $$log; rm -f $$log; \
 	exit $$((test_status || side_status))

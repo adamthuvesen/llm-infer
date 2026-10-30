@@ -315,6 +315,14 @@ def benchmark_rows(value: object) -> list[dict[str, object]]:
     return [record_object(row, "benchmark row") for row in rows]
 
 
+def row_number(row: Mapping[str, object], key: str) -> float:
+    """Read a numeric field of a benchmark row, rejecting booleans and other types."""
+    value = row[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"benchmark row field {key!r} must be a number; got {value!r}")
+    return float(value)
+
+
 def headline_tokens_per_second(row: Mapping[str, object]) -> float:
     """Read a public speed claim through the same policy used to construct it."""
     try:

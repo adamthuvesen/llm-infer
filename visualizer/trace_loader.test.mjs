@@ -7,7 +7,10 @@ import { theaterGeometry } from "./theater_layout.js";
 import { buildTraceModel, parseJsonlTrace } from "./trace_loader.js";
 
 test("loads the committed schema-v3 fixture into a renderable model", async () => {
-  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(
+    new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url),
+    "utf8",
+  );
   const events = parseJsonlTrace(text);
   const model = buildTraceModel(events);
 
@@ -23,7 +26,11 @@ test("loads the committed schema-v3 fixture into a renderable model", async () =
       request.finish.tokenIds,
     );
   }
-  assert.ok(model.requestList.every((request) => request.decodes.some((decode) => decode.tokenSource === "prefill")));
+  assert.ok(
+    model.requestList.every((request) =>
+      request.decodes.some((decode) => decode.tokenSource === "prefill"),
+    ),
+  );
   assert.ok(model.batchSignals.length > 0);
   assert.ok(model.throughputSignals.length > 0);
   assert.ok(model.pressureSamples.some((sample) => sample.reservedBlocks > 0));
@@ -43,7 +50,10 @@ test("loads the committed schema-v3 fixture into a renderable model", async () =
 });
 
 test("models one physical prompt block across both prefix-group owners", async () => {
-  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(
+    new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url),
+    "utf8",
+  );
   const events = parseJsonlTrace(text);
   const allocations = events.filter((event) => event.event === "block_allocated");
   const frees = events.filter((event) => event.event === "block_freed");
@@ -70,7 +80,10 @@ test("models one physical prompt block across both prefix-group owners", async (
 });
 
 test("models block lifecycle without free-before-alloc and keeps the pool valid", async () => {
-  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(
+    new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url),
+    "utf8",
+  );
   const events = parseJsonlTrace(text);
 
   const live = new Set();
@@ -96,7 +109,10 @@ test("models block lifecycle without free-before-alloc and keeps the pool valid"
 });
 
 test("models preemption and resume on the affected request's lane", async () => {
-  const text = await readFile(new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url), "utf8");
+  const text = await readFile(
+    new URL("../docs/assets/esme_kv_trace_schema_v3.jsonl", import.meta.url),
+    "utf8",
+  );
   const events = parseJsonlTrace(text);
   const model = buildTraceModel(events);
 
@@ -144,7 +160,14 @@ test("rejects a trace with a sequence gap (playback assumes contiguous ids)", ()
       max_new_tokens: 4,
       reserved_blocks: 1,
     },
-    { event: "decode_step", schema_version: 3, sequence: 3, step: 1, request_ids: ["r"], token_ids: [9] },
+    {
+      event: "decode_step",
+      schema_version: 3,
+      sequence: 3,
+      step: 1,
+      request_ids: ["r"],
+      token_ids: [9],
+    },
   ]
     .map((event) => JSON.stringify(event))
     .join("\n");
@@ -163,7 +186,14 @@ test("rejects a trace whose sequence ids do not start at one", () => {
       max_new_tokens: 4,
       reserved_blocks: 1,
     },
-    { event: "decode_step", schema_version: 3, sequence: 11, step: 1, request_ids: ["r"], token_ids: [9] },
+    {
+      event: "decode_step",
+      schema_version: 3,
+      sequence: 11,
+      step: 1,
+      request_ids: ["r"],
+      token_ids: [9],
+    },
   ]
     .map((event) => JSON.stringify(event))
     .join("\n");
@@ -320,11 +350,13 @@ test("re-admission after preemption preserves the original lane and generated-to
 });
 
 test("renders hostile event labels as text, not markup", () => {
+  /** @type {string[]} */
   const writes = [];
   const documentRef = {
     createElement(tagName) {
       const node = {
         tagName,
+        /** @type {any[]} */
         children: [],
         className: "",
         _textContent: "",
@@ -378,7 +410,10 @@ test("rejects event-specific required fields before model building", () => {
     max_new_tokens: 5,
     reserved_blocks: 2,
   });
-  assert.throws(() => parseJsonlTrace(missingRequestId), /request_admitted must have a non-empty request_id/);
+  assert.throws(
+    () => parseJsonlTrace(missingRequestId),
+    /request_admitted must have a non-empty request_id/,
+  );
 
   const missingFinishedTokens = JSON.stringify({
     event: "request_finished",

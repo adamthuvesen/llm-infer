@@ -32,8 +32,8 @@ import math
 import sys
 from pathlib import Path
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import plotly.graph_objects as go  # pyright: ignore[reportMissingImports]
+from plotly.subplots import make_subplots  # pyright: ignore[reportMissingImports]
 
 # PEP 723 runs in an isolated environment, without installing the inference package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llm_infer.benchmarks.reference_policy import (
     benchmark_rows,
     headline_tokens_per_second,
+    row_number,
 )
 
 # Style contract: match esme-pretrain scripts/plot_run_telemetry.py (the shared card spec).
@@ -69,14 +70,14 @@ LADDER_SYSTEMS = (
 FULL_ENGINE = LADDER_SYSTEMS[-1][0]
 
 
-def _require_headline_row(path: Path, row: dict) -> None:
+def _require_headline_row(path: Path, row: dict[str, object]) -> None:
     try:
         headline_tokens_per_second(row)
     except ValueError as error:
         raise ValueError(f"{path}: {row['system']} batch={row['batch_size']}: {error}") from error
 
 
-def load_rows(path: Path) -> dict[str, list[dict]]:
+def load_rows(path: Path) -> dict[str, list[dict[str, object]]]:
     """Plotted rows per system, sorted by batch size; a diverged (ungated) row is a hard error.
 
     Only ``llm_infer`` and ``hf_sequential`` are plotted. The record's vLLM rows are
@@ -84,17 +85,17 @@ def load_rows(path: Path) -> dict[str, list[dict]]:
     (docs/benchmark.md states that framing once).
     """
     record = json.loads(path.read_text(encoding="utf-8"))
-    by_system: dict[str, list[dict]] = {"llm_infer": [], "hf_sequential": []}
+    by_system: dict[str, list[dict[str, object]]] = {"llm_infer": [], "hf_sequential": []}
     for row in benchmark_rows(record):
         system = row["system"]
-        if system not in by_system:
+        if not isinstance(system, str) or system not in by_system:
             continue
         _require_headline_row(path, row)
         by_system[system].append(row)
     for system, rows in by_system.items():
         if not rows:
             raise ValueError(f"{path}: no rows for {system}")
-        rows.sort(key=lambda r: r["batch_size"])
+        rows.sort(key=lambda r: row_number(r, "batch_size"))
     return by_system
 
 
@@ -184,11 +185,13 @@ def styled_axis(**overrides: object) -> dict[str, object]:
     return axis
 
 
-def _series(rows: list[dict]) -> tuple[list[int], list[float]]:
-    return [r["batch_size"] for r in rows], [r["tokens_per_second"] for r in rows]
+def _series(rows: list[dict[str, object]]) -> tuple[list[int], list[float]]:
+    return [int(row_number(r, "batch_size")) for r in rows], [
+        row_number(r, "tokens_per_second") for r in rows
+    ]
 
 
-def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
+def build_curve_figure(by_system: dict[str, list[dict[str, object]]]) -> go.Figure:
     """The engine curve against the naive-HF floor: batch-scaling evidence, not the headline."""
     llm_x, llm_y = _series(by_system["llm_infer"])
     hf_x, hf_y = _series(by_system["hf_sequential"])
@@ -292,10 +295,12 @@ def load_ladder_rows(path: Path) -> dict[int, dict[str, float]]:
     by_batch: dict[int, dict[str, float]] = {}
     for row in benchmark_rows(record):
         system = row["system"]
-        if system not in wanted:
+        if not isinstance(system, str) or system not in wanted:
             continue
         _require_headline_row(path, row)
-        by_batch.setdefault(int(row["batch_size"]), {})[system] = float(row["tokens_per_second"])
+        by_batch.setdefault(int(row_number(row, "batch_size")), {})[system] = row_number(
+            row, "tokens_per_second"
+        )
     if not by_batch:
         raise ValueError(f"{path}: no ladder rows")
     for batch, systems in by_batch.items():

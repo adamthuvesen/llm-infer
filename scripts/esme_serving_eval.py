@@ -33,7 +33,7 @@ from llm_infer.benchmarks.report import normalize_at_eos
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.grouped_decode_graph import DEFAULT_GROUPED_CAPTURE_SIZES
-from llm_infer.model.interface import ModelRuntime
+from llm_infer.model.interface import ModelRuntime, TokenizerLike
 from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, BUNDLE_BACKENDS, load_model_runtime
 from llm_infer.serving.engine import InferenceEngine, StepResult
 from llm_infer.serving.request import Request
@@ -801,7 +801,8 @@ async def run_network_http_workload(
             access_log=False,
         )
     )
-    server.install_signal_handlers = lambda: None
+    # Uvicorn runs inside this event loop and must not install its own signal handlers.
+    server.install_signal_handlers = lambda: None  # pyright: ignore[reportAttributeAccessIssue]
     server_started_s = time.perf_counter()
     server_task = asyncio.create_task(server.serve())
     try:
@@ -1162,12 +1163,12 @@ def _workload_result(
     )
     throughput = output_tokens / wall_s if speed_status == "reported" and wall_s > 0 else None
     observed_rate = output_tokens / wall_s if output_tokens > 0 and wall_s > 0 else None
+    reference_details = reference["details"]
     reference_policy_status = (
         "accepted_numerical"
         if reference["status"] == "pass"
-        and any(
-            detail.get("status") in ("pass_tie", "pass_replay") for detail in reference["details"]
-        )
+        and isinstance(reference_details, list)
+        and any(detail.get("status") in ("pass_tie", "pass_replay") for detail in reference_details)
         else "exact"
         if reference["status"] == "pass"
         else "review_required"
@@ -1639,7 +1640,7 @@ def _payload(spec: HttpRequestSpec, model_id: str) -> dict[str, object]:
     return base
 
 
-def _http_prompt_ids(tokenizer: object, spec: HttpRequestSpec) -> tuple[int, ...]:
+def _http_prompt_ids(tokenizer: TokenizerLike, spec: HttpRequestSpec) -> tuple[int, ...]:
     if spec.endpoint == "chat":
         rendered = tokenizer.apply_chat_template(
             [{"role": "user", "content": spec.prompt}],
@@ -1652,6 +1653,8 @@ def _http_prompt_ids(tokenizer: object, spec: HttpRequestSpec) -> tuple[int, ...
 
 def _template_token_ids(rendered: object) -> list[int]:
     ids = rendered["input_ids"] if isinstance(rendered, dict) else rendered
+    if not isinstance(ids, Iterable):
+        raise TypeError(f"chat template returned a non-iterable value: {type(ids).__name__}")
     values = list(ids)
     if values and isinstance(values[0], (list, tuple)):
         values = list(values[0])
@@ -1831,7 +1834,7 @@ def _effective_sampling(engine: InferenceEngine, request: Request) -> SamplingPa
     return request.sampling if request.sampling is not GREEDY else engine.default_sampling
 
 
-def _token_to_int(token: object) -> int:
+def _token_to_int(token: torch.Tensor | int) -> int:
     if isinstance(token, torch.Tensor):
         return int(token.item())
     return int(token)
@@ -1975,7 +1978,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     output = args.output or _default_output_path()
     jsonl_output = args.jsonl_output
-    report = {
+    report: dict[str, object] = {
         "started_at": started_at,
         "finished_at": datetime.now(UTC).isoformat(),
         "metadata": metadata,

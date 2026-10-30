@@ -94,8 +94,8 @@ def _chat_payload(
     top_p: float,
     top_k: int,
     seed: int,
-) -> dict:
-    payload = {
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
@@ -110,7 +110,7 @@ def _chat_payload(
     return payload
 
 
-async def _run_streaming(client: httpx.AsyncClient, payload: dict) -> RequestResult:
+async def _run_streaming(client: httpx.AsyncClient, payload: dict[str, object]) -> RequestResult:
     """Measure one streaming request, including visible-delta TTFT and ITL timestamps."""
     start = time.perf_counter()
     ttft: float | None = None
@@ -153,7 +153,7 @@ async def _run_streaming(client: httpx.AsyncClient, payload: dict) -> RequestRes
     )
 
 
-async def _run_blocking(client: httpx.AsyncClient, payload: dict) -> RequestResult:
+async def _run_blocking(client: httpx.AsyncClient, payload: dict[str, object]) -> RequestResult:
     """One non-streaming request: TTFT equals total latency, true tokens from the usage block."""
     start = time.perf_counter()
     resp = await client.post("/v1/chat/completions", json=payload)

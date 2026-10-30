@@ -58,19 +58,20 @@ def run_hf_sequential_esme(
     from transformers import AutoModelForCausalLM
 
     eos = sorted(eos_token_ids)
+    # transformers types from_pretrained as a protocol that lacks Module.to and generate.
     model = (
         AutoModelForCausalLM.from_pretrained(
             str(hf_checkpoint), dtype=_hf_dtype(device), local_files_only=True
         )
         .eval()
-        .to(device)
+        .to(device)  # pyright: ignore[reportArgumentType]
     )
 
     def decode_once() -> dict[str, list[int]]:
         outputs: dict[str, list[int]] = {}
         for req in requests:
             input_ids = torch.tensor([req.prompt_ids], device=device)
-            generated = model.generate(
+            generated = model.generate(  # pyright: ignore[reportAttributeAccessIssue]
                 input_ids,
                 attention_mask=torch.ones_like(input_ids),
                 max_new_tokens=max_new_tokens,
