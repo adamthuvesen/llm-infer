@@ -91,8 +91,10 @@ Per-request HTTP controls:
 | `chunked-long-short` | `engine` | 1 long prompt + 3 short prompts | chunked prefill interleave | reported only if all 4 match greedy reference |
 | `tight-kv-preemption` | `engine` | 3 greedy requests in a 3-block KV pool | preemption, recompute resume, KV utilization | reported only if all 3 match greedy reference |
 | `speculative-greedy` | `engine` | repeated prompt suffixes | prompt-lookup speculative decode | reported only if all 2 match greedy reference |
+| `api-streaming-greedy` | `asgi-http` / `external-http` | 8 streaming greedy chat requests | TTFT, inter-token latency, output rate | local ASGI can report if reference-gated; external never reports tok/s |
+| `api-streaming-sampled` | `asgi-http` / `external-http` | 8 seeded streaming chat requests | sampled replay, TTFT, inter-token latency | local ASGI can report if replay-gated; external never reports tok/s |
 | `api-streaming-mixed` | `asgi-http` / `external-http` | 3 streaming chat requests | streaming usage, prefix grouping, TTFT | local ASGI can report if reference-gated; external never reports tok/s |
-| `api-blocking-sampled` | `asgi-http` / `external-http` | 2 greedy + 2 sampled completions | sampling, blocking usage, status accounting | never reports tok/s because sampled rows are not reference-gated |
+| `api-blocking-sampled` | `asgi-http` / `external-http` | 2 greedy + 2 sampled completions | sampling, blocking usage, status accounting | local ASGI can report if greedy and sampled rows pass their gates; external never reports tok/s |
 
 ## Metric Definitions
 

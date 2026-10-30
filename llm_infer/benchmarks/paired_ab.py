@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from llm_infer.benchmarks.paired_change import PairedChange, paired_change
 from llm_infer.benchmarks.reference_policy import EsmeAgreement, record_object
@@ -67,8 +69,11 @@ RULES = {
 
 @dataclass(frozen=True)
 class ArmEvidence:
-    walls_s: list[float]
+    walls_s: tuple[float, ...]
     agreement: EsmeAgreement
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "walls_s", tuple(self.walls_s))
 
 
 @dataclass(frozen=True)
@@ -82,7 +87,10 @@ class PairedRow:
 class PairedRecord:
     probe: str
     container_id: str | None
-    rows: dict[tuple[str, int], PairedRow]
+    rows: Mapping[tuple[str, int], PairedRow]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rows", MappingProxyType(dict(self.rows)))
 
 
 @dataclass(frozen=True)
@@ -146,7 +154,7 @@ def read_paired_record(value: object) -> PairedRecord:
                     agreement = EsmeAgreement.from_record(arm.get("agreement"))
                 except ValueError as error:
                     raise ValueError(f"{key} {name}: {error}") from error
-                arms.append(ArmEvidence(seconds, agreement))
+                arms.append(ArmEvidence(tuple(seconds), agreement))
             parity = row.get("parity_status")
             if parity not in ("exact", "accepted_numerical", "review_required", "failed"):
                 raise ValueError(f"{key}: invalid parity_status {parity!r}")

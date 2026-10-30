@@ -15,7 +15,7 @@ lint:  ## Lint and format-check (no changes)
 	uv run ruff check .
 	uv run ruff format --check .
 
-architecture-check:  ## Check that policy readers do not import model execution
+architecture-check:  ## Check dependency direction and policy isolation
 	uv run lint-imports --no-logo
 
 typecheck:  ## Check package and evidence CLI types

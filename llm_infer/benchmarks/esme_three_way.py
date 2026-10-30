@@ -231,6 +231,7 @@ def tie_tolerant_agreement(
     For each request, exact match counts as exact; otherwise the first divergence is recomputed on
     the fp32 oracle via ``compare_under_tie_tolerance``. Within ``tolerance`` it is automatically
     accepted numerical behavior; beyond it needs review unless the mismatch is structural.
+    Missing requests fail individually. Unexpected request IDs invalidate the complete batch.
     """
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
@@ -241,10 +242,26 @@ def tie_tolerant_agreement(
     failures: list[dict[str, object]] = []
     missing = sorted(set(reference) - set(outputs))
     extra = sorted(set(outputs) - set(reference))
-    if missing:
-        failures.append({"request": missing[0], "detail": f"missing outputs for {missing[:3]}"})
     if extra:
-        failures.append({"request": extra[0], "detail": f"unexpected outputs for {extra[:3]}"})
+        return EsmeAgreement(
+            exact=0,
+            tie=0,
+            nontie=len(reference),
+            total=len(reference),
+            ties_sample=[],
+            divergences_sample=[
+                {
+                    "detail": "unexpected outputs invalidate the complete reference batch",
+                    "unexpected_request_ids": extra,
+                    "missing_request_ids": missing,
+                }
+            ],
+            failed=len(reference),
+        )
+    failures.extend(
+        {"request": request_id, "detail": f"missing outputs for {request_id!r}"}
+        for request_id in missing
+    )
     for request_id in reference:
         if request_id not in outputs:
             continue

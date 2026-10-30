@@ -52,7 +52,7 @@ def blocks_for_footprint(request: Request, block_size: int) -> int:
     token, so a resumed request's immediate footprint is ``len(prompt) + len(generated)``
     positions; a fresh request has no generated tokens, so this is just its prompt.
     """
-    return blocks_for_length(len(request.prompt_ids) + len(request.generated), block_size)
+    return blocks_for_length(len(request.prompt_ids) + request.generated_count, block_size)
 
 
 class Scheduler:

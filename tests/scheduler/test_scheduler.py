@@ -81,11 +81,11 @@ def test_preemption_victim_skips_finished_requests() -> None:
     assert [r.request_id for r in sched.running] == ["a", "b", "c"]
 
     # The LIFO victim would be the newest-admitted (c); mark it finished — it must be skipped.
-    reqs["c"].finished = True
+    reqs["c"].record(0, is_eos=True)
     assert sched.preemption_victim() is reqs["b"]
 
     # With b also finished and a excluded as the block-needer, there is no eligible victim.
-    reqs["b"].finished = True
+    reqs["b"].record(0, is_eos=True)
     assert sched.preemption_victim(exclude=reqs["a"]) is None
 
 

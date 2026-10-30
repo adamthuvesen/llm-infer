@@ -28,7 +28,7 @@ from llm_infer.model.runtime import prepare_engine_grouped_decode, resolve_backe
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler, blocks_for_footprint, max_blocks_for
 from llm_infer.serving.decode_window import DecodeWindow, DecodeWindows, PendingWindowFlush
-from llm_infer.serving.request import Request
+from llm_infer.serving.request import DecodeReady, Pending, Prefilling, Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row, sample_rows
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
 from llm_infer.tracing import (
@@ -204,6 +204,8 @@ class InferenceEngine:
 
     def add_request(self, request: Request) -> None:
         """Register and queue a request. Duplicate ids are rejected loudly."""
+        if request.state != Pending() or request.generated_count:
+            raise ValueError("only an unstarted request can be added to an engine")
         if request.prefix_group_id is not None and not self.capabilities.prefix_caching:
             raise ValueError(
                 "prefix_group_id requires prefix caching; this backend does not support it"
@@ -236,6 +238,8 @@ class InferenceEngine:
             return False
         if self.scheduler.is_running(request) and request.block_table is not None:
             self._free_block_table(request.block_table)
+        request.cancel()
+        request.release_finished_table()
         return self.scheduler.cancel(request)
 
     def step(self) -> StepResult:
@@ -270,9 +274,10 @@ class InferenceEngine:
             to_prefill: list[Request] = []
             to_resume: list[Request] = []
             for request in self.scheduler.running:
-                if request.prefilled:
+                state = request.state
+                if isinstance(state, DecodeReady):
                     to_decode.append(request)
-                elif request.generated:
+                elif isinstance(state, (Pending, Prefilling)) and state.mode == "recompute":
                     # Preempted earlier: rebuild its KV by recompute before it decodes again.
                     to_resume.append(request)
                 else:
@@ -370,8 +375,7 @@ class InferenceEngine:
         table.owner = request.request_id
         table.blocks = list(hit.block_ids)
         table.length = hit.tokens
-        request.block_table = table
-        request.prompt_cached_tokens = hit.tokens
+        request.begin_prefill(table, cached_tokens=hit.tokens)
 
     def _can_prefill_many(self, requests: list[Request]) -> bool:
         return (
@@ -389,10 +393,8 @@ class InferenceEngine:
         assert isinstance(self.model, BatchedPrefillBackend)
         tables: list[BlockTable] = []
         for request in requests:
-            if request.block_table is None:
-                request.block_table = self.cache.new_request()
-                request.block_table.owner = request.request_id
-            if request.block_table.length != 0 or request.prompt_cached_tokens != 0:
+            state = self._prefilling(request)
+            if state.table.length != 0 or state.cached_tokens != 0:
                 raise ValueError(
                     f"request {request.request_id!r} must have an empty cache for batched prefill"
                 )
@@ -404,7 +406,7 @@ class InferenceEngine:
                 end_pos=end_pos,
                 total_prompt_tokens=end_pos,
             )
-            tables.append(request.block_table)
+            tables.append(state.table)
 
         with self._record_time("prefill"):
             logits = self.model.prefill_many(
@@ -413,8 +415,7 @@ class InferenceEngine:
 
         for request in requests:
             end_pos = len(request.prompt_ids)
-            request.prompt_cached_tokens = end_pos
-            request.prefilled = True
+            request.advance_prefill(end_pos)
             self._trace_prefill_chunk_progress(
                 request_id=request.request_id,
                 start_pos=0,
@@ -439,7 +440,6 @@ class InferenceEngine:
         logits = self._cache_prompt_chunk(request, result)
         if logits is None:
             return
-        request.prefilled = True
         with self._record_time("sampling"):
             token = self._sample_one(logits, request)
         eos_flags, host_ids = self._eos_flags_and_ids(token.reshape(1), [request])
@@ -471,16 +471,15 @@ class InferenceEngine:
         # next step instead. The leader is never its own victim, so it always survives.
         members = [leader, *(r for r in self._live_running(requests) if r is not leader)]
 
-        leader.prefilled = True
-        leader.prompt_cached_tokens = len(prompt_ids)
+        leader_state = leader.state
+        if not isinstance(leader_state, Prefilling):
+            raise ValueError("shared prefix leader must be prefilling")
         for request in members:
             if request is leader:
                 continue
-            assert leader.block_table is not None
-            request.block_table = self.cache.fork_request(leader.block_table)
-            request.block_table.owner = request.request_id
-            request.prompt_cached_tokens = leader.prompt_cached_tokens
-            request.prefilled = True
+            table = self.cache.fork_request(leader_state.table)
+            table.owner = request.request_id
+            request.begin_prefill(table, cached_tokens=leader_state.cached_tokens)
 
         with self._record_time("sampling"):
             tokens = [self._sample_one(logits, request) for request in members]
@@ -494,15 +493,12 @@ class InferenceEngine:
 
     def _cache_prompt_chunk(self, request: Request, result: StepResult) -> torch.Tensor | None:
         """Cache one prompt chunk and return final-prompt logits when ready to sample."""
-        if request.block_table is None:
-            request.block_table = self.cache.new_request()
-            request.block_table.owner = request.request_id
-
-        start_pos = request.prompt_cached_tokens
-        if request.block_table.length != start_pos:
+        state = self._prefilling(request)
+        start_pos = state.cached_tokens
+        if state.table.length != start_pos:
             raise ValueError(
                 f"request {request.request_id!r} block table length "
-                f"{request.block_table.length} != cached prompt length {start_pos}"
+                f"{state.table.length} != cached prompt length {start_pos}"
             )
         remaining = len(request.prompt_ids) - start_pos
         if remaining < 1:
@@ -525,16 +521,16 @@ class InferenceEngine:
 
         with self._record_time("prefill"):
             if start_pos == 0 and end_pos == len(request.prompt_ids):
-                logits = self.model.prefill(request.prompt_ids, self.cache, request.block_table)
+                logits = self.model.prefill(request.prompt_ids, self.cache, state.table)
             else:
                 logits = self.model.prefill_chunk(
                     request.prompt_ids,
                     self.cache,
-                    request.block_table,
+                    state.table,
                     start_pos=start_pos,
                     chunk_size=chunk_size,
                 )
-        request.prompt_cached_tokens = end_pos
+        request.advance_prefill(end_pos)
         self._trace_prefill_chunk_progress(
             request_id=request.request_id,
             start_pos=start_pos,
@@ -546,6 +542,16 @@ class InferenceEngine:
         if end_pos < len(request.prompt_ids):
             return None
         return logits
+
+    def _prefilling(self, request: Request) -> Prefilling:
+        state = request.state
+        if isinstance(state, Pending):
+            table = self.cache.new_request()
+            table.owner = request.request_id
+            return request.begin_prefill(table)
+        if not isinstance(state, Prefilling):
+            raise ValueError(f"request {request.request_id!r} is not awaiting prefill")
+        return state
 
     def _decode_requests(self, requests: list[Request], result: StepResult) -> None:
         """Advance decode-ready requests, optionally using prompt-lookup speculation."""
@@ -581,8 +587,10 @@ class InferenceEngine:
     def _tables_for(self, requests: list[Request]) -> list[BlockTable]:
         tables: list[BlockTable] = []
         for request in requests:
-            assert request.block_table is not None
-            tables.append(request.block_table)
+            state = request.state
+            if not isinstance(state, DecodeReady):
+                raise ValueError(f"request {request.request_id!r} is not decode-ready")
+            tables.append(state.table)
         return tables
 
     def _decode_normal(self, requests: list[Request], result: StepResult) -> None:
@@ -647,9 +655,10 @@ class InferenceEngine:
         """
         check_all = self.prefix_cache is not None
         for request in requests:
-            table = request.block_table
-            if table is None:
+            state = request.state
+            if not isinstance(state, DecodeReady):
                 return False
+            table = state.table
             if request.prefix_group_id is None and not check_all:
                 continue
             if any(self.cache.allocator.refcount(block) > 1 for block in table.blocks):
@@ -876,9 +885,9 @@ class InferenceEngine:
         Forward progress holds: the block-needers are the batch members, and preempting strictly
         shrinks the batch, so the demand reaches zero before victims run out.
         """
-        survivors = [r for r in requests if r.prefilled and r.block_table is not None]
+        survivors = [r for r in requests if isinstance(r.state, DecodeReady)]
         while True:
-            survivors = [r for r in survivors if r.prefilled and r.block_table is not None]
+            survivors = [r for r in survivors if isinstance(r.state, DecodeReady)]
             demand = sum(self._blocks_to_grow(r, self._decode_budget(r)) for r in survivors)
             if demand <= self.cache.allocator.num_free:
                 return survivors
@@ -910,10 +919,11 @@ class InferenceEngine:
 
     def _decode_speculative(self, request: Request, draft: list[int], result: StepResult) -> None:
         """Verify one request's draft and emit the accepted prefix plus recovery token."""
-        if request.block_table is None:
-            raise ValueError(f"request {request.request_id!r} has no block table")
-
-        original_length = request.block_table.length
+        state = request.state
+        if not isinstance(state, DecodeReady):
+            raise ValueError(f"request {request.request_id!r} is not decode-ready")
+        table = state.table
+        original_length = table.length
         draft_tensor = torch.tensor(draft, dtype=torch.long, device=self.model.device)
         verify_input = torch.cat(
             [
@@ -922,7 +932,7 @@ class InferenceEngine:
             ]
         )
         with self._record_time("speculative_decode"):
-            logits = self.model.decode_tokens(self.cache, request.block_table, verify_input)
+            logits = self.model.decode_tokens(self.cache, table, verify_input)
 
         verifier_tokens = torch.argmax(logits, dim=-1)
         accepted = self._accepted_prefix_length(verifier_tokens[:-1], draft_tensor)
@@ -941,7 +951,7 @@ class InferenceEngine:
         if not emitted:
             raise ValueError("speculative verification produced no token to emit")
 
-        request.block_table.length = min(original_length + len(emitted), request.block_table.length)
+        table.length = min(original_length + len(emitted), table.length)
         for token in emitted:
             if request.finished:
                 break
@@ -951,7 +961,7 @@ class InferenceEngine:
         # length back, so return the unused trailing blocks to the pool (a finisher's table is
         # freed wholesale by _release_finished_in, so only trim a still-running request).
         if not request.finished:
-            request.block_table.trim_to_length()
+            table.trim_to_length()
         self._release_finished_in([request], result)
 
     def _accepted_prefix_length(
@@ -1011,14 +1021,15 @@ class InferenceEngine:
                     if self.prefix_cache is not None:
                         self._donate_to_prefix_cache(request)
                     self._free_block_table(request.block_table)
+                request.release_finished_table()
                 self.scheduler.release(request)
                 self._requests.pop(request.request_id, None)
 
     def _donate_to_prefix_cache(self, request: Request) -> None:
         """Cache a finished request's block-aligned cached prefix for cross-turn reuse.
 
-        Only the whole blocks the request actually filled are donated (``table.length`` floored
-        to a block multiple); a sequence shorter than one block has nothing block-aligned to give.
+        Deferred windows can cache tokens beyond recorded EOS. Donate complete blocks only
+        within the recorded sequence, excluding the final sampled token's uncached position.
         """
         if self.prefix_cache is None:
             return
@@ -1026,7 +1037,8 @@ class InferenceEngine:
         if table is None:
             return
         block_size = self.cache.block_size
-        cached_tokens = (table.length // block_size) * block_size
+        recorded_positions = len(request.prompt_ids) + request.generated_count - 1
+        cached_tokens = (min(table.length, recorded_positions) // block_size) * block_size
         if cached_tokens < block_size:
             return
         token_ids = (request.prompt_ids + request.generated)[:cached_tokens]
@@ -1126,7 +1138,7 @@ class InferenceEngine:
             request_id=victim.request_id,
             preempt_reason="kv_pressure",
             block_count=freed_blocks,
-            generated_tokens=len(victim.generated),
+            generated_tokens=victim.generated_count,
             pool_used=self.cache.allocator.num_used,
             pool_free=self.cache.allocator.num_free,
         )
@@ -1167,7 +1179,7 @@ class InferenceEngine:
                 "request_resumed",
                 request_id=request.request_id,
                 prompt_tokens=len(request.prompt_ids),
-                generated_tokens=len(request.generated),
+                generated_tokens=request.generated_count,
                 cached_tokens=request.prompt_cached_tokens,
                 pool_used=self.cache.allocator.num_used,
                 pool_free=self.cache.allocator.num_free,
@@ -1184,14 +1196,14 @@ class InferenceEngine:
         generated tokens already determine what it decodes next.
         """
         sequence = request.recompute_prompt_ids
-        if request.block_table is None:
-            request.block_table = self.cache.new_request()
-            request.block_table.owner = request.request_id
+        state = self._prefilling(request)
+        if state.mode != "recompute":
+            raise ValueError(f"request {request.request_id!r} does not need recompute")
 
         total = len(sequence)
         chunk_size = self.prefill_chunk_size or total
-        while request.prompt_cached_tokens < total:
-            start = request.prompt_cached_tokens
+        while state.cached_tokens < total:
+            start = state.cached_tokens
             step = min(chunk_size, total - start)
             self._ensure_pool_room(request, step)
             self._trace_prefill_chunk_started(
@@ -1201,8 +1213,9 @@ class InferenceEngine:
                 total_prompt_tokens=total,
             )
             with self._record_time("prefill"):
-                self._write_recompute_chunk(request, sequence, start, step)
-            request.prompt_cached_tokens = start + step
+                self._write_recompute_chunk(state.table, sequence, start, step)
+            request.advance_prefill(start + step)
+            state = self._prefilling(request)
             self._trace_prefill_chunk_progress(
                 request_id=request.request_id,
                 start_pos=start,
@@ -1211,20 +1224,19 @@ class InferenceEngine:
                 total_prompt_tokens=total,
                 completed=request.prompt_cached_tokens == total,
             )
-        request.prefilled = True
+        request.finish_recompute()
 
     def _write_recompute_chunk(
-        self, request: Request, sequence: list[int], start: int, count: int
+        self, table: BlockTable, sequence: list[int], start: int, count: int
     ) -> None:
         """Write KV for ``sequence[start:start+count]`` via the model's cached prefill path."""
-        assert request.block_table is not None
         if start == 0 and count == len(sequence):
-            self.model.prefill(sequence, self.cache, request.block_table)
+            self.model.prefill(sequence, self.cache, table)
             return
         self.model.prefill_chunk(
             sequence,
             self.cache,
-            request.block_table,
+            table,
             start_pos=start,
             chunk_size=count,
         )
@@ -1312,7 +1324,7 @@ class InferenceEngine:
             "request_finished",
             request_id=request.request_id,
             token_ids=tuple(request.generated),
-            generated_tokens=len(request.generated),
+            generated_tokens=request.generated_count,
             reason=reason,
         )
 

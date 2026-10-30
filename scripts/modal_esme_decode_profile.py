@@ -373,78 +373,41 @@ def _phase_profile(runtime, num_requests: int, config: dict | None = None) -> di
     return profiler.summary().as_dict()
 
 
-def _reference_by_request(oracle_runtime, requests) -> dict[str, list[int]]:
-    """fp32 oracle greedy outputs per request, computed once per unique prompt.
-
-    The workload cycles a small prompt pool, so large batches repeat prompts; greedy oracle
-    outputs are identical per prompt and need computing only once each.
-    """
-    from llm_infer.model.decode import greedy_decode
-
-    by_prompt: dict[tuple[int, ...], list[int]] = {}
-    for req in requests:
-        if req.prompt_ids not in by_prompt:
-            by_prompt[req.prompt_ids] = greedy_decode(
-                oracle_runtime.model,
-                list(req.prompt_ids),
-                max_new_tokens=MAX_NEW_TOKENS,
-                eos_token_ids=set(oracle_runtime.eos_token_ids),
-            )
-    return {req.request_id: list(by_prompt[req.prompt_ids]) for req in requests}
-
-
 def _bench_batch(
     oracle_runtime, flash_runtime, num_requests: int, config: dict | None = None
 ) -> dict:
     """One oracle-gated flash-engine row: median wall over fresh-engine iterations."""
-    import statistics
-
     import torch
 
-    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
-    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
-    from llm_infer.benchmarks.report import total_output_tokens
+    from llm_infer.benchmarks.esme_measurement import qualified_system_row
+    from llm_infer.benchmarks.esme_paged import measure_repeated, reference_outputs
 
     def decode_once() -> dict[str, list[int]]:
         engine, _ = _build_engine(flash_runtime, num_requests, "cuda", config)
         return engine.run()
 
-    for _ in range(WARMUP_ITERS):
-        decode_once()
-        torch.cuda.synchronize()
-    per_iter: list[float] = []
-    outputs: dict[str, list[int]] = {}
-    for _ in range(MEASURED_ITERS):
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        outputs = decode_once()
-        torch.cuda.synchronize()
-        per_iter.append(time.perf_counter() - start)
-    median_s = statistics.median(per_iter)
-
-    _, requests = _build_engine(flash_runtime, num_requests, "cuda")
-    reference = _reference_by_request(oracle_runtime, requests)
-    agreement = tie_tolerant_agreement(
-        oracle_runtime.model, requests, outputs, reference, oracle_runtime.eos_token_ids
+    per_iter, outputs = measure_repeated(
+        decode_once,
+        warmup=WARMUP_ITERS,
+        iters=MEASURED_ITERS,
+        synchronize=torch.cuda.synchronize,
     )
-    tokens = total_output_tokens(outputs, oracle_runtime.eos_token_ids)
+    _, requests = _build_engine(flash_runtime, num_requests, "cuda")
+    reference = reference_outputs(
+        oracle_runtime.model,
+        requests,
+        max_new_tokens=MAX_NEW_TOKENS,
+        eos_token_ids=oracle_runtime.eos_token_ids,
+    )
     return {
         "batch_size": num_requests,
-        "agreement": {
-            "exact": agreement.exact,
-            "tie": agreement.tie,
-            "nontie": agreement.nontie,
-            "total": agreement.total,
-            "ties_sample": agreement.ties_sample,
-            "divergences_sample": agreement.divergences_sample,
-        },
-        "median_seconds": median_s,
-        "per_iter_seconds": per_iter,
-        "total_output_tokens": tokens,
-        **build_system_evidence_record(
-            agreement=agreement,
-            median_seconds=median_s,
-            total_tokens=tokens,
+        **qualified_system_row(
+            oracle_runtime.model,
+            requests,
+            outputs,
+            reference,
+            oracle_runtime.eos_token_ids,
+            per_iter,
         ),
     }
 
@@ -1001,6 +964,7 @@ def grouped_layer_ab(
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.esme_paged import (
         HEADLINE_PROMPTS,
+        ReferenceOutputCache,
         build_requests,
         requests_at_context_length,
     )
@@ -1010,7 +974,6 @@ def grouped_layer_ab(
         build_system_evidence_record,
         normalized_outputs_match,
     )
-    from llm_infer.model.decode import greedy_decode
     from llm_infer.model.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
@@ -1029,7 +992,6 @@ def grouped_layer_ab(
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
     rows: list[dict[str, object]] = []
     candidate_label = f"{grouped_layers}_layer_group"
 
@@ -1037,19 +999,9 @@ def grouped_layer_ab(
         ordered = sorted(values)
         return ordered[math.ceil(0.95 * len(ordered)) - 1]
 
-    def reference_for(requests) -> dict[str, list[int]]:
-        for request in requests:
-            if request.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[request.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(request.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {
-            request.request_id: list(reference_by_prompt[request.prompt_ids])
-            for request in requests
-        }
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     for batch_size in batch_sizes:
         runtimes = {
@@ -1218,7 +1170,7 @@ def grouped_layer_ab(
                 "batch_size": batch_size,
                 "context_length": context_length,
                 "runner": label,
-                "agreement": dataclasses.asdict(agreement),
+                "agreement": agreement.as_dict(),
                 "decode_token_counts": token_counts[label],
                 "total_decode_tokens": tokens,
             }
@@ -1399,6 +1351,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.esme_paged import (
         HEADLINE_PROMPTS,
+        ReferenceOutputCache,
         build_requests,
         requests_at_context_length,
     )
@@ -1407,7 +1360,6 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
         build_system_evidence_record,
         normalized_outputs_match,
     )
-    from llm_infer.model.decode import greedy_decode
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
 
@@ -1423,21 +1375,10 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
 
-    def reference_for(requests) -> dict[str, list[int]]:
-        for request in requests:
-            if request.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[request.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(request.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {
-            request.request_id: list(reference_by_prompt[request.prompt_ids])
-            for request in requests
-        }
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     def build_engine(runtime, requests, batch_size: int, **grouped_kwargs) -> InferenceEngine:
         needed = sum(
@@ -1547,7 +1488,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
                     if label == "piecewise_padded"
                     else batch_size
                 ),
-                "agreement": dataclasses.asdict(agreement),
+                "agreement": agreement.as_dict(),
                 "decode_median_seconds": median_s,
                 "decode_per_iter_seconds": timings[label],
                 "total_decode_tokens": tokens,
@@ -1648,7 +1589,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
                 )
                 runner = engine.grouped_decode_runners[size]
                 parity[str(size)] = {
-                    "agreement": dataclasses.asdict(agreement),
+                    "agreement": agreement.as_dict(),
                     "steps_handled": runner.steps_handled,
                 }
                 if runner.steps_handled == 0:
@@ -2075,7 +2016,7 @@ def fusion_probe(batch_sizes: list[int]) -> str:
             agreement = tie_tolerant_agreement(
                 oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
             )
-            gate[arm] = dataclasses.asdict(agreement)
+            gate[arm] = agreement.as_dict()
         eager_outputs, compiled_outputs = outputs["eager"][size], outputs["compiled"][size]
         gate["parity_status"] = (
             "failed"
@@ -2684,7 +2625,7 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
                 agreement = tie_tolerant_agreement(
                     oracle_runtime.model, requests, outputs[name][arm][size], reference, frozenset()
                 )
-                row[arm]["agreement"] = dataclasses.asdict(agreement)
+                row[arm]["agreement"] = agreement.as_dict()
             device_outputs, host_outputs = (
                 outputs[name]["device"][size],
                 outputs[name]["host"][size],

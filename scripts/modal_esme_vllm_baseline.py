@@ -695,9 +695,8 @@ def finalize_row(
     total_output_tokens: int,
 ) -> dict[str, object]:
     """Attach gate and steady-state statistics; suppress speed for a failed gate."""
-    import dataclasses
 
-    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
+    from llm_infer.benchmarks.reference_policy import SystemEvidence
 
     timings = worker_row["per_iter_seconds"]
     median_seconds = statistics.median(timings)
@@ -705,16 +704,16 @@ def finalize_row(
         "system": system,
         "batch_size": worker_row["batch_size"],
         "context_tokens": worker_row["context_tokens"],
-        "agreement": dataclasses.asdict(agreement),
+        "agreement": agreement.as_dict(),
         "per_iter_seconds": timings,
         "median_seconds": median_seconds,
         "p95_seconds": percentile(timings, 95),
         "total_output_tokens": total_output_tokens,
-        **build_system_evidence_record(
+        **SystemEvidence.from_timing(
             agreement=agreement,
             median_seconds=median_seconds,
             total_tokens=total_output_tokens,
-        ),
+        ).as_dict(),
     }
 
 

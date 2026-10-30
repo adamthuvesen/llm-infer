@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from llm_infer.benchmarks.paired_ab import judge_json_records
-from llm_infer.benchmarks.reference_policy import headline_tokens_per_second
+from llm_infer.benchmarks.paired_ab import judge_json_records, read_paired_record
+from llm_infer.benchmarks.reference_policy import (
+    EsmeAgreement,
+    SystemEvidence,
+    headline_tokens_per_second,
+)
 from scripts import check_benchmark_evidence as evidence_check
 from scripts.judge_paired_ab import main as judge_main
 
@@ -34,7 +39,7 @@ def test_policy_and_registered_judge_import_without_torch() -> None:
             "-S",
             "-c",
             "from llm_infer.benchmarks.reference_policy import EsmeAgreement; "
-            "from llm_infer.benchmarks.paired_ab import judge_json_records; "
+            "from llm_infer.benchmarks.paired_ab import judge_json_records, read_paired_record; "
             "import sys; assert 'torch' not in sys.modules",
         ],
         cwd=ROOT,
@@ -158,3 +163,70 @@ def test_timeline_metadata_must_describe_executed_runs(
     assert "iters=3 differs from child execution count 1" in errors[1]
     assert all("llm_infer/benchmarks/report.py" in error for error in errors)
     assert all("keep the measured timing unchanged" in error for error in errors)
+
+
+def test_paired_record_snapshots_measured_rounds_and_row_membership() -> None:
+    source, _ = _pair("esme-full-step-ab")
+    record = read_paired_record(source)
+    key = ("grouped", 1)
+    walls = record.rows[key].baseline.walls_s
+    agreement = record.rows[key].baseline.agreement.as_dict()
+    source["configs"]["grouped"][0]["grouped4"]["walls_s"][0] = 999.0
+    source["configs"]["grouped"][0]["grouped4"]["agreement"]["exact"] = 0
+    assert record.rows[key].baseline.walls_s == walls
+    assert record.rows[key].baseline.agreement.as_dict() == agreement
+    assert isinstance(walls, tuple)
+    with pytest.raises(TypeError):
+        record.rows[key] = record.rows[key]
+
+
+def test_wire_evidence_accepts_measured_rate_without_new_timing_metadata() -> None:
+    row = json.loads((ROOT / "assets/esme-batch-curve.json").read_text())["rows"][0]
+    del row["median_seconds"]
+    del row["total_output_tokens"]
+    evidence = SystemEvidence.from_record(row)
+    assert evidence.tokens_per_second == row["tokens_per_second"]
+    assert evidence.as_dict() == {key: row[key] for key in evidence.as_dict()}
+
+
+def test_wire_evidence_rejects_rate_that_conflicts_with_recorded_measurements() -> None:
+    row = json.loads((ROOT / "assets/esme-batch-curve.json").read_text())["rows"][0]
+    row["raw_tokens_per_second"] *= 2
+    row["tokens_per_second"] = row["raw_tokens_per_second"]
+    with pytest.raises(ValueError, match="from measured timing and token count"):
+        headline_tokens_per_second(row)
+
+
+def test_committed_headline_claims_round_trip_through_immutable_evidence() -> None:
+    def claims(value: object) -> Iterator[dict[str, object]]:
+        if isinstance(value, dict):
+            if (
+                value.get("headline_eligible") is True
+                and "agreement" in value
+                and "raw_tokens_per_second" in value
+            ):
+                yield value
+            for nested in value.values():
+                yield from claims(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from claims(nested)
+
+    rows = [
+        row
+        for path in (ROOT / "assets").rglob("*.json")
+        for row in claims(json.loads(path.read_text()))
+    ]
+    assert rows
+    for row in rows:
+        evidence = SystemEvidence.from_record(row)
+        assert headline_tokens_per_second(row) == evidence.tokens_per_second
+        assert evidence.as_dict() == {key: row[key] for key in evidence.as_dict()}
+
+
+def test_wire_evidence_rejects_boolean_public_rate_equal_to_a_valid_number() -> None:
+    agreement = EsmeAgreement(1, 0, 0, 1, [], [])
+    evidence = SystemEvidence(agreement, 1.0)
+    row = {**evidence.as_dict(), "agreement": agreement.as_dict(), "tokens_per_second": True}
+    with pytest.raises(ValueError, match="tokens_per_second=True"):
+        headline_tokens_per_second(row)

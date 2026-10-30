@@ -13,7 +13,6 @@ gates against the fp32 oracle, and the record stores direct token parity between
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 import os
@@ -179,7 +178,7 @@ def full_step_ab(batch_sizes: list[int]) -> str:
             agreement = tie_tolerant_agreement(
                 oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
             )
-            row[arm]["agreement"] = dataclasses.asdict(agreement)
+            row[arm]["agreement"] = agreement.as_dict()
         baseline, candidate = outputs["grouped4"][size], outputs["full_step"][size]
         row["parity_status"] = (
             "failed"

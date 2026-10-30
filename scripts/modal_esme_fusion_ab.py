@@ -21,7 +21,6 @@ grouped layers, and all 30.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 import os
@@ -193,7 +192,7 @@ def fusion_ab(batch_sizes: list[int]) -> str:
             agreement = tie_tolerant_agreement(
                 oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
             )
-            row[arm]["agreement"] = dataclasses.asdict(agreement)
+            row[arm]["agreement"] = agreement.as_dict()
         baseline, candidate = outputs["full_step"][size], outputs["full_step_fused"][size]
         row["parity_status"] = (
             "failed"

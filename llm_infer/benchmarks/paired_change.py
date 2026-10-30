@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 BOOTSTRAP_RESAMPLES = 10_000
@@ -32,8 +33,8 @@ class PairedChange:
 
 
 def paired_change(
-    baseline: list[float],
-    candidate: list[float],
+    baseline: Sequence[float],
+    candidate: Sequence[float],
     *,
     resamples: int = BOOTSTRAP_RESAMPLES,
     seed: int = BOOTSTRAP_SEED,

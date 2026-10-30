@@ -170,7 +170,7 @@ def bench_hf_and_engine(
         reference_outputs,
     )
     from llm_infer.benchmarks.esme_three_way import run_three_way, tie_tolerant_agreement
-    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
+    from llm_infer.benchmarks.reference_policy import SystemEvidence
     from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
     from llm_infer.model.decode_graph import DEFAULT_CAPTURE_SIZES, enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
@@ -243,11 +243,11 @@ def bench_hf_and_engine(
             "agreement": agreement.as_dict(),
             "median_seconds": t.median_seconds,
             "total_output_tokens": t.total_output_tokens,
-            **build_system_evidence_record(
+            **SystemEvidence.from_timing(
                 agreement=agreement,
                 median_seconds=t.median_seconds,
                 total_tokens=t.total_output_tokens,
-            ),
+            ).as_dict(),
         }
 
     return json.dumps(
@@ -360,15 +360,15 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             tokens = main_res["vllm_total_output_tokens"]
             from llm_infer.benchmarks.reference_policy import (
                 EsmeAgreement,
-                build_system_evidence_record,
+                SystemEvidence,
             )
 
             row.update(
-                build_system_evidence_record(
+                SystemEvidence.from_timing(
                     agreement=EsmeAgreement.from_record(row["agreement"]),
                     median_seconds=vllm_res["median_seconds"],
                     total_tokens=tokens,
-                )
+                ).as_dict()
             )
 
     _print_table(rows)

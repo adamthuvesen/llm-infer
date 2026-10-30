@@ -26,7 +26,6 @@ how the right side of the curve fits in memory.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import time
 from pathlib import Path
@@ -169,7 +168,9 @@ def sweep_baseline(
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.benchmarks.esme_paged import (
         HEADLINE_PROMPTS,
+        ReferenceOutputCache,
         build_requests,
+        measure_repeated,
         requests_at_context_length,
         single_request_prompt_coverage,
     )
@@ -180,7 +181,6 @@ def sweep_baseline(
         build_system_evidence_record,
     )
     from llm_infer.benchmarks.report import total_output_tokens
-    from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.profiling import TimingProfiler
@@ -198,7 +198,6 @@ def sweep_baseline(
     # context length. Natural EOS would turn some repeated-token contexts into one-token rows.
     eos = frozenset()
     capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
 
     def p95(values: list[float]) -> float:
         ordered = sorted(values)
@@ -209,19 +208,9 @@ def sweep_baseline(
             build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS), context_length
         )
 
-    def reference_for(requests) -> dict[str, list[int]]:
-        for request in requests:
-            if request.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[request.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(request.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {
-            request.request_id: list(reference_by_prompt[request.prompt_ids])
-            for request in requests
-        }
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     def agreement_record(requests, outputs):
         agreement = tie_tolerant_agreement(
@@ -277,17 +266,9 @@ def sweep_baseline(
                     )
                 return engine.run()
 
-            for _ in range(warmup):
-                persistent_once()
-                torch.cuda.synchronize()
-            per_iter: list[float] = []
-            outputs: dict[str, list[int]] = {}
-            for _ in range(iters):
-                torch.cuda.synchronize()
-                start = time.perf_counter()
-                outputs = persistent_once()
-                torch.cuda.synchronize()
-                per_iter.append(time.perf_counter() - start)
+            per_iter, outputs = measure_repeated(
+                persistent_once, warmup=warmup, iters=iters, synchronize=torch.cuda.synchronize
+            )
 
             agreement, agreement_assessment = agreement_record(requests, outputs)
             tokens = total_output_tokens(outputs, eos)
@@ -433,19 +414,21 @@ def sweep(
 ) -> str:
     """All llm_infer and HF-floor rows in ONE container, plus the oracle gate for every row."""
     import math
-    import statistics
 
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
+    from llm_infer.benchmarks.esme_measurement import qualified_system_row
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        ReferenceOutputCache,
+        build_requests,
+        measure_repeated,
+    )
     from llm_infer.benchmarks.esme_three_way import (
         run_hf_sequential_esme,
-        tie_tolerant_agreement,
     )
-    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
-    from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
-    from llm_infer.model.decode import greedy_decode
+    from llm_infer.benchmarks.report import normalize_at_eos
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
@@ -471,33 +454,17 @@ def sweep(
     )
 
     # fp32 oracle greedy decode once per unique prompt, shared by every row in this record.
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
 
-    def reference_for(requests) -> dict[str, list[int]]:
-        for req in requests:
-            if req.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[req.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(req.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     def gated_row(system: str, size: int, requests, outputs, per_iter: list[float]) -> dict:
-        reference = reference_for(requests)
-        agreement = tie_tolerant_agreement(oracle_runtime.model, requests, outputs, reference, eos)
-        tokens = total_output_tokens(outputs, eos)
-        median_s = statistics.median(per_iter)
         return {
             "system": system,
             "batch_size": size,
-            "agreement": dataclasses.asdict(agreement),
-            "median_seconds": median_s,
-            "per_iter_seconds": per_iter,
-            "total_output_tokens": tokens,
-            **build_system_evidence_record(
-                agreement=agreement, median_seconds=median_s, total_tokens=tokens
+            **qualified_system_row(
+                oracle_runtime.model, requests, outputs, reference_for(requests), eos, per_iter
             ),
         }
 
@@ -532,17 +499,9 @@ def sweep(
                 )
             return engine.run()
 
-        for _ in range(warmup):
-            decode_once()
-            torch.cuda.synchronize()
-        per_iter: list[float] = []
-        outputs: dict[str, list[int]] = {}
-        for _ in range(iters):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            outputs = decode_once()
-            torch.cuda.synchronize()
-            per_iter.append(time.perf_counter() - start)
+        per_iter, outputs = measure_repeated(
+            decode_once, warmup=warmup, iters=iters, synchronize=torch.cuda.synchronize
+        )
 
         row = gated_row("llm_infer", size, requests, outputs, per_iter)
         model = engine_runtime.model
@@ -577,17 +536,9 @@ def sweep(
             device="cuda",
         )
         hf_warmup = 1 if hf_iters > 1 else 0
-        for _ in range(hf_warmup):
-            decode_once()
-            torch.cuda.synchronize()
-        per_iter = []
-        outputs = {}
-        for _ in range(hf_iters):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            outputs = decode_once()
-            torch.cuda.synchronize()
-            per_iter.append(time.perf_counter() - start)
+        per_iter, outputs = measure_repeated(
+            decode_once, warmup=hf_warmup, iters=hf_iters, synchronize=torch.cuda.synchronize
+        )
         row = gated_row("hf_sequential", size, requests, outputs, per_iter)
         row["flatness_check"] = hf_iters == 1
         rows.append(row)
@@ -651,14 +602,17 @@ def sweep_grouped_ab(
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        ReferenceOutputCache,
+        build_requests,
+    )
     from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
     from llm_infer.benchmarks.reference_policy import (
         build_system_evidence_record,
         normalized_outputs_match,
     )
     from llm_infer.benchmarks.report import total_output_tokens
-    from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
@@ -675,18 +629,9 @@ def sweep_grouped_ab(
     capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
     print(f"[grouped-ab] piecewise buckets {CAPTURE_SIZES} captured in {capture_s:.1f} s")
 
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
-
-    def reference_for(requests) -> dict[str, list[int]]:
-        for req in requests:
-            if req.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[req.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(req.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     rows: list[dict] = []
     for size in batch_sizes:
@@ -746,7 +691,7 @@ def sweep_grouped_ab(
             row = {
                 "system": f"llm_infer_{arm}",
                 "batch_size": size,
-                "agreement": dataclasses.asdict(agreement),
+                "agreement": agreement.as_dict(),
                 "median_seconds": median_s,
                 "per_iter_seconds": timings[arm],
                 "total_output_tokens": tokens,
@@ -812,18 +757,19 @@ def sweep_flashinfer_compare(
 ) -> str:
     """Headline workload A/B: current llm_infer graph path vs FlashInfer paged decode."""
     import math
-    import statistics
 
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
-    from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
-    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
-    from llm_infer.benchmarks.report import total_output_tokens
+    from llm_infer.benchmarks.esme_measurement import qualified_system_row
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        ReferenceOutputCache,
+        build_requests,
+        measure_repeated,
+    )
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
-    from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
     from llm_infer.serving import InferenceEngine, Request
@@ -862,26 +808,14 @@ def sweep_flashinfer_compare(
         print(f"[flashinfer-curve] {system}: captured {CAPTURE_SIZES} in {capture_s:.1f} s")
 
     eos = oracle_runtime.eos_token_ids
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
 
-    def reference_for(requests) -> dict[str, list[int]]:
-        for req in requests:
-            if req.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[req.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(req.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     def gated_row(
         system: str, size: int, runtime, requests, outputs, per_iter: list[float]
     ) -> dict:
-        reference = reference_for(requests)
-        agreement = tie_tolerant_agreement(oracle_runtime.model, requests, outputs, reference, eos)
-        tokens = total_output_tokens(outputs, eos)
-        median_s = statistics.median(per_iter)
         model = runtime.model
         kv_bytes_per_token = (
             model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
@@ -889,12 +823,8 @@ def sweep_flashinfer_compare(
         return {
             "system": system,
             "batch_size": size,
-            "agreement": dataclasses.asdict(agreement),
-            "median_seconds": median_s,
-            "per_iter_seconds": per_iter,
-            "total_output_tokens": tokens,
-            **build_system_evidence_record(
-                agreement=agreement, median_seconds=median_s, total_tokens=tokens
+            **qualified_system_row(
+                oracle_runtime.model, requests, outputs, reference_for(requests), eos, per_iter
             ),
             "kv_bytes_per_token": kv_bytes_per_token,
         }
@@ -929,17 +859,9 @@ def sweep_flashinfer_compare(
                     )
                 return engine.run()
 
-            for _ in range(warmup):
-                decode_once()
-                torch.cuda.synchronize()
-            per_iter: list[float] = []
-            outputs: dict[str, list[int]] = {}
-            for _ in range(iters):
-                torch.cuda.synchronize()
-                start = time.perf_counter()
-                outputs = decode_once()
-                torch.cuda.synchronize()
-                per_iter.append(time.perf_counter() - start)
+            per_iter, outputs = measure_repeated(
+                decode_once, warmup=warmup, iters=iters, synchronize=torch.cuda.synchronize
+            )
 
             row = gated_row(system, size, runtime, requests, outputs, per_iter)
             row["kv_pool"] = {
@@ -1014,17 +936,19 @@ def sweep_ladder(
     from transformers import AutoModelForCausalLM
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
-    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests
+    from llm_infer.benchmarks.esme_measurement import qualified_system_row
+    from llm_infer.benchmarks.esme_paged import (
+        HEADLINE_PROMPTS,
+        ReferenceOutputCache,
+        build_requests,
+        measure_repeated,
+    )
     from llm_infer.benchmarks.esme_three_way import (
         run_hf_sequential_esme,
-        tie_tolerant_agreement,
     )
     from llm_infer.benchmarks.reference_policy import (
-        build_system_evidence_record,
         normalized_outputs_match,
     )
-    from llm_infer.benchmarks.report import total_output_tokens
-    from llm_infer.model.decode import greedy_decode
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.fused_elementwise import use_fused_elementwise
     from llm_infer.model.runtime import load_model_runtime
@@ -1057,52 +981,18 @@ def sweep_ladder(
     model.decode_graphs = piecewise_runner
     print(f"[ladder] fused piecewise buckets captured in {fused_capture_s:.1f} s")
 
-    reference_by_prompt: dict[tuple[int, ...], list[int]] = {}
-
-    def reference_for(requests) -> dict[str, list[int]]:
-        for req in requests:
-            if req.prompt_ids not in reference_by_prompt:
-                reference_by_prompt[req.prompt_ids] = greedy_decode(
-                    oracle_runtime.model,
-                    list(req.prompt_ids),
-                    max_new_tokens=max_new_tokens,
-                    eos_token_ids=set(eos),
-                )
-        return {req.request_id: list(reference_by_prompt[req.prompt_ids]) for req in requests}
+    reference_for = ReferenceOutputCache(
+        oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
+    )
 
     def gated_row(system: str, size: int, requests, outputs, per_iter: list[float]) -> dict:
-        agreement = tie_tolerant_agreement(
-            oracle_runtime.model, requests, outputs, reference_for(requests), eos
-        )
-        tokens = total_output_tokens(outputs, eos)
-        median_s = statistics.median(per_iter)
         return {
             "system": system,
             "batch_size": size,
-            "agreement": dataclasses.asdict(agreement),
-            "median_seconds": median_s,
-            "per_iter_seconds": per_iter,
-            "total_output_tokens": tokens,
-            **build_system_evidence_record(
-                agreement=agreement, median_seconds=median_s, total_tokens=tokens
+            **qualified_system_row(
+                oracle_runtime.model, requests, outputs, reference_for(requests), eos, per_iter
             ),
         }
-
-    def timed(
-        decode_once, warmup_runs: int, measured_runs: int
-    ) -> tuple[list[float], dict[str, list[int]]]:
-        for _ in range(warmup_runs):
-            decode_once()
-            torch.cuda.synchronize()
-        per_iter: list[float] = []
-        outputs: dict[str, list[int]] = {}
-        for _ in range(measured_runs):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            outputs = decode_once()
-            torch.cuda.synchronize()
-            per_iter.append(time.perf_counter() - start)
-        return per_iter, outputs
 
     pad_id = sorted(eos)[0]
     hf_model = (
@@ -1134,7 +1024,7 @@ def sweep_ladder(
     rows: list[dict] = []
     floor_batch, floor_iters = hf_floor_spec
     floor_requests = build_requests(engine_runtime.tokenizer, floor_batch, HEADLINE_PROMPTS)
-    per_iter, outputs = timed(
+    per_iter, outputs = measure_repeated(
         run_hf_sequential_esme(
             Path(REMOTE_HF_PATH),
             floor_requests,
@@ -1142,16 +1032,20 @@ def sweep_ladder(
             eos_token_ids=eos,
             device="cuda",
         ),
-        1 if floor_iters > 1 else 0,
-        floor_iters,
+        warmup=1 if floor_iters > 1 else 0,
+        iters=floor_iters,
+        synchronize=torch.cuda.synchronize,
     )
     rows.append(gated_row("hf_sequential", floor_batch, floor_requests, outputs, per_iter))
     stall_guard.progress()
 
     for size in batch_sizes:
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
-        per_iter, outputs = timed(
-            lambda requests=requests: hf_batched_once(requests), warmup, iters
+        per_iter, outputs = measure_repeated(
+            lambda requests=requests: hf_batched_once(requests),
+            warmup=warmup,
+            iters=iters,
+            synchronize=torch.cuda.synchronize,
         )
         rows.append(gated_row("hf_batched", size, requests, outputs, per_iter))
         print(f"[ladder] batch={size} hf_batched: median {statistics.median(per_iter):.3f} s")

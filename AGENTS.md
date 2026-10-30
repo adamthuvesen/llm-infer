@@ -108,11 +108,12 @@ run also watches its log and raises an alarm after 10 minutes without output.
 
 | Rule | Enforcement | Proof | Added |
 | --- | --- | --- | --- |
-| Policy readers must not import inference execution | Import Linter checks direct and indirect imports in `pyproject.toml` | `make architecture-check` | 2026-11-04 |
+| Dependencies follow module ownership | Import Linter checks policy isolation and lower-module dependencies, including indirect imports | `make architecture-check` | 2026-11-04 |
 | Package and evidence CLI code must typecheck | `pyproject.toml` lists checked paths without package exclusions | `make typecheck` | 2026-11-04 |
 | Public tok/s requires qualified fp32 reference evidence | `benchmarks/reference_policy.py` constructs and reads policy-v2 evidence | `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
 | A/B parity and fp32 reference status stay separate | `benchmarks/paired_ab.py` judges records through the reference policy | `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
 | Deferred tokens survive abort and batch changes | `serving/decode_window.py` owns staged buffers, `serving/engine.py` consumes them | `tests/serving/test_decode_window.py` | 2026-11-04 |
+| Decode-ready requests always have a KV table | `serving/request.py` uses explicit phases and read-only state views | `make typecheck`, `tests/correctness/test_request_lifecycle.py` | 2026-11-04 |
 | Scheduler membership changes use scheduler methods | `Scheduler.waiting` and `Scheduler.running` expose read-only collection types | `make typecheck`, `tests/scheduler/test_scheduler.py` | 2026-11-04 |
 | Trace replay rejects malformed events | `tracing.py` defines events, `visualizer/trace_loader.js` validates input | `tests/serving/test_tracing.py`, `make visualizer-test` | 2026-11-04 |
 
@@ -126,7 +127,9 @@ runtime immutability. Change membership through `add`, `admit`, `release`, `requ
 | Change | Start here | Check |
 | --- | --- | --- |
 | Backend support or grouped graph construction | `model/interface.py`, `model/runtime.py` | `tests/model/test_runtime.py`, `tests/serving/test_engine_grouped_decode.py` |
-| Request lifecycle, decode windows, or KV release | `serving/engine.py`, `serving/decode_window.py`, `scheduler/scheduler.py` | `tests/serving/test_decode_window.py`, `tests/correctness/` |
+| Request lifecycle or KV release | `serving/request.py`, `serving/engine.py`, `scheduler/scheduler.py` | `tests/correctness/test_request_lifecycle.py`, `tests/correctness/test_preemption.py` |
+| Deferred decode windows | `serving/decode_window.py`, `serving/engine.py` | `tests/serving/test_decode_window.py` |
+| Benchmark timing or oracle caching | `benchmarks/esme_paged.py`, `benchmarks/esme_measurement.py` | `tests/benchmarks/test_esme_measurement.py` |
 | Benchmark qualification or A/B verdicts | `benchmarks/reference_policy.py`, `benchmarks/paired_ab.py` | `tests/benchmarks/`, `make evidence-check` |
 | Trace events or replay | `tracing.py`, `visualizer/trace_loader.js` | `tests/serving/test_tracing.py`, `make visualizer-test` |
 

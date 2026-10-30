@@ -36,8 +36,8 @@ from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from llm_infer.benchmarks.reference_policy import (
     QUALIFIED_REFERENCE_STATUSES,
     EsmeAgreement,
-    build_reference_only_record,
-    build_system_evidence_record,
+    ReferenceEvidence,
+    SystemEvidence,
     reference_status,
 )
 from llm_infer.model.runtime import ModelRuntime
@@ -57,19 +57,19 @@ class GalleryTiming:
 
     @property
     def tokens_per_second(self) -> float | None:
-        return build_system_evidence_record(
+        return SystemEvidence.from_timing(
             agreement=self.agreement,
             median_seconds=self.median_seconds,
             total_tokens=self.total_output_tokens,
-        )["tokens_per_second"]
+        ).tokens_per_second
 
     @property
     def raw_tokens_per_second(self) -> float | None:
-        return build_system_evidence_record(
+        return SystemEvidence.from_timing(
             agreement=self.agreement,
             median_seconds=self.median_seconds,
             total_tokens=self.total_output_tokens,
-        )["raw_tokens_per_second"]
+        ).raw_tokens_per_second
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -77,11 +77,11 @@ class GalleryTiming:
             "median_seconds": self.median_seconds,
             "total_output_tokens": self.total_output_tokens,
             "agreement": self.agreement.as_dict(),
-            **build_system_evidence_record(
+            **SystemEvidence.from_timing(
                 agreement=self.agreement,
                 median_seconds=self.median_seconds,
                 total_tokens=self.total_output_tokens,
-            ),
+            ).as_dict(),
         }
 
 
@@ -312,7 +312,7 @@ def run_chunked_prefill_latency(
                 **{key: value for key, value in run.items() if key != "outputs"},
                 "stall_vs_pre_arrival_step": stall,
                 "agreement": agreement.as_dict(),
-                **build_reference_only_record(agreement),
+                **ReferenceEvidence(agreement).as_dict(),
             }
         )
     return {
@@ -386,7 +386,7 @@ def run_preemption_starved_pool(
                 "completed_requests": len(outputs),
                 "total_output_tokens": tokens,
                 "agreement": agreement.as_dict(),
-                **build_reference_only_record(agreement),
+                **ReferenceEvidence(agreement).as_dict(),
             }
         )
     if preemption_count_on == 0:

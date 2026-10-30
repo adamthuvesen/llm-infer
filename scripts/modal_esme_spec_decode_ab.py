@@ -201,7 +201,7 @@ def spec_decode_ab(workloads: dict[str, list[str]]) -> str:
             agreement = tie_tolerant_agreement(
                 oracle.model, measured, outputs[arm], reference, frozenset()
             )
-            row[arm]["agreement"] = dataclasses.asdict(agreement)
+            row[arm]["agreement"] = agreement.as_dict()
         identical = [
             position
             for position, req in enumerate(measured)

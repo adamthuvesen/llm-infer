@@ -448,7 +448,11 @@ class PretrainBundleModel:
         :meth:`decode_window_step` never allocates or syncs for positions.
         """
         uses_native_pages = self._uses_paged_decode_backend()
-        runner_needs_packed = bool(getattr(self.decode_graphs, "requires_packed_read_plan", False))
+        runner_needs_packed = (
+            self.decode_graphs.requires_packed_read_plan
+            if self.decode_graphs is not None
+            else False
+        )
         plan = build_decode_window_plan(
             cache,
             tables,

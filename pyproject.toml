@@ -74,6 +74,34 @@ forbidden_modules = [
     "llm_infer.benchmarks.esme_gallery",
 ]
 
+[[tool.importlinter.contracts]]
+name = "KV cache and kernels do not depend on models, scheduling, serving, or benchmarks"
+type = "forbidden"
+source_modules = ["llm_infer.kv_cache", "llm_infer.kernels"]
+forbidden_modules = [
+    "llm_infer.model",
+    "llm_infer.scheduler",
+    "llm_infer.serving",
+    "llm_infer.benchmarks",
+]
+
+[[tool.importlinter.contracts]]
+name = "Models do not depend on scheduling, serving, or benchmarks"
+type = "forbidden"
+source_modules = ["llm_infer.model"]
+forbidden_modules = ["llm_infer.scheduler", "llm_infer.serving", "llm_infer.benchmarks"]
+
+[[tool.importlinter.contracts]]
+name = "Scheduler uses request values without engine, HTTP, model, or benchmark imports"
+type = "forbidden"
+source_modules = ["llm_infer.scheduler"]
+forbidden_modules = [
+    "llm_infer.serving.engine",
+    "llm_infer.serving.server",
+    "llm_infer.model",
+    "llm_infer.benchmarks",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not slow'"

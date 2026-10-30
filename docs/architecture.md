@@ -85,12 +85,39 @@ Dependency direction stays simple:
 scripts/tests/server -> serving -> scheduler + model -> kv_cache + kernels
 ```
 
+`make architecture-check` enforces four dependency contracts, including indirect imports.
+KV cache and kernels cannot import models, scheduling, serving, or benchmarks.
+Models cannot import scheduling, serving, or benchmarks.
+The scheduler can import request values, but cannot import engine, HTTP, model, or benchmark code.
+Policy readers cannot import inference execution.
+
 The main swap point is [`AttentionBackend`](../llm_infer/kernels/base.py). Model backends
 prepare tensors, paging, RoPE positions, and GQA layout; attention backends compute attention.
 
 [`InferenceEngine`](../llm_infer/serving/engine.py) owns request mutation, scheduler transitions,
 KV release, and trace emission. Its methods keep admission, prefill, decode, preemption, and
 completion in one lifecycle owner.
+
+[`Request`](../llm_infer/serving/request.py) keeps one private state with four frozen phase types:
+
+| Phase | State |
+| --- | --- |
+| `Pending` | Initial or recompute mode, without a KV table |
+| `Prefilling` | KV table, cached token count, and initial or recompute mode |
+| `DecodeReady` | Required KV table |
+| `Terminal` | EOS, length, or cancellation reason, plus a table until release |
+
+Initial prefill records the first sampled token before entering `DecodeReady`.
+Preemption returns the same request to `Pending` and preserves its mode, tokens, and RNG.
+Recompute rebuilds KV for `prompt + generated[:-1]` and enters `DecodeReady` without sampling.
+Phase checks read host state and do not materialize generated tokens.
+The engine checks scheduler membership before operating on candidates that another request could preempt.
+
+EOS and length finishers retain their table while the engine donates eligible prefix blocks and frees request references.
+The engine then clears the terminal table and releases scheduler membership before the next model operation.
+Abort drains deferred tokens before cancelling a request and releasing its table.
+Standalone `record()` calls preserve token-only use without entering `DecodeReady`.
+Engine admission accepts only unstarted requests.
 
 [`DecodeWindows`](../llm_infer/serving/decode_window.py) owns active windows, staged host copies,
 and cached EOS tensors. It retains device matrices until the engine consumes each stage.
@@ -174,10 +201,13 @@ a same-run relative claim even when both paths share a reference review. This di
 correctness checks useful without suppressing evidence about whether an optimization changed the
 model's behavior.
 
-[`reference_policy.py`](../llm_infer/benchmarks/reference_policy.py) owns `EsmeAgreement` and typed
-policy records. It classifies agreement without importing model execution.
-`build_system_evidence_record()` constructs records with raw timing and qualified public timing.
-`headline_tokens_per_second()` validates persisted agreement and status before public tables read speed.
+[`reference_policy.py`](../llm_infer/benchmarks/reference_policy.py) owns immutable `EsmeAgreement`,
+`ReferenceEvidence`, and `SystemEvidence` values. Evidence derives status, eligibility, and public throughput from validated inputs.
+Agreement diagnostics are copied into immutable containers. Serialization returns independent JSON collections.
+`SystemEvidence.from_timing()` computes raw throughput from measured duration and output tokens.
+Record builders serialize these values at JSON boundaries.
+`headline_tokens_per_second()` validates persisted agreement and claims before public tables read speed.
+Policy evaluation does not import model execution.
 
 [`paired_ab.py`](../llm_infer/benchmarks/paired_ab.py) validates paired records and applies their
 registered decision rule. The CLI in [`judge_paired_ab.py`](../scripts/judge_paired_ab.py) supplies
@@ -207,6 +237,14 @@ assets.
 
 Current Esme measurements compare `llm_infer` on the Esme paged-KV path with batched HF
 `generate()` and vLLM on the converted checkpoint, with naive sequential HF as the floor.
+
+[`esme_paged.py`](../llm_infer/benchmarks/esme_paged.py) owns shared workload and measurement functions.
+`ReferenceOutputCache` caches each prompt under one oracle, EOS policy, and token budget.
+`measure_repeated()` retains every measured duration and synchronizes before and after each measured call.
+Callers own engine construction, so each experiment retains its timing boundary.
+[`esme_measurement.py`](../llm_infer/benchmarks/esme_measurement.py) creates reference-qualified rows with complete agreement diagnostics.
+The decode profile and batch curve harnesses use these checked package modules.
+Modal images, GPU setup, and experiment-specific execution remain in `scripts/`.
 
 The repo's claim is narrow: a small, legible, reference-checked paged engine whose speed is
 measured against an honest baseline and a mature engine on the same GPU. See

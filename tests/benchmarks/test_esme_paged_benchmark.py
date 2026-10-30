@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from llm_infer.benchmarks.esme_measurement import qualified_system_row
 from llm_infer.benchmarks.esme_paged import (
     EsmeBenchRequest,
     requests_at_context_length,
@@ -77,7 +78,8 @@ def test_tie_tolerant_agreement_fails_missing_or_extra_request_ids() -> None:
         frozenset({99}),
     )
     assert missing.total == 2
-    assert missing.nontie == 1
+    assert missing.nontie == missing.failed == 1
+    assert missing.exact == 1
     assert not missing.all_ties_or_exact
     assert "missing outputs" in str(missing.divergences_sample)
 
@@ -89,6 +91,61 @@ def test_tie_tolerant_agreement_fails_missing_or_extra_request_ids() -> None:
         frozenset({99}),
     )
     assert extra.total == 2
-    assert extra.nontie == 1
+    assert extra.nontie == extra.failed == 2
+    assert extra.exact == 0
     assert not extra.all_ties_or_exact
     assert "unexpected outputs" in str(extra.divergences_sample)
+
+
+@pytest.mark.parametrize(
+    ("outputs", "exact", "failed", "unexpected", "missing"),
+    [
+        ({"r0": [1, 2]}, 1, 2, [], ["r1", "r2"]),
+        ({}, 0, 3, [], ["r0", "r1", "r2"]),
+        (
+            {"r0": [1, 2], "r1": [3, 4], "r2": [5, 6], "extra0": [7], "extra1": [8]},
+            0,
+            3,
+            ["extra0", "extra1"],
+            [],
+        ),
+        ({"extra0": [7], "extra1": [8]}, 0, 3, ["extra0", "extra1"], ["r0", "r1", "r2"]),
+    ],
+)
+def test_malformed_output_sets_keep_failed_reference_evidence_and_raw_timing(
+    outputs: dict[str, list[int]],
+    exact: int,
+    failed: int,
+    unexpected: list[str],
+    missing: list[str],
+) -> None:
+    requests = [*_requests(), EsmeBenchRequest("r2", "p2", (3, 6))]
+    reference = {"r0": [1, 2], "r1": [3, 4], "r2": [5, 6]}
+    agreement = tie_tolerant_agreement(
+        _OracleMustNotBeUsed(), requests, outputs, reference, frozenset()
+    )
+    assert agreement.total == len(reference)
+    assert agreement.exact == exact
+    assert agreement.failed == agreement.nontie == failed
+    assert agreement.review_required == agreement.tie == 0
+    assert agreement.exact + agreement.nontie == agreement.total
+    if unexpected:
+        assert agreement.divergences_sample == [
+            {
+                "detail": "unexpected outputs invalidate the complete reference batch",
+                "unexpected_request_ids": unexpected,
+                "missing_request_ids": missing,
+            }
+        ]
+    else:
+        assert [sample["request"] for sample in agreement.divergences_sample] == missing
+
+    row = qualified_system_row(
+        _OracleMustNotBeUsed(), requests, outputs, reference, frozenset(), [1.0, 3.0]
+    )
+    assert row["agreement"] == agreement.as_dict()
+    assert row["reference_status"] == "failed"
+    assert row["headline_eligible"] is False
+    assert row["tokens_per_second"] is None
+    assert row["raw_tokens_per_second"] == sum(len(tokens) for tokens in outputs.values()) / 2.0
+    assert row["per_iter_seconds"] == [1.0, 3.0]

@@ -34,7 +34,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import torch
 
@@ -49,6 +49,14 @@ if TYPE_CHECKING:
 DEFAULT_CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128)
 
 
+@runtime_checkable
+class DecodeGraphBackend(Protocol):
+    device: torch.device
+
+    def enable_decode_graphs(self, capture_sizes: tuple[int, ...]) -> object:
+        """Capture the backend's decode graphs at startup."""
+
+
 def enable_decode_graphs_if_cuda(
     model: object, capture_sizes: tuple[int, ...] = DEFAULT_CAPTURE_SIZES
 ) -> float | None:
@@ -59,12 +67,10 @@ def enable_decode_graphs_if_cuda(
     not on CUDA, where capture is impossible; the eager planned window keeps running there.
     Callers log the returned capture time so the startup cost stays visible.
     """
-    enable = getattr(model, "enable_decode_graphs", None)
-    device = getattr(model, "device", None)
-    if enable is None or device is None or device.type != "cuda":
+    if not isinstance(model, DecodeGraphBackend) or model.device.type != "cuda":
         return None
     start = time.perf_counter()
-    enable(capture_sizes)
+    model.enable_decode_graphs(capture_sizes)
     return time.perf_counter() - start
 
 
