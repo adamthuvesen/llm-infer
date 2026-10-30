@@ -29,7 +29,7 @@ Use Python 3.13, [`uv`](https://docs.astral.sh/uv/), and Node 24. CI runs the sa
 uv sync --extra dev --extra serving
 make check        # import contracts, lint, format, types, CPU tests, evidence, visualizer
 make help         # every target with its purpose
-uv run pytest tests/correctness -q -m slow   # opt-in 3B Qwen reference check
+make test-slow    # opt-in 3B Qwen reference check (minutes on CPU)
 ```
 
 GPU-only paths (FlashInfer, flash-attn) run on Modal A100-80GB through `scripts/modal_*.py`.
@@ -40,17 +40,18 @@ run `make architecture-check` and `make check`.
 
 | Rule | Enforced by | Added |
 | --- | --- | --- |
-| Dependencies follow module ownership | `pyproject.toml` `[tool.importlinter]`, `make architecture-check` | 2026-11-04 |
-| Package and evidence CLI code must typecheck | `pyproject.toml` `[tool.mypy]`, `make typecheck` | 2026-11-04 |
-| Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py`, `tests/benchmarks/test_evidence_contract.py`, `make evidence-check` | 2026-11-04 |
-| A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py`, `tests/benchmarks/test_evidence_contract.py` | 2026-11-04 |
-| Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py`, `tests/serving/test_decode_window.py` | 2026-11-04 |
-| Decode-ready requests always have a KV table | `llm_infer/serving/request.py`, `tests/correctness/test_request_lifecycle.py` | 2026-11-04 |
-| Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py`, `tests/scheduler/test_scheduler.py` | 2026-11-04 |
-| Trace replay rejects malformed events | `llm_infer/tracing.py`, `visualizer/trace_loader.js`, `tests/serving/test_tracing.py` | 2026-11-04 |
-| Modal entrypoints and GPU functions refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1` | `scripts/modal_approval.py`, `scripts/modal_esme_serve.py`, `tests/test_modal_stall_guard.py` | 2026-11-06 |
-| Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py`, `tests/test_modal_stall_guard.py` | 2026-11-06 |
-| Paths and targets in this table exist | `tests/test_agents_rules_table.py` | 2026-11-06 |
+| Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` | 2026-11-04 |
+| Package, evidence CLIs, and Modal harnesses typecheck | `pyproject.toml::tool.mypy`, `Makefile::typecheck` | 2026-11-04 |
+| No `typing.Any`: name the real type | `pyproject.toml::tool.ruff.lint.flake8-tidy-imports.banned-api`, `Makefile::lint` | 2026-11-06 |
+| Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` | 2026-11-04 |
+| A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` | 2026-11-04 |
+| Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py::DecodeWindows`, `tests/serving/test_decode_window.py::test_abort_flush_lands_in_next_step_result` | 2026-11-04 |
+| Decode-ready requests always have a KV table | `llm_infer/serving/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` | 2026-11-04 |
+| Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py::Scheduler`, `tests/scheduler/test_scheduler.py::test_cancel_releases_only_the_cancelled_requests_reservation` | 2026-11-04 |
+| Trace replay rejects malformed events | `visualizer/trace_loader.js::validateEvent`, `Makefile::visualizer-test`, `tests/serving/test_tracing.py::test_trace_recorder_captures_real_engine_events` | 2026-11-04 |
+| Modal entrypoints and GPU functions refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1` | `scripts/modal_approval.py::require_spend_approval`, `tests/test_modal_approval.py::test_local_entrypoints_gate_before_any_modal_call`, `tests/test_modal_approval.py::test_gpu_functions_refuse_direct_calls_without_approval`, `tests/test_modal_approval.py::test_server_apps_refuse_to_start_without_approval` | 2026-11-06 |
+| Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` | 2026-11-06 |
+| Every row cites names its file defines | `tests/test_agents_rules_table.py::test_enforced_rules_cite_defined_names` | 2026-11-06 |
 
 The scheduler views restrict typed callers but do not enforce runtime immutability. Change
 membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
@@ -67,10 +68,3 @@ Paths start inside `llm_infer/`, except `tests/` and `visualizer/`.
 | Benchmark timing or oracle caching | `benchmarks/esme_paged.py`, `benchmarks/esme_measurement.py` | `tests/benchmarks/test_esme_measurement.py` |
 | Benchmark qualification or A/B verdicts | `benchmarks/reference_policy.py`, `benchmarks/paired_ab.py` | `tests/benchmarks/`, `make evidence-check` |
 | Trace events or replay | `tracing.py`, `visualizer/trace_loader.js` | `tests/serving/test_tracing.py`, `make visualizer-test` |
-
-## Conventions
-
-- Atomic [conventional commits](https://www.conventionalcommits.org/) (`type(scope): message`).
-- No `Any` casts. Fix the type.
-- Comments explain why, not what. Names use concrete domain terms.
-- Validate untrusted input loudly. Keep `try` bodies small.

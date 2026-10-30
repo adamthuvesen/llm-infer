@@ -99,7 +99,7 @@ requests by default. Pass `--decode-graph-buckets` to serve larger batches from 
   A/B run in one container in alternating order, and ratios never cross containers.
 - **Predictions before the run.** Recent experiments commit their predictions and decision rule
   first. `scripts/judge_paired_ab.py` applies the rule to records from two containers.
-- **Reproducible without a GPU.** `make reproduce` checks the committed records against these
+- **Reproducible without a GPU.** `make evidence-check` checks the committed records against these
   tables, regenerates the figures, and requires each registered A/B to give its documented
   verdict.
 
@@ -134,9 +134,8 @@ Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/respon
 that streams 8 or 16 concurrent prompts and compares concurrent against sequential wall time. Its
 base-URL field can point at a remote deployment.
 
-To serve from a GPU on your own Modal account, run
-`LLM_INFER_SERVE_APPROVED=1 modal deploy scripts/modal_esme_serve.py`. Without the variable it
-refuses, because it spends money.
+To serve from a GPU on your own Modal account, run `modal deploy scripts/modal_esme_serve.py`.
+It spends money, so it refuses and prints the approved command.
 It scales to zero and enables CORS, so a locally served bench page can point at it. The Modal
 scripts find the bundle through `--bundle-path`, then `ESME_BUNDLE_PATH`, then the sibling
 checkout `../esme-posttrain/exports/esme-214m-chat`.
@@ -158,17 +157,7 @@ uv sync --extra dev --extra serving
 make check
 ```
 
-`make help` lists commands and their purpose. `make check` first checks the policy import boundary.
-It then runs lint, formatting, package and evidence CLI types, CPU tests, benchmark evidence checks,
-and visualizer tests. The slow 3B Qwen reference checks are opt-in:
-`uv run pytest tests/correctness -q -m slow`. `make reproduce` re-derives the
-committed benchmark verdicts without a GPU. GPU benchmarks run on Modal A100s through the
-`scripts/modal_esme_*` harnesses. Findings entries 12 onward name the command that produced
-their record.
-
-Import Linter reports a forbidden dependency with its source line.
-Policy readers use `benchmarks.reference_policy.EsmeAgreement` without importing inference execution.
-Correct the dependency, then run `make architecture-check` and `make check`.
+[AGENTS.md](AGENTS.md#commands) lists every check and command.
 
 ## Documentation
 

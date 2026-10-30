@@ -26,9 +26,11 @@ how the right side of the curve fits in memory.
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -47,6 +49,9 @@ from scripts.modal_flash_image import (
     REMOTE_ROOT,
     REPO_ROOT,
 )
+
+if TYPE_CHECKING:
+    from llm_infer.model.pretrain_bundle import PretrainBundleModel
 
 ESME_HF_DIR = "esme-214m-chat-hf"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
@@ -205,7 +210,7 @@ def sweep_baseline(
     )
     # This diagnostic measures exactly ``max_new_tokens`` decode steps at every synthetic
     # context length. Natural EOS would turn some repeated-token contexts into one-token rows.
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
 
     def p95(values: list[float]) -> float:
@@ -373,14 +378,14 @@ def sweep_baseline(
         )
         outputs = coverage_engine.run()
         agreement, agreement_assessment = agreement_record([request], outputs)
-        policy = build_reference_only_record(agreement_assessment)
+        coverage_policy = build_reference_only_record(agreement_assessment)
         coverage_rows.append(
             {
                 "context_length": context_length,
                 "request_id": request.request_id,
                 "prompt": request.prompt,
                 "agreement": agreement,
-                **policy,
+                **coverage_policy,
             }
         )
 
@@ -544,7 +549,7 @@ def sweep(
         stall_guard.progress()
         size, hf_iters = spec
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
-        decode_once = run_hf_sequential_esme(
+        hf_decode_once = run_hf_sequential_esme(
             Path(REMOTE_HF_PATH),
             requests,
             max_new_tokens=max_new_tokens,
@@ -553,7 +558,7 @@ def sweep(
         )
         hf_warmup = 1 if hf_iters > 1 else 0
         per_iter, outputs = measure_repeated(
-            decode_once, warmup=hf_warmup, iters=hf_iters, synchronize=torch.cuda.synchronize
+            hf_decode_once, warmup=hf_warmup, iters=hf_iters, synchronize=torch.cuda.synchronize
         )
         row = gated_row("hf_sequential", size, requests, outputs, per_iter)
         row["flatness_check"] = hf_iters == 1
@@ -663,16 +668,15 @@ def sweep_grouped_ab(
         num_blocks = needed + max(4, len(requests))
 
         def build(grouped: bool, num_blocks=num_blocks, size=size) -> InferenceEngine:
-            kwargs = (
-                {"grouped_decode_graphs": True, "grouped_capture_sizes": (size,)} if grouped else {}
-            )
             return InferenceEngine(
                 engine_runtime.model,
                 block_size=BLOCK_SIZE,
                 num_blocks=num_blocks,
                 device="cuda",
                 capabilities=engine_runtime.capabilities,
-                **kwargs,
+                # Capture sizes only take effect with grouped graphs on.
+                grouped_decode_graphs=grouped,
+                grouped_capture_sizes=(size,),
             )
 
         engines = {"piecewise": build(False), "grouped": build(True)}
@@ -922,13 +926,14 @@ def sweep_flashinfer_compare(
 # graphs over every layer, as the HTTP server runs them; fused swaps in the compiled RMSNorm
 # and RoPE kernels, with their own piecewise runner. Paged KV and continuous batching are
 # present on every engine rung.
-LADDER_RUNGS: tuple[tuple[str, dict[str, object], bool, bool, bool], ...] = (
-    ("paged_continuous", {"batched_prefill": False, "decode_window_size": 1}, False, False, False),
-    ("+batched_prefill", {"batched_prefill": True, "decode_window_size": 1}, False, False, False),
-    ("+decode_window", {"batched_prefill": True, "decode_window_size": 8}, False, False, False),
-    ("+piecewise_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, False, False),
-    ("+grouped_graphs", {"batched_prefill": True, "decode_window_size": 8}, True, True, False),
-    ("+fused_elementwise", {"batched_prefill": True, "decode_window_size": 8}, True, True, True),
+# (name, batched_prefill, decode_window_size, graphs, grouped, fused)
+LADDER_RUNGS: tuple[tuple[str, bool, int, bool, bool, bool], ...] = (
+    ("paged_continuous", False, 1, False, False, False),
+    ("+batched_prefill", True, 1, False, False, False),
+    ("+decode_window", True, 8, False, False, False),
+    ("+piecewise_graphs", True, 8, True, False, False),
+    ("+grouped_graphs", True, 8, True, True, False),
+    ("+fused_elementwise", True, 8, True, True, True),
 )
 
 
@@ -993,7 +998,7 @@ def sweep_ladder(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
     eos = oracle_runtime.eos_token_ids
-    model = engine_runtime.model
+    model = cast("PretrainBundleModel", engine_runtime.model)
     capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
     piecewise_runner = model.decode_graphs
     if piecewise_runner is None:
@@ -1070,7 +1075,7 @@ def sweep_ladder(
     for size in batch_sizes:
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
         per_iter, outputs = measure_repeated(
-            lambda requests=requests: hf_batched_once(requests),
+            functools.partial(hf_batched_once, requests),
             warmup=warmup,
             iters=iters,
             synchronize=torch.cuda.synchronize,
@@ -1090,25 +1095,20 @@ def sweep_ladder(
             runner = fused_piecewise_runner if fused else piecewise_runner
             model.decode_graphs = runner if graphs else None
 
-        for name, kwargs, graphs, grouped, fused in LADDER_RUNGS:
+        for name, batched_prefill, decode_window_size, graphs, grouped, fused in LADDER_RUNGS:
             select_rung(graphs, fused)
-            grouped_kwargs = (
-                {
-                    "grouped_decode_graphs": True,
-                    "grouped_capture_sizes": (size,),
-                    "grouped_layers": model.num_layers,
-                }
-                if grouped
-                else {}
-            )
             engine = InferenceEngine(
                 model,
                 block_size=BLOCK_SIZE,
                 num_blocks=num_blocks,
                 device="cuda",
                 capabilities=engine_runtime.capabilities,
-                **kwargs,
-                **grouped_kwargs,
+                batched_prefill=batched_prefill,
+                decode_window_size=decode_window_size,
+                # Capture sizes and layer count only take effect with grouped graphs on.
+                grouped_decode_graphs=grouped,
+                grouped_capture_sizes=(size,),
+                grouped_layers=model.num_layers,
             )
             engines[name] = (engine, graphs, fused)
         select_rung(True, False)
@@ -1174,12 +1174,15 @@ def sweep_ladder(
             "rungs": [
                 {
                     "name": name,
-                    "engine_kwargs": kwargs,
+                    "engine_kwargs": {
+                        "batched_prefill": batched_prefill,
+                        "decode_window_size": window,
+                    },
                     "piecewise_graphs": graphs,
                     "grouped": grouped,
                     "fused_elementwise": fused,
                 }
-                for name, kwargs, graphs, grouped, fused in LADDER_RUNGS
+                for name, batched_prefill, window, graphs, grouped, fused in LADDER_RUNGS
             ],
             "decode_graphs": {
                 "capture_sizes": list(CAPTURE_SIZES),
@@ -1434,6 +1437,7 @@ def main(
     print("[esme-curve] converting bundle -> HF Qwen3 checkpoint (remote) ...")
     print(f"[esme-curve] {convert_bundle_to_hf.remote()}")
 
+    vllm_res: dict[str, object]
     if skip_vllm:
         vllm_res = {"rows": [], "config": {"skipped": True}, "gpu": None}
         print("[esme-curve] vLLM rows skipped (--skip-vllm)")
@@ -1450,7 +1454,7 @@ def main(
             max_new_tokens,
             warmup,
             iters,
-            vllm_res["rows"],
+            cast("list[dict]", vllm_res["rows"]),
             approved=True,
         )
     )

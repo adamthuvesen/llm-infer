@@ -124,7 +124,7 @@ def _workload_row(runtime, prompts: list[str]):
         verify["steps"] += 1
         verify["tokens"] += len(request.generated) - before
 
-    speculative_engine._decode_speculative = counted_verify
+    speculative_engine._decode_speculative = counted_verify  # type: ignore[method-assign]
 
     def run(arm: str, req) -> tuple[float, list[int]]:
         engine = engines[arm]
@@ -149,17 +149,19 @@ def _workload_row(runtime, prompts: list[str]):
         if position % 16 == 15:
             stall_guard.progress()
     measured = requests[WARMUP_PROMPTS:]
-    row: dict[str, object] = {"batch_size": 1}
-    for arm in ARMS:
-        row[arm] = {
+    arm_rows: dict[str, dict[str, object]] = {
+        arm: {
             "walls_s": walls[arm],
             "median_request_s": statistics.median(walls[arm]),
             "raw_tokens_per_second": NEW_TOKENS * len(measured) / sum(walls[arm]),
         }
-    row["speculative"]["verify_steps"] = verify["steps"]
-    row["speculative"]["tokens_per_verify"] = (
+        for arm in ARMS
+    }
+    arm_rows["speculative"]["verify_steps"] = verify["steps"]
+    arm_rows["speculative"]["tokens_per_verify"] = (
         verify["tokens"] / verify["steps"] if verify["steps"] else 0.0
     )
+    row: dict[str, object] = {"batch_size": 1, **arm_rows}
     return row, measured, outputs
 
 

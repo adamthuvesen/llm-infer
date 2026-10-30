@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := check
-.PHONY: help install fmt lint typecheck architecture-check test visualizer-test evidence-check reproduce check
+.PHONY: help install fmt lint typecheck architecture-check test visualizer-test evidence-check test-slow check
 
 help:  ## List commands and their purpose
 	@awk 'BEGIN {FS = ":.*## "; print "Usage: make <target>\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -24,13 +24,15 @@ typecheck:  ## Check package and evidence CLI types
 test:  ## Run unit tests
 	uv run python -m pytest
 
+test-slow:  ## Run the opt-in 3B Qwen reference checks (CPU, minutes)
+	uv run python -m pytest tests/correctness -q -m slow
+
 evidence-check:  ## Check committed records, public tables, figure regen, and A/B verdicts
 	uv run scripts/check_benchmark_evidence.py
 
 visualizer-test:  ## Test trace loading in Node
 	node --test visualizer/trace_loader.test.mjs
 
-reproduce: evidence-check  ## Re-derive every committed verdict from its records (no GPU)
 
 # The test suite and the evidence check are the slow parts and share no files, so they run in
 # parallel. Evidence and visualizer output is buffered and printed after the tests finish.

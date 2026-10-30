@@ -41,7 +41,11 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Any".msg = "Name the real type; `Any` hides type errors."
+"typing_extensions.Any".msg = "Name the real type; `Any` hides type errors."
 
 [tool.mypy]
 python_version = "3.13"
@@ -49,8 +53,9 @@ files = [
     "llm_infer",
     "scripts/check_benchmark_evidence.py",
     "scripts/judge_paired_ab.py",
-    "scripts/modal_approval.py",
+    "scripts/modal_*.py",
 ]
+explicit_package_bases = true
 check_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_defs = true
@@ -58,8 +63,33 @@ strict_equality = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 
+# Modal harnesses run on GPU images only; mypy checks their bodies without requiring every
+# research helper to carry annotations. The evidence CLIs and the spend gate stay strict.
+[[tool.mypy.overrides]]
+module = ["scripts.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = ["scripts.check_benchmark_evidence", "scripts.judge_paired_ab", "scripts.modal_approval"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+# flashinfer ships only in the GPU image (the `gpu` extra).
+[[tool.mypy.overrides]]
+module = ["flashinfer", "flashinfer.*"]
+ignore_missing_imports = true
+
 [tool.importlinter]
 root_package = "llm_infer"
+include_external_packages = true
+
+# Paid Modal paths live only in scripts/, where the spend gate checks every one of them.
+[[tool.importlinter.contracts]]
+name = "The package never imports Modal"
+type = "forbidden"
+source_modules = ["llm_infer"]
+forbidden_modules = ["modal"]
 
 [[tool.importlinter.contracts]]
 name = "Policy readers use reference_policy.EsmeAgreement without execution imports"

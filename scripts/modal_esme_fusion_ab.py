@@ -114,12 +114,14 @@ def _arm_rows(runtime, batch_sizes: list[int]):
             for arm in ARMS if round_index % 2 == 0 else ARMS[::-1]:
                 walls[arm].append(decode(arm))
         row: dict[str, object] = {"batch_size": size}
+        wall_ms_by_arm: dict[str, float] = {}
         for arm in ARMS:
             use_fused_elementwise(arm == "full_step_fused")
             submit(engines[arm])
             outputs[arm][size] = engines[arm].run()
             runner = engines[arm].grouped_decode_runners[size]
             wall_ms = statistics.median(walls[arm]) * 1000.0 / token_steps
+            wall_ms_by_arm[arm] = wall_ms
             row[arm] = {
                 "walls_s": walls[arm],
                 "wall_ms_per_token_step": wall_ms,
@@ -134,8 +136,8 @@ def _arm_rows(runtime, batch_sizes: list[int]):
         use_fused_elementwise(False)
         rows.append(row)
         print(
-            f"[fusion] b{size}: full_step {row['full_step']['wall_ms_per_token_step']:.3f} -> "
-            f"fused {row['full_step_fused']['wall_ms_per_token_step']:.3f} ms/step"
+            f"[fusion] b{size}: full_step {wall_ms_by_arm['full_step']:.3f} -> "
+            f"fused {wall_ms_by_arm['full_step_fused']:.3f} ms/step"
         )
         stall_guard.progress()
         # The closures and the last runner hold this row's engines too; drop every reference so

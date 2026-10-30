@@ -36,6 +36,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -50,6 +51,9 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
+
+if TYPE_CHECKING:
+    from llm_infer.model.pretrain_bundle import PretrainBundleModel
 
 BLOCK_SIZE = 128
 RAGGED_LENGTHS = (16, 37, 79, 128, 257, 389, 512)
@@ -191,7 +195,10 @@ def stability_summary(
             steps = sorted({record["first_diff_step"] for record in mode_records}, key=sort_key)
             pairs = sorted(
                 {
-                    (record["first_diff_tokens"]["fast"], record["first_diff_tokens"]["golden"])
+                    (
+                        cast("dict[str, object]", record["first_diff_tokens"])["fast"],
+                        cast("dict[str, object]", record["first_diff_tokens"])["golden"],
+                    )
                     for record in mode_records
                 },
                 key=lambda pair: (sort_key(pair[0]), sort_key(pair[1])),
@@ -419,7 +426,7 @@ def benchmark_prefill_ab(
     engine_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
     completed_set = {key_tuple(key, PREFILL_AB_KEY_FIELDS) for key in completed}
 
@@ -495,10 +502,9 @@ def benchmark_prefill_ab(
         torch.cuda.synchronize()
         end_to_end_s = time.perf_counter() - start
 
-        phase_profile = profiler.summary().as_dict()
-        phases = phase_profile["phases"]
-        prefill_ms = phases["prefill"]["total_ms"]
-        sampling_ms = phases["sampling"]["total_ms"]
+        timing = profiler.summary()
+        prefill_ms = timing.phase_total_ms("prefill")
+        sampling_ms = timing.phase_total_ms("sampling")
         return {
             "prefill_device_seconds": float(prefill_ms) / 1000.0,
             "ttft_wall_seconds": ttft_s,
@@ -575,8 +581,12 @@ def benchmark_prefill_ab(
                             max_new_tokens,
                             batched_prefill=modes[mode],
                         )
-                        outputs_by_mode[mode] = measured.pop("outputs")
-                        first_tokens_by_mode[mode] = measured.pop("first_tokens")
+                        outputs_by_mode[mode] = cast(
+                            "dict[str, list[int]]", measured.pop("outputs")
+                        )
+                        first_tokens_by_mode[mode] = cast(
+                            "dict[str, list[int]]", measured.pop("first_tokens")
+                        )
                         outputs_per_iteration[mode].append(outputs_by_mode[mode])
                         raw[mode].append(
                             {
@@ -589,7 +599,7 @@ def benchmark_prefill_ab(
                 medians: dict[str, dict[str, float]] = {}
                 for mode, records in raw.items():
                     medians[mode] = {
-                        metric: statistics.median(float(record[metric]) for record in records)
+                        metric: statistics.median(cast(float, record[metric]) for record in records)
                         for metric in (
                             "prefill_device_seconds",
                             "ttft_wall_seconds",
@@ -760,7 +770,7 @@ def benchmark_mixed_load(
     engine_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
     completed_set = {key_tuple(key, MIXED_LOAD_KEY_FIELDS) for key in completed}
 
@@ -779,9 +789,11 @@ def benchmark_mixed_load(
         base = build_requests(engine_runtime.tokenizer, count, HEADLINE_PROMPTS)
         pool: list[EsmeBenchRequest] = []
         for index, request in enumerate(base):
+            if shape == "uniform" and uniform_context is None:
+                raise ValueError("a uniform pool needs a context length")
             context_length = (
                 uniform_context
-                if shape == "uniform"
+                if uniform_context is not None and shape == "uniform"
                 else RAGGED_LENGTHS[index % len(RAGGED_LENGTHS)]
             )
             resized = requests_at_context_length([request], context_length)[0]
@@ -909,13 +921,12 @@ def benchmark_mixed_load(
             for request_id in burst_ids
             if token_events[request_id]
         }
-        total_wall_ms = sum(float(record["wall_ms"]) for record in step_records)
-        phases = profiler.summary().as_dict()["phases"]
-        device_ms = (
-            phases["prefill"]["total_ms"]
-            + phases["decode"]["total_ms"]
-            + phases["sampling"]["total_ms"]
-        )
+        total_wall_ms = sum(cast(float, record["wall_ms"]) for record in step_records)
+        timing = profiler.summary()
+        phase_ms = {
+            phase: timing.phase_total_ms(phase) for phase in ("prefill", "decode", "sampling")
+        }
+        device_ms = sum(phase_ms.values())
         return {
             "burst_step": burst_step,
             "burst_prompt_tokens_total": sum(len(request.prompt_ids) for request in burst),
@@ -927,11 +938,7 @@ def benchmark_mixed_load(
             # sampling). It lumps scheduler admission, Python classification, and per-step
             # cuda syncs together — a residual, not an isolated scheduler timer.
             "scheduler_sync_residual_ms": total_wall_ms - device_ms,
-            "phase_device_ms": {
-                "prefill": phases["prefill"]["total_ms"],
-                "decode": phases["decode"]["total_ms"],
-                "sampling": phases["sampling"]["total_ms"],
-            },
+            "phase_device_ms": phase_ms,
             "outputs": outputs,
         }
 
@@ -940,7 +947,7 @@ def benchmark_mixed_load(
     steady_ids = [request.request_id for request in steady]
 
     for cell in cells:
-        burst_size = int(cell["burst_size"])
+        burst_size = cast(int, cell["burst_size"])
         burst_shape = str(cell["burst_shape"])
         burst_context = cell["burst_context"]
         current_key = {"burst_size": burst_size, "burst_shape": burst_shape}
@@ -952,7 +959,7 @@ def benchmark_mixed_load(
             burst_size,
             burst_shape,
             "burst",
-            None if burst_context is None else int(burst_context),
+            None if burst_context is None else cast(int, burst_context),
         )
         # The fp32 oracle reference for steady and burst is prompt-deterministic, so compute it
         # once per cell and gate every mode's outputs against it after the paired runs.
@@ -987,11 +994,11 @@ def benchmark_mixed_load(
             stall_guard.progress()
             for order_position, mode in enumerate(order):
                 measured = run_mixed_once(steady, burst, batched_prefill=modes[mode])
-                outputs_by_mode[mode] = measured["outputs"]
-                splits = measured["splits"]
+                outputs_by_mode[mode] = cast("dict[str, list[int]]", measured["outputs"])
+                splits = cast("dict[str, ItlSplit]", measured["splits"])
                 summary = summarize_run(
                     [splits[request_id] for request_id in steady_ids],
-                    list(measured["burst_ttfts_ms"].values()),
+                    list(cast("dict[str, float]", measured["burst_ttfts_ms"]).values()),
                 )
                 runs_by_mode[mode].append(summary)
                 raw_by_mode[mode].append(
@@ -1055,7 +1062,7 @@ def benchmark_mixed_load(
             "parity_status": "exact" if direct_parity else "review_required",
             "relative_claim_eligible": direct_parity,
         }
-        comparison = aggregate["candidate_vs_baseline"]
+        comparison = cast("dict[str, float]", aggregate["candidate_vs_baseline"])
         print(
             f"[mixed-load] burst={burst_size} shape={burst_shape} "
             f"tokens={row['burst_prompt_tokens_total']}: "
@@ -1128,10 +1135,10 @@ def diagnose_prefill_divergence(
     engine_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     # Match the decode-graph configuration the timed A/B run used so a "diverged" row reproduces.
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
-    model = engine_runtime.model
+    model = cast("PretrainBundleModel", engine_runtime.model)
     num_layers = model.num_layers
     modes = {"baseline": False, "candidate": True}
 
@@ -1149,6 +1156,8 @@ def diagnose_prefill_divergence(
                 )
             )
     else:
+        if context_length is None:
+            raise ValueError(f"shape {shape!r} needs a context length")
         base = build_requests(engine_runtime.tokenizer, batch_size, HEADLINE_PROMPTS)
         requests = requests_at_context_length(base, context_length)
 
@@ -1453,6 +1462,7 @@ def main(
 
     prefill_commands = {"prefill-smoke", "prefill-ab"}
     mixed_commands = {"mixed-load-smoke", "mixed-load"}
+    key_fields: tuple[str, ...]
     if command in prefill_commands:
         key_fields = PREFILL_AB_KEY_FIELDS
     elif command in mixed_commands:
@@ -1522,7 +1532,7 @@ def main(
             completed,
             approved=True,
         )
-        config = {
+        config: dict[str, object] = {
             "command": command,
             "model": "Esme-214M-Chat",
             "dtype": "bfloat16",

@@ -38,7 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 
 import modal
 
@@ -46,6 +46,7 @@ from scripts.modal_approval import require_spend_approval
 
 if TYPE_CHECKING:
     from llm_infer.benchmarks.reference_policy import EsmeAgreement
+    from llm_infer.model.interface import TokenizerLike
 
 from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
@@ -166,7 +167,7 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 def build_context_workloads(
-    tokenizer: object,
+    tokenizer: TokenizerLike,
     batch_sizes: tuple[int, ...],
     context_lengths: tuple[int, ...],
 ) -> list[WorkloadSpec]:
@@ -307,13 +308,13 @@ def _run_child_process(
 
 
 def run_oracle_process(worker_input: WorkerInput, directory: Path) -> OracleResult:
-    return _run_child_process("oracle", worker_input, directory)
+    return cast(OracleResult, _run_child_process("oracle", worker_input, directory))
 
 
 def run_engine_process(system: str, worker_input: WorkerInput, directory: Path) -> WorkerResult:
     if system not in ENGINE_SYSTEMS:
         raise ValueError(f"engine system must be one of {ENGINE_SYSTEMS}; got {system!r}")
-    return _run_child_process(system, worker_input, directory)
+    return cast(WorkerResult, _run_child_process(system, worker_input, directory))
 
 
 def _run_oracle_worker(worker_input: WorkerInput) -> OracleResult:
@@ -428,15 +429,6 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, system: str) -> WorkerRe
     ) // worker_input["block_size"]
     num_blocks = largest_batch * blocks_per_request + largest_batch
     batch_sizes = tuple(sorted({workload["batch_size"] for workload in worker_input["workloads"]}))
-    grouped_kwargs: dict[str, object] = (
-        {
-            "grouped_decode_graphs": True,
-            "grouped_capture_sizes": batch_sizes,
-            "grouped_layers": runtime.model.num_layers,
-        }
-        if grouped
-        else {}
-    )
     engine_start = time.perf_counter()
     engine = InferenceEngine(
         runtime.model,
@@ -444,7 +436,10 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, system: str) -> WorkerRe
         num_blocks=num_blocks,
         device="cuda",
         capabilities=runtime.capabilities,
-        **grouped_kwargs,
+        # Capture sizes and layer count only take effect with grouped graphs on.
+        grouped_decode_graphs=grouped,
+        grouped_capture_sizes=batch_sizes,
+        grouped_layers=runtime.model.num_layers,
     )
     if grouped and set(engine.grouped_decode_runners) != set(batch_sizes):
         raise AssertionError(
@@ -575,6 +570,7 @@ def _run_vllm_worker(worker_input: WorkerInput) -> WorkerResult:
 
 def _worker_main(system: str, input_path: Path, output_path: Path) -> None:
     worker_input: WorkerInput = json.loads(input_path.read_text(encoding="utf-8"))
+    result: OracleResult | WorkerResult
     if system == "oracle":
         result = _run_oracle_worker(worker_input)
     elif system in LLM_INFER_SYSTEMS:

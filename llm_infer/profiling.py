@@ -47,6 +47,11 @@ class TimingSummary:
     device: str
     buckets: list[TimingBucket] = field(default_factory=list)
 
+    def phase_total_ms(self, phase: str) -> float:
+        """Total milliseconds of the buckets that make up ``phase`` (0.0 when none ran)."""
+        by_name = {bucket.name: bucket for bucket in self.buckets}
+        return sum(by_name[name].total_ms for name in PHASE_BUCKETS[phase] if name in by_name)
+
     def as_dict(self) -> dict[str, object]:
         by_name = {bucket.name: bucket for bucket in self.buckets}
         phases = {}

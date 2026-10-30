@@ -39,6 +39,7 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import modal
 
@@ -54,6 +55,10 @@ from scripts.modal_esme_bundle import (
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
 
+if TYPE_CHECKING:
+    from llm_infer.model.interface import ModelRuntime
+    from llm_infer.model.pretrain_bundle import PretrainBundleModel
+
 BLOCK_SIZE = 128
 MAX_NEW_TOKENS = 64
 WARMUP_ITERS = 1
@@ -66,7 +71,16 @@ PROFILER_STEPS = 16
 CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 # The serving eval's phase0 sampled workload settings, so the sampled profile attributes the
 # same configuration the HTTP measurement pays for.
-SAMPLED_SETTINGS = {"temperature": 0.8, "top_p": 0.95, "top_k": 32, "seed": 17}
+
+
+class _SamplingSettings(TypedDict):
+    temperature: float
+    top_p: float
+    top_k: int
+    seed: int
+
+
+SAMPLED_SETTINGS: _SamplingSettings = {"temperature": 0.8, "top_p": 0.95, "top_k": 32, "seed": 17}
 
 app = modal.App("llm-infer-esme-decode-profile")
 
@@ -413,6 +427,15 @@ def _bench_batch(
     }
 
 
+def _bundle_model(runtime: ModelRuntime) -> PretrainBundleModel:
+    """The Esme bundle model behind ``runtime``; decode-graph probes need its graph runners."""
+    from llm_infer.model.pretrain_bundle import PretrainBundleModel
+
+    if not isinstance(runtime.model, PretrainBundleModel):
+        raise TypeError(f"expected an Esme bundle model, got {type(runtime.model).__name__}")
+    return runtime.model
+
+
 @app.function(
     image=FLASH_IMAGE,
     gpu="A100-80GB",
@@ -596,8 +619,8 @@ ABLATION_CONFIGS: dict[str, dict] = {
 def _graph_runner(flash_runtime):
     """Capture the decode-graph buckets once (outside any timed region) and return the runner."""
     start = time.perf_counter()
-    runner = flash_runtime.model.enable_decode_graphs(CAPTURE_SIZES)
-    flash_runtime.model.decode_graphs = None  # rows opt in explicitly
+    runner = _bundle_model(flash_runtime).enable_decode_graphs(CAPTURE_SIZES)
+    _bundle_model(flash_runtime).decode_graphs = None  # rows opt in explicitly
     print(f"[graphs] captured buckets {CAPTURE_SIZES} in {time.perf_counter() - start:.1f} s")
     return runner
 
@@ -636,9 +659,9 @@ def ablate_decode(batch_sizes: list[int], approved: bool = False) -> str:
     for size in batch_sizes:
         stall_guard.progress()
         for label, config in ABLATION_CONFIGS.items():
-            flash_runtime.model.decode_graphs = _runner_for(config, graph_runner)
+            _bundle_model(flash_runtime).decode_graphs = _runner_for(config, graph_runner)
             row = _bench_batch(oracle_runtime, flash_runtime, size, config)
-            flash_runtime.model.decode_graphs = None
+            _bundle_model(flash_runtime).decode_graphs = None
             row["config_label"] = label
             rows.append(row)
             tps = row["tokens_per_second"]
@@ -1009,7 +1032,7 @@ def grouped_layer_ab(
     max_new_tokens = 128
     warmup_pairs = 0 if correctness_only else 2
     measured_pairs = 1 if correctness_only else 10
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
@@ -1063,15 +1086,15 @@ def grouped_layer_ab(
             )
 
         engines = {label: build_engine(label) for label in runtimes}
-        baseline_model = runtimes["piecewise"].model
+        baseline_model = _bundle_model(runtimes["piecewise"])
         allocated_before_baseline = torch.cuda.memory_allocated()
         capture_start = time.perf_counter()
         baseline_model.enable_decode_graphs(capture_sizes=(batch_size,))
         baseline_capture_seconds = time.perf_counter() - capture_start
         baseline_capture_memory = torch.cuda.memory_allocated() - allocated_before_baseline
         candidate_runner: EngineOwnedGroupedDecodeGraphRunner | None = None
-        timings = {"piecewise": [], candidate_label: []}
-        token_counts = {"piecewise": [], candidate_label: []}
+        timings: dict[str, list[float]] = {"piecewise": [], candidate_label: []}
+        token_counts: dict[str, list[int]] = {"piecewise": [], candidate_label: []}
         last_outputs: dict[str, dict[str, list[int]]] = {}
 
         def decode_once(
@@ -1095,7 +1118,7 @@ def grouped_layer_ab(
                 )
                 live_requests.append(live)
                 engine.add_request(live)
-            outputs = {request.request_id: [] for request in requests}
+            outputs: dict[str, list[int]] = {request.request_id: [] for request in requests}
             first = engine.step()
             for request_id, tokens in first.tokens.items():
                 outputs[request_id].extend(int(token) for token in tokens)
@@ -1114,7 +1137,9 @@ def grouped_layer_ab(
                     capture_plan=capture_plan,
                 )
                 candidate_runner.total_capture_seconds = time.perf_counter() - candidate_start
-                runtime.model.decode_graphs = candidate_runner
+                # The probe swaps the grouped runner into the piecewise slot; it serves the
+                # same decode-window interface.
+                _bundle_model(runtime).decode_graphs = candidate_runner  # type: ignore[assignment]
             torch.cuda.synchronize()
             decode_tokens = 0
             start = time.perf_counter()
@@ -1249,8 +1274,8 @@ def grouped_layer_ab(
             parity_status == "exact"
             and token_counts["piecewise"][-1] == token_counts[candidate_label][-1]
         )
-        baseline_raw_tps = baseline_row["raw_tokens_per_second"]
-        candidate_raw_tps = candidate_row["raw_tokens_per_second"]
+        baseline_raw_tps = cast("float | None", baseline_row["raw_tokens_per_second"])
+        candidate_raw_tps = cast("float | None", candidate_row["raw_tokens_per_second"])
         comparison: dict[str, object] = {
             "policy_version": 2,
             "batch_size": batch_size,
@@ -1302,8 +1327,8 @@ def grouped_layer_ab(
                 }
             )
         else:
-            raw_decode_median_ratio = (
-                candidate_row["decode_median_seconds"] / baseline_row["decode_median_seconds"]
+            raw_decode_median_ratio = cast(float, candidate_row["decode_median_seconds"]) / cast(
+                float, baseline_row["decode_median_seconds"]
             )
             comparison.update(
                 {
@@ -1395,7 +1420,7 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
     measured_pairs = 6
     piecewise_buckets = (16, 32, 64, 128, 256)
     ladder = (1, 2, 4, 8, 16, 32, 64, 128)
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
@@ -1423,7 +1448,7 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
             engine.add_request(
                 Request(request.request_id, list(request.prompt_ids), max_new_tokens, eos)
             )
-        outputs = {request.request_id: [] for request in requests}
+        outputs: dict[str, list[int]] = {request.request_id: [] for request in requests}
         first = engine.step()
         for request_id, tokens in first.tokens.items():
             outputs[request_id].extend(int(token) for token in tokens)
@@ -1462,7 +1487,7 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
         # Both systems keep the identical piecewise fallback; the candidate adds one
         # exact-batch grouped runner on top, which is exactly the serving dispatch chain.
         for label in labels:
-            runtimes[label].model.enable_decode_graphs(capture_sizes=piecewise_buckets)
+            _bundle_model(runtimes[label]).enable_decode_graphs(capture_sizes=piecewise_buckets)
         engines = {
             "piecewise_padded": build_engine(
                 runtimes["piecewise_padded"],
@@ -1477,8 +1502,8 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
                 grouped_capture_sizes=(batch_size,),
             ),
         }
-        timings = {label: [] for label in labels}
-        token_counts = {label: [] for label in labels}
+        timings: dict[str, list[float]] = {label: [] for label in labels}
+        token_counts: dict[str, list[int]] = {label: [] for label in labels}
         last_outputs: dict[str, dict[str, list[int]]] = {}
         for pair in range(warmup_pairs + measured_pairs):
             order = labels if pair % 2 == 0 else tuple(reversed(labels))
@@ -1541,7 +1566,9 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
             parity_exact
             and token_counts["piecewise_padded"][-1] == token_counts["grouped_exact"][-1]
         )
-        raw_ratio = candidate_row["decode_median_seconds"] / baseline_row["decode_median_seconds"]
+        raw_ratio = cast(float, candidate_row["decode_median_seconds"]) / cast(
+            float, baseline_row["decode_median_seconds"]
+        )
         rows.append(
             {
                 "policy_version": 2,
@@ -1566,7 +1593,7 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
     sharing_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    sharing_runtime.model.enable_decode_graphs(capture_sizes=piecewise_buckets)
+    _bundle_model(sharing_runtime).enable_decode_graphs(capture_sizes=piecewise_buckets)
     ladder_requests = requests_at_context_length(
         build_requests(sharing_runtime.tokenizer, max(ladder), HEADLINE_PROMPTS),
         context_length,
@@ -1620,7 +1647,7 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
                 }
                 if runner.steps_handled == 0:
                     raise RuntimeError(f"shared-workspace runner never fired at batch {size}")
-            sharing[key]["mixed_bucket_parity"] = parity
+            cast("dict[str, object]", sharing[key])["mixed_bucket_parity"] = parity
         del engine
         torch.cuda.empty_cache()
 
@@ -1721,7 +1748,7 @@ def _roofline_rows(
     from llm_infer.benchmarks.esme_paged import build_requests
     from llm_infer.serving import InferenceEngine, Request
 
-    model = runtime.model
+    model = _bundle_model(runtime)
 
     weight_bytes = sum(tensor.numel() * tensor.element_size() for tensor in model.w.values())
     kv_bytes_per_token = (
@@ -1890,7 +1917,7 @@ def roofline_report(batch_sizes: list[int], approved: bool = False) -> str:
     runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    model = runtime.model
+    model = _bundle_model(runtime)
     capture_s = enable_decode_graphs_if_cuda(model, CAPTURE_SIZES)
     gpu = gpu_snapshot()
     peak_bytes_per_s = A100_PEAK_BYTES_PER_S.get(str(gpu.get("name")))
@@ -1942,7 +1969,9 @@ def _compiled_elementwise() -> Iterator[None]:
         bundle_module.rms_norm, bundle_module.apply_rope, decode_graph_module.rms_norm = originals
 
 
-def _load_bf16_with_graphs(capture_sizes: tuple[int, ...], *, warm: bool) -> tuple[object, float]:
+def _load_bf16_with_graphs(
+    capture_sizes: tuple[int, ...], *, warm: bool
+) -> tuple[ModelRuntime, float | None]:
     """Load the bf16 bundle and capture piecewise decode graphs at ``capture_sizes``.
 
     ``warm`` runs every decode shape on the eager path first, so a compiled arm does most of
@@ -2070,7 +2099,8 @@ def fusion_probe(batch_sizes: list[int], approved: bool = False) -> str:
             f"{compiled_row['kernel_total_ms_per_token_step']:.3f}, wall "
             f"{eager_row['wall_ms_per_token_step']:.3f} -> "
             f"{compiled_row['wall_ms_per_token_step']:.3f}, parity {gate['parity_status']}, "
-            f"nontie {gate['eager']['nontie']}/{gate['compiled']['nontie']}"
+            f"nontie {cast('dict[str, object]', gate['eager'])['nontie']}/"
+            f"{cast('dict[str, object]', gate['compiled'])['nontie']}"
         )
 
     return json.dumps(
@@ -2360,7 +2390,7 @@ def _host_timeline_row(runtime, size: int) -> dict:
     passes = [summarize("uninstrumented", decode_runs())]
     original_synchronize = torch.cuda.Event.synchronize
 
-    def timed_synchronize(event: object) -> object:
+    def timed_synchronize(event: torch.cuda.Event) -> None:
         if not active["on"]:
             return original_synchronize(event)
         start = time.perf_counter()
@@ -2371,11 +2401,11 @@ def _host_timeline_row(runtime, size: int) -> dict:
             run_calls[-1]["event_synchronize"] += 1
 
     targets = {
-        "runner": runtime.model.decode_graphs,
+        "runner": _bundle_model(runtime).decode_graphs,
         "backend": runtime.model.backend,
         "model": runtime.model,
     }
-    torch.cuda.Event.synchronize = timed_synchronize
+    torch.cuda.Event.synchronize = timed_synchronize  # type: ignore[method-assign, assignment]
     try:
         timed(engine, "step", "engine_step")
         passes.append(summarize("issue", decode_runs()))
@@ -2383,7 +2413,7 @@ def _host_timeline_row(runtime, size: int) -> dict:
             timed(targets[target_name], method, bucket)
         passes.append(summarize("regions", decode_runs()))
     finally:
-        torch.cuda.Event.synchronize = original_synchronize
+        torch.cuda.Event.synchronize = original_synchronize  # type: ignore[method-assign]
         # The region timers wrap shared model objects; drop them so the next batch size and
         # arm start unwrapped.
         for _, target_name, method in HOST_TIMELINE_REGIONS:
@@ -2506,13 +2536,13 @@ def _device_page_metadata() -> Iterator[None]:
             read_plan = dataclasses.replace(read_plan, page_plan=strip(read_plan.page_plan))
         return original_group_plan(self, read_plan)
 
-    backend_class.plan_decode_batch_paged = plan
-    runner_class._plan_group_wrapper = plan_group
+    backend_class.plan_decode_batch_paged = plan  # type: ignore[method-assign]
+    runner_class._plan_group_wrapper = plan_group  # type: ignore[method-assign]
     try:
         yield
     finally:
-        backend_class.plan_decode_batch_paged = original_plan
-        runner_class._plan_group_wrapper = original_group_plan
+        backend_class.plan_decode_batch_paged = original_plan  # type: ignore[method-assign]
+        runner_class._plan_group_wrapper = original_group_plan  # type: ignore[method-assign]
 
 
 def _host_plan_rows(
@@ -2538,16 +2568,15 @@ def _host_plan_rows(
         needed = sum(
             math.ceil((len(req.prompt_ids) + ROOFLINE_NEW_TOKENS) / BLOCK_SIZE) for req in requests
         )
-        grouped_kwargs: dict[str, object] = (
-            {"grouped_decode_graphs": True, "grouped_capture_sizes": (size,)} if grouped else {}
-        )
         engine = InferenceEngine(
             runtime.model,
             block_size=BLOCK_SIZE,
             num_blocks=needed + max(4, size),
             device="cuda",
             capabilities=runtime.capabilities,
-            **grouped_kwargs,
+            # Capture sizes only take effect with grouped graphs on.
+            grouped_decode_graphs=grouped,
+            grouped_capture_sizes=(size,),
         )
         if grouped and size not in engine.grouped_decode_runners:
             raise AssertionError(f"no grouped runner captured for batch {size}")
@@ -2581,8 +2610,10 @@ def _host_plan_rows(
             with _device_page_metadata() if arm == "device" else contextlib.nullcontext():
                 outputs[arm][size] = engine.run()
         row: dict[str, object] = {"batch_size": size}
+        wall_ms_by_arm: dict[str, float] = {}
         for arm in HOST_PLAN_METADATA:
             wall_ms = statistics.median(walls[arm]) * 1000.0 / token_steps
+            wall_ms_by_arm[arm] = wall_ms
             row[arm] = {
                 "walls_s": walls[arm],
                 "wall_ms_per_token_step": wall_ms,
@@ -2591,8 +2622,8 @@ def _host_plan_rows(
         rows.append(row)
         print(
             f"[host-plan] {'grouped' if grouped else 'piecewise'} b{size}: device "
-            f"{row['device']['wall_ms_per_token_step']:.3f} -> host "
-            f"{row['host']['wall_ms_per_token_step']:.3f} ms/step"
+            f"{wall_ms_by_arm['device']:.3f} -> host "
+            f"{wall_ms_by_arm['host']:.3f} ms/step"
         )
         stall_guard.progress()
         del engine
@@ -2731,7 +2762,7 @@ def capture_report(batch_sizes: list[int], approved: bool = False) -> str:
         device="cuda",
         attention_backend=FlashAttnPagedAttention(),
     )
-    model = flash_runtime.model
+    model = _bundle_model(flash_runtime)
     graph_runner = _graph_runner(flash_runtime)
     flashinfer_meta: dict[str, object] = {"available": False}
     flashinfer_runtime = None
@@ -2769,9 +2800,9 @@ def capture_report(batch_sizes: list[int], approved: bool = False) -> str:
     for size in batch_sizes:
         stall_guard.progress()
         for label, row_runtime, active in launch_configs:
-            row_runtime.model.decode_graphs = active
+            _bundle_model(row_runtime).decode_graphs = active
             profile = _torch_profile(row_runtime, size)
-            row_runtime.model.decode_graphs = None
+            _bundle_model(row_runtime).decode_graphs = None
             launches.append({"batch_size": size, "config_label": label, **profile})
             print(
                 f"[launches] batch={size} | {label}: "
@@ -2795,9 +2826,9 @@ def capture_report(batch_sizes: list[int], approved: bool = False) -> str:
                 f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}"
             )
         if flashinfer_runtime is not None and flashinfer_graph_runner is not None:
-            flashinfer_runtime.model.decode_graphs = flashinfer_graph_runner
+            _bundle_model(flashinfer_runtime).decode_graphs = flashinfer_graph_runner
             row = _bench_batch(oracle_runtime, flashinfer_runtime, size, {"decode_graphs": True})
-            flashinfer_runtime.model.decode_graphs = None
+            _bundle_model(flashinfer_runtime).decode_graphs = None
             row["config_label"] = "window + planned + cuda graphs + flashinfer paged decode"
             bench_rows.append(row)
             tps = row["tokens_per_second"]

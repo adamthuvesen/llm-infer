@@ -25,6 +25,7 @@ import math
 import random
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import modal
 
@@ -38,6 +39,9 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
+
+if TYPE_CHECKING:
+    import torch
 
 DOLLY_REPO = "databricks/databricks-dolly-15k"
 DOLLY_REVISION = "bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a"
@@ -72,14 +76,14 @@ def load_prompts(count: int) -> tuple[list[int], list[str]]:
     return [index for index, _ in chosen], [text for _, text in chosen]
 
 
-def _record_decode_logits(engine) -> list[tuple[tuple[str, ...], object]]:
+def _record_decode_logits(engine) -> list[tuple[tuple[str, ...], torch.Tensor]]:
     """Keep a copy of every decode step's logits with the request ids of its rows.
 
     The decode entry points receive the batch's requests in row order; the model calls under
     them return ``(batch, vocab)`` logits, sometimes in a graph's static output buffer, so each
     row block is cloned before the next step overwrites it.
     """
-    records: list[tuple[tuple[str, ...], object]] = []
+    records: list[tuple[tuple[str, ...], torch.Tensor]] = []
     current: dict[str, tuple[str, ...]] = {}
 
     def track_rows(name: str) -> None:
@@ -121,7 +125,7 @@ def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, 
     requests = build_requests(bf16_runtime.tokenizer, len(prompts), tuple(prompts))
     comparisons = ("engine_vs_fp32", "bf16_recompute_vs_fp32", "engine_vs_bf16_recompute")
     parts: dict[str, list] = {name: [] for name in comparisons}
-    worst_flips: list[dict[str, object]] = []
+    worst_flips: list[dict[str, str | int | float]] = []
     decode_s = 0.0
     for start in range(0, len(requests), batch_size):
         batch = requests[start : start + batch_size]

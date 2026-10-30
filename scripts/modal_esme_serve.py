@@ -4,7 +4,7 @@ The same HTTP app as ``python -m llm_infer.serve``, launched on GPU instead of t
 CPU — which backend the chat UI talks to is purely a matter of how you start it:
 
     uv run python -m llm_infer.serve --bundle <path>     # local CPU, fp16 + torch_sdpa
-    LLM_INFER_SERVE_APPROVED=1 modal serve scripts/modal_esme_serve.py   # A100, needs approval
+    modal serve scripts/modal_esme_serve.py              # A100; refuses until approved
 
 ``modal serve`` prints a temporary ``*.modal.run`` URL (hot-reloads while running;
 Ctrl-C tears it down). ``modal deploy`` keeps a persistent URL instead. Either way the

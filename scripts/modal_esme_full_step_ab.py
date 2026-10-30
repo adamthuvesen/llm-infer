@@ -103,11 +103,13 @@ def _arm_rows(runtime, batch_sizes: list[int]):
             for arm in ARMS if round_index % 2 == 0 else ARMS[::-1]:
                 walls[arm].append(decode(arm))
         row: dict[str, object] = {"batch_size": size}
+        wall_ms_by_arm: dict[str, float] = {}
         for arm in ARMS:
             submit(engines[arm])
             outputs[arm][size] = engines[arm].run()
             runner = engines[arm].grouped_decode_runners[size]
             wall_ms = statistics.median(walls[arm]) * 1000.0 / token_steps
+            wall_ms_by_arm[arm] = wall_ms
             row[arm] = {
                 "grouped_layers": grouped_layers[arm],
                 "walls_s": walls[arm],
@@ -121,8 +123,8 @@ def _arm_rows(runtime, batch_sizes: list[int]):
                 raise AssertionError(f"{arm}: the grouped runner never ran at batch {size}")
         rows.append(row)
         print(
-            f"[full-step] b{size}: grouped4 {row['grouped4']['wall_ms_per_token_step']:.3f} -> "
-            f"full_step {row['full_step']['wall_ms_per_token_step']:.3f} ms/step"
+            f"[full-step] b{size}: grouped4 {wall_ms_by_arm['grouped4']:.3f} -> "
+            f"full_step {wall_ms_by_arm['full_step']:.3f} ms/step"
         )
         stall_guard.progress()
         # The closures and the last runner hold this row's engines too; drop every reference so

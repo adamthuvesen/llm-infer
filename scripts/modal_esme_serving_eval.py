@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import cast
 
 import modal
 
@@ -136,8 +137,8 @@ def measure_serving(
                 result["run_order"] = order.index(arm_grouped)
                 rows.append(result)
                 cell_rows.append(result)
-                metrics = result["metrics"]
-                reference = result["reference"]
+                metrics = cast("dict[str, object]", result["metrics"])
+                reference = cast("dict[str, object]", result["reference"])
                 print(
                     f"[serving] {workload.name} grouped={arm_grouped}: "
                     f"ref={reference['status']} "
@@ -149,7 +150,9 @@ def measure_serving(
             if len(cell_rows) == 2:
                 # Direct parity: a throughput delta is an A/B result only when both arms
                 # emitted the same token streams, not merely each passed its own gate.
-                baseline, candidate = (row["output_digests"] for row in cell_rows)
+                baseline, candidate = (
+                    cast("dict[str, str]", row["output_digests"]) for row in cell_rows
+                )
                 parity = (
                     "failed"
                     if set(baseline) != set(candidate)

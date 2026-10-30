@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import cast
 
 import modal
 
@@ -115,6 +116,8 @@ def run_gallery(command: str, approved: bool = False) -> str:
         ids = tokenizer.apply_chat_template(
             [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
         )
+        if not isinstance(ids, list):
+            raise TypeError(f"Esme tokenizer returned {type(ids).__name__}, not token ids")
         return [int(t) for t in ids]
 
     results: list[dict[str, object]] = []
@@ -171,7 +174,7 @@ def run_gallery(command: str, approved: bool = False) -> str:
             device="cuda",
         )
     )
-    rows = results[-1]["rows"]
+    rows = cast("list[dict[str, object]]", results[-1]["rows"])
     stall_summary = " vs ".join(
         f"{row['stall_vs_pre_arrival_step']:.1f} steps ({row['label']})" for row in rows
     )
@@ -194,7 +197,7 @@ def run_gallery(command: str, approved: bool = False) -> str:
             device="cuda",
         )
     )
-    on_row = results[-1]["rows"][0]
+    on_row = cast("list[dict[str, object]]", results[-1]["rows"])[0]
     print(f"[gallery] preemption done: {on_row['preemptions']} preemptions, exact completions")
     stall_guard.progress()
 
