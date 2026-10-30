@@ -123,8 +123,8 @@ def bench_vllm(
     from llm_infer.benchmarks.esme_paged import (
         DEFAULT_PROMPTS,
         HEADLINE_PROMPTS,
-        _time,
         build_requests,
+        time_call,
     )
     from llm_infer.benchmarks.esme_three_way import run_vllm_esme
     from llm_infer.model.runtime import load_model_runtime
@@ -145,7 +145,7 @@ def bench_vllm(
         eos_token_ids=runtime.eos_token_ids,
     )
     stall_guard.progress()
-    median_s, outputs = _time(decode_once, warmup=warmup, iters=iters, sync=False)
+    median_s, outputs = time_call(decode_once, warmup=warmup, iters=iters, sync=False)
     return json.dumps(
         {
             "outputs": {k: [int(x) for x in v] for k, v in outputs.items()},

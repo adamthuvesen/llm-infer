@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -72,7 +72,7 @@ def create_app(
     metrics = metrics or ServerMetrics()
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         async_engine.start()
         try:
             yield

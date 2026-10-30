@@ -32,7 +32,7 @@ from typing import TypedDict
 
 import torch
 
-from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, _time, reference_outputs
+from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, reference_outputs, time_call
 from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from llm_infer.benchmarks.reference_policy import (
     QUALIFIED_REFERENCE_STATUSES,
@@ -168,7 +168,9 @@ def run_prefix_cache_on_off(
 
     timings: list[GalleryTiming] = []
     for label, group in (("prefix caching on", "gallery-shared"), ("prefix caching off", None)):
-        median_s, outputs = _time(partial(run_once, group), warmup=warmup, iters=iters, sync=sync)
+        median_s, outputs = time_call(
+            partial(run_once, group), warmup=warmup, iters=iters, sync=sync
+        )
         agreement, tokens = _gate(oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens)
         timings.append(GalleryTiming(label, median_s, tokens, agreement))
 
@@ -440,7 +442,9 @@ def run_speculative_batch1(
 
     timings: list[GalleryTiming] = []
     for label, config in (("speculative on", speculative), ("speculative off", None)):
-        median_s, outputs = _time(partial(run_once, config), warmup=warmup, iters=iters, sync=sync)
+        median_s, outputs = time_call(
+            partial(run_once, config), warmup=warmup, iters=iters, sync=sync
+        )
         agreement, tokens = _gate(oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens)
         timings.append(GalleryTiming(label, median_s, tokens, agreement))
 

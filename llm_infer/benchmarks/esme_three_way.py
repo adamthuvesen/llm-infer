@@ -34,8 +34,8 @@ import torch
 from llm_infer.benchmarks.esme_paged import (
     EsmeBenchRequest,
     SystemTiming,
-    _time,
     reference_outputs,
+    time_call,
 )
 from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE, EsmeAgreement
 from llm_infer.benchmarks.report import normalize_at_eos, total_output_tokens
@@ -125,7 +125,7 @@ def build_vllm_llm(
             gpu_memory_utilization=gpu_memory_utilization,
         ),
     )
-    config = {
+    config: dict[str, object] = {
         "version": vllm.__version__,
         "dtype": "bfloat16",
         "enable_prefix_caching": False,
@@ -398,7 +398,7 @@ def run_three_way(
     timings: list[SystemTiming] = []
     agreements: dict[str, EsmeAgreement] = {}
     for system, mode, decode_once in systems:
-        median_s, outputs = _time(decode_once, warmup=warmup, iters=iters, sync=sync)
+        median_s, outputs = time_call(decode_once, warmup=warmup, iters=iters, sync=sync)
         agreement = tie_tolerant_agreement(runtime.model, requests, outputs, reference, eos)
         agreements[system] = agreement
         timings.append(

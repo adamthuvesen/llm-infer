@@ -92,6 +92,7 @@ def _host_cpu_model() -> str:
 def library_versions() -> dict[str, str]:
     """Versions of every library whose behavior the numbers depend on."""
     import torch
+    import torch.version
 
     versions: dict[str, str] = {"python": platform.python_version(), "torch": torch.__version__}
     versions["cuda"] = torch.version.cuda or "none"

@@ -199,7 +199,7 @@ def measure_repeated(
     return per_iter, outputs
 
 
-def _time(
+def time_call(
     decode_once: Callable[[], dict[str, list[int]]], *, warmup: int, iters: int, sync: bool
 ) -> tuple[float, dict[str, list[int]]]:
     """Run warmups, then return the median measured duration and final outputs."""

@@ -120,7 +120,7 @@ def bench_vllm_batches(
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot
-    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, _time, build_requests
+    from llm_infer.benchmarks.esme_paged import HEADLINE_PROMPTS, build_requests, time_call
     from llm_infer.benchmarks.esme_three_way import build_vllm_llm, vllm_decode_closure
     from llm_infer.model.runtime import load_model_runtime
 
@@ -145,7 +145,7 @@ def bench_vllm_batches(
             max_new_tokens=max_new_tokens,
             eos_token_ids=runtime.eos_token_ids,
         )
-        median_s, outputs = _time(decode_once, warmup=warmup, iters=iters, sync=False)
+        median_s, outputs = time_call(decode_once, warmup=warmup, iters=iters, sync=False)
         rows.append(
             {
                 "batch_size": size,

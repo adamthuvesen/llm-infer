@@ -44,6 +44,7 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "RUF", "TID251"]
+ignore = ["E501"]
 
 # The web UI strings and the tests that match them contain the real multiplication sign.
 [tool.ruff.lint.per-file-ignores]
@@ -65,10 +66,12 @@ reportUnknownArgumentType = false
 reportUnknownVariableType = false
 reportUnknownParameterType = false
 reportUnknownLambdaType = false
+reportMissingTypeStubs = false
 
 [[tool.basedpyright.executionEnvironments]]
 root = "tests"
 reportMissingParameterType = false
+reportPrivateUsage = false
 
 [tool.importlinter]
 root_package = "llm_infer"

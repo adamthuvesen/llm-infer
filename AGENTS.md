@@ -28,8 +28,9 @@ Use Python 3.13, [`uv`](https://docs.astral.sh/uv/), and Node 24. CI runs the sa
 ```bash
 uv sync --extra dev --extra serving
 make check        # import contracts, lint, format, types, CPU tests, evidence, visualizer
+make fix         # ruff fixes and format
 make help         # every target with its purpose
-make test-slow    # opt-in 3B Qwen reference check (minutes on CPU)
+make slow         # opt-in 3B Qwen reference check (minutes on CPU)
 ```
 
 Prove changes with `make verify` (`verify-llm-infer` skill at `.agents/skills/verify-llm-infer/`).
@@ -43,7 +44,7 @@ run `make architecture-check` and `make check`.
 | Rule | Enforced by | Added |
 | --- | --- | --- |
 | Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` | 2026-11-04 |
-| Package, scripts, tests, and the verify helper typecheck | `pyproject.toml::tool.basedpyright`, `Makefile::typecheck` | 2026-11-04 |
+| Package, scripts, tests, and the verify helper typecheck; the baseline only shrinks | `pyproject.toml::tool.basedpyright`, `scripts/check_basedpyright_ratchet.py::main`, `Makefile::typecheck` | 2026-11-04 |
 | No `typing.Any`: name the real type | `pyproject.toml::tool.ruff.lint.flake8-tidy-imports.banned-api`, `Makefile::lint` | 2026-11-06 |
 | Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` | 2026-11-04 |
 | A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` | 2026-11-04 |

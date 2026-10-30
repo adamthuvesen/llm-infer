@@ -152,7 +152,7 @@ ties while still failing real bugs. The policy lives in `llm_infer/validation/ti
 GPU reference check is `tests/correctness/test_flash_attn_paged.py` (auto-skipped off CUDA, run
 on the target A100 via `scripts/modal_reference_check.py`). The exact `torch_naive` CPU
 reference check is the local check. It is marked `slow`, so run it with
-`make test-slow`.
+`make slow`.
 
 ### Traced flash-attn divergences
 

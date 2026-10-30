@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -96,7 +96,7 @@ class TimingProfiler:
         self._cuda_spans: list[_CudaSpan] = []
 
     @contextmanager
-    def record(self, name: str) -> Iterator[None]:
+    def record(self, name: str) -> Generator[None]:
         """Record device work without synchronizing CUDA."""
         if self._cuda:
             start = torch.cuda.Event(enable_timing=True)
@@ -116,7 +116,7 @@ class TimingProfiler:
             self._add(name, (time.perf_counter() - start_s) * 1000.0)
 
     @contextmanager
-    def host(self, name: str) -> Iterator[None]:
+    def host(self, name: str) -> Generator[None]:
         """Record host-side work, including intentional tensor materialization boundaries."""
         start_s = time.perf_counter()
         try:
