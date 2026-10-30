@@ -25,7 +25,7 @@ import math
 import random
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -42,6 +42,12 @@ from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
 
 if TYPE_CHECKING:
     import torch
+
+    from llm_infer.model.interface import ModelRuntime
+    from llm_infer.serving import InferenceEngine
+    from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.request import Request as EngineRequest
+    from llm_infer.validation.bf16_error import PositionErrors
 
 DOLLY_REPO = "databricks/databricks-dolly-15k"
 DOLLY_REVISION = "bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a"
@@ -76,7 +82,7 @@ def load_prompts(count: int) -> tuple[list[int], list[str]]:
     return [index for index, _ in chosen], [text for _, text in chosen]
 
 
-def _record_decode_logits(engine) -> list[tuple[tuple[str, ...], torch.Tensor]]:
+def _record_decode_logits(engine: InferenceEngine) -> list[tuple[tuple[str, ...], torch.Tensor]]:
     """Keep a copy of every decode step's logits with the request ids of its rows.
 
     The decode entry points receive the batch's requests in row order; the model calls under
@@ -89,7 +95,7 @@ def _record_decode_logits(engine) -> list[tuple[tuple[str, ...], torch.Tensor]]:
     def track_rows(name: str) -> None:
         original = getattr(engine, name)
 
-        def tracked(requests, result):
+        def tracked(requests: list[EngineRequest], result: StepResult) -> None:
             current["ids"] = tuple(request.request_id for request in requests)
             return original(requests, result)
 
@@ -98,7 +104,7 @@ def _record_decode_logits(engine) -> list[tuple[tuple[str, ...], torch.Tensor]]:
     def keep_logits(name: str) -> None:
         original = getattr(engine.model, name)
 
-        def kept(*args, **kwargs):
+        def kept(*args: object, **kwargs: object) -> torch.Tensor:
             logits = original(*args, **kwargs)
             records.append((current["ids"], logits.detach().clone()))
             return logits
@@ -112,7 +118,14 @@ def _record_decode_logits(engine) -> list[tuple[tuple[str, ...], torch.Tensor]]:
     return records
 
 
-def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, new_tokens: int):
+def measure(
+    bf16_runtime: ModelRuntime,
+    fp32_runtime: ModelRuntime,
+    prompts: list[str],
+    *,
+    batch_size: int,
+    new_tokens: int,
+) -> dict[str, object]:
     """Decode ``prompts`` in batches on the bf16 engine and compare every decode step's logits."""
     import torch
 
@@ -124,7 +137,7 @@ def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, 
         raise ValueError(f"{len(prompts)} prompts do not split into batches of {batch_size}")
     requests = build_requests(bf16_runtime.tokenizer, len(prompts), tuple(prompts))
     comparisons = ("engine_vs_fp32", "bf16_recompute_vs_fp32", "engine_vs_bf16_recompute")
-    parts: dict[str, list] = {name: [] for name in comparisons}
+    parts: dict[str, list[PositionErrors]] = {name: [] for name in comparisons}
     worst_flips: list[dict[str, str | int | float]] = []
     decode_s = 0.0
     for start in range(0, len(requests), batch_size):
@@ -134,7 +147,7 @@ def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, 
             bf16_runtime.model,
             block_size=BLOCK_SIZE,
             num_blocks=needed + batch_size,
-            device=bf16_runtime.model.device,
+            device=str(bf16_runtime.model.device),
             capabilities=bf16_runtime.capabilities,
         )
         records = _record_decode_logits(engine)
@@ -259,7 +272,7 @@ def main(command: str = "run", bundle_path: str = "", approved: bool = False) ->
 
         from llm_infer.model.runtime import load_model_runtime
 
-        record = measure(
+        record: dict[str, object] = measure(
             load_model_runtime("esme", bundle_path=local_bundle, dtype=torch.bfloat16),
             load_model_runtime("esme", bundle_path=local_bundle, dtype=torch.float32),
             prompts,
@@ -296,8 +309,8 @@ def main(command: str = "run", bundle_path: str = "", approved: bool = False) ->
     stamp = time.strftime("%Y%m%dT%H%M%S")
     out_path = out_dir / f"esme-bf16-error-{command}-{stamp}.json"
     out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    summary = record["comparisons"]["engine_vs_fp32"]
-    shrink = summary["competitor_shrink"]
+    summary = cast(dict[str, dict[str, object]], record["comparisons"])["engine_vs_fp32"]
+    shrink = cast(dict[str, float], summary["competitor_shrink"])
     print(
         f"[bf16-error] engine vs fp32: {summary['positions']} positions, shrink p99.9 "
         f"{shrink['p99.9']:.4f}, max {shrink['max']:.4f}, "

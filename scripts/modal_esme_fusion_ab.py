@@ -26,6 +26,7 @@ import math
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -40,6 +41,11 @@ from scripts.modal_esme_bundle import (
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
 
+if TYPE_CHECKING:
+    from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
+    from llm_infer.model.interface import ModelRuntime
+    from llm_infer.serving import InferenceEngine
+
 BATCH_SIZES = (1, 8, 64)
 ARMS = ("full_step", "full_step_fused")
 WARMUP_ROUNDS = 2
@@ -52,7 +58,9 @@ app = modal.App("llm-infer-esme-fusion-ab")
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
-def _arm_rows(runtime, batch_sizes: list[int]):
+def _arm_rows(
+    runtime: ModelRuntime, batch_sizes: list[int]
+) -> tuple[list[dict[str, object]], dict[str, dict[int, dict[str, list[int]]]]]:
     """Per-batch walls for both arms on persistent engines, plus each arm's final outputs."""
     import statistics
 
@@ -64,13 +72,13 @@ def _arm_rows(runtime, batch_sizes: list[int]):
 
     model = runtime.model
     token_steps = NEW_TOKENS - 1
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     outputs: dict[str, dict[int, dict[str, list[int]]]] = {arm: {} for arm in ARMS}
     for size in batch_sizes:
         requests = build_requests(runtime.tokenizer, size)
         needed = sum(math.ceil((len(req.prompt_ids) + NEW_TOKENS) / BLOCK_SIZE) for req in requests)
-        engines = {}
-        build_s = {}
+        engines: dict[str, InferenceEngine] = {}
+        build_s: dict[str, float] = {}
         for arm in ARMS:
             use_fused_elementwise(arm == "full_step_fused")
             start = time.perf_counter()
@@ -88,13 +96,13 @@ def _arm_rows(runtime, batch_sizes: list[int]):
             if size not in engines[arm].grouped_decode_runners:
                 raise AssertionError(f"{arm}: no grouped runner captured for batch {size}")
 
-        def submit(engine, requests=requests) -> None:
+        def submit(engine: InferenceEngine, requests: list[EsmeBenchRequest] = requests) -> None:
             for req in requests:
                 engine.add_request(
                     Request(req.request_id, list(req.prompt_ids), NEW_TOKENS, frozenset())
                 )
 
-        def decode(arm: str, engines=engines) -> float:
+        def decode(arm: str, engines: dict[str, InferenceEngine] = engines) -> float:
             use_fused_elementwise(arm == "full_step_fused")
             engine = engines[arm]
             submit(engine)
@@ -115,6 +123,7 @@ def _arm_rows(runtime, batch_sizes: list[int]):
                 walls[arm].append(decode(arm))
         row: dict[str, object] = {"batch_size": size}
         wall_ms_by_arm: dict[str, float] = {}
+        runner = None
         for arm in ARMS:
             use_fused_elementwise(arm == "full_step_fused")
             submit(engines[arm])
@@ -181,7 +190,7 @@ def fusion_ab(batch_sizes: list[int], approved: bool = False) -> str:
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
     for row in rows:
-        size = int(row["batch_size"])
+        size = cast(int, row["batch_size"])
         requests = build_requests(runtime.tokenizer, size)
         reference = {
             req.request_id: greedy_decode(
@@ -192,11 +201,13 @@ def fusion_ab(batch_sizes: list[int], approved: bool = False) -> str:
             )
             for req in requests
         }
+        agreements: dict[str, dict[str, object]] = {}
         for arm in ARMS:
             agreement = tie_tolerant_agreement(
                 oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
             )
-            row[arm]["agreement"] = agreement.as_dict()
+            agreements[arm] = agreement.as_dict()
+            cast(dict[str, object], row[arm])["agreement"] = agreements[arm]
         baseline, candidate = outputs["full_step"][size], outputs["full_step_fused"][size]
         row["parity_status"] = (
             "failed"
@@ -209,8 +220,8 @@ def fusion_ab(batch_sizes: list[int], approved: bool = False) -> str:
         print(
             f"[fusion] b{size}: parity {row['parity_status']} "
             f"({row['identical_requests']}/{size} identical), nontie "
-            f"{row['full_step']['agreement']['nontie']}/"
-            f"{row['full_step_fused']['agreement']['nontie']}"
+            f"{agreements['full_step']['nontie']}/"
+            f"{agreements['full_step_fused']['nontie']}"
         )
         stall_guard.progress()
 
@@ -275,7 +286,7 @@ def server_startup(approved: bool = False) -> str:
     # engine here is built and dropped. ``none`` has no grouped graphs, so the reserved-memory
     # difference against it is what grouped capture adds: graphs, their buffers, and the shared
     # FlashInfer workspace.
-    warm: dict[str, list[dict]] = {"none": [], "grouped4": [], "full_step": []}
+    warm: dict[str, list[dict[str, float]]] = {"none": [], "grouped4": [], "full_step": []}
     layers = {"none": None, "grouped4": 4, "full_step": runtime.model.num_layers}
     for repeat in range(STARTUP_REPEATS):
         order = tuple(warm) if repeat % 2 == 0 else tuple(reversed(warm))

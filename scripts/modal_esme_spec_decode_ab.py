@@ -26,6 +26,7 @@ import os
 import random
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -39,6 +40,12 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
+
+if TYPE_CHECKING:
+    from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
+    from llm_infer.model.interface import ModelRuntime
+    from llm_infer.serving.engine import StepResult
+    from llm_infer.serving.request import Request as EngineRequest
 
 DOLLY_REPO = "databricks/databricks-dolly-15k"
 DOLLY_REVISION = "bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a"
@@ -85,7 +92,9 @@ def load_workloads() -> dict[str, tuple[list[int], list[str]]]:
     return workloads
 
 
-def _workload_row(runtime, prompts: list[str]):
+def _workload_row(
+    runtime: ModelRuntime, prompts: list[str]
+) -> tuple[dict[str, dict[str, object]], list[EsmeBenchRequest], dict[str, dict[str, list[int]]]]:
     """Per-prompt walls for both arms on persistent batch-1 engines, plus acceptance counts."""
     import statistics
 
@@ -118,7 +127,7 @@ def _workload_row(runtime, prompts: list[str]):
     speculative_engine = engines["speculative"]
     original_verify = speculative_engine._decode_speculative
 
-    def counted_verify(request, draft, result):
+    def counted_verify(request: EngineRequest, draft: list[int], result: StepResult) -> None:
         before = len(request.generated)
         original_verify(request, draft, result)
         verify["steps"] += 1
@@ -126,7 +135,7 @@ def _workload_row(runtime, prompts: list[str]):
 
     speculative_engine._decode_speculative = counted_verify  # type: ignore[method-assign]
 
-    def run(arm: str, req) -> tuple[float, list[int]]:
+    def run(arm: str, req: EsmeBenchRequest) -> tuple[float, list[int]]:
         engine = engines[arm]
         torch.cuda.synchronize()
         start = time.perf_counter()
@@ -161,8 +170,7 @@ def _workload_row(runtime, prompts: list[str]):
     arm_rows["speculative"]["tokens_per_verify"] = (
         verify["tokens"] / verify["steps"] if verify["steps"] else 0.0
     )
-    row: dict[str, object] = {"batch_size": 1, **arm_rows}
-    return row, measured, outputs
+    return arm_rows, measured, outputs
 
 
 @app.function(
@@ -192,20 +200,23 @@ def spec_decode_ab(workloads: dict[str, list[str]], approved: bool = False) -> s
     oracle = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    configs: dict[str, list[dict]] = {}
+    configs: dict[str, list[dict[str, object]]] = {}
     for name, prompts in workloads.items():
-        row, measured, outputs = _workload_row(runtime, prompts)
+        arm_rows, measured, outputs = _workload_row(runtime, prompts)
+        row: dict[str, object] = {"batch_size": 1, **arm_rows}
         reference = {
             req.request_id: greedy_decode(
                 oracle.model, list(req.prompt_ids), max_new_tokens=NEW_TOKENS, eos_token_ids=set()
             )
             for req in measured
         }
+        agreements: dict[str, dict[str, object]] = {}
         for arm in ARMS:
             agreement = tie_tolerant_agreement(
                 oracle.model, measured, outputs[arm], reference, frozenset()
             )
-            row[arm]["agreement"] = agreement.as_dict()
+            agreements[arm] = agreement.as_dict()
+            arm_rows[arm]["agreement"] = agreements[arm]
         identical = [
             position
             for position, req in enumerate(measured)
@@ -218,17 +229,17 @@ def spec_decode_ab(workloads: dict[str, list[str]], approved: bool = False) -> s
         if len(identical) >= 2:
             row["identical_subset_change"] = dataclasses.asdict(
                 paired_change(
-                    [row["baseline"]["walls_s"][i] for i in identical],
-                    [row["speculative"]["walls_s"][i] for i in identical],
+                    [cast(list[float], arm_rows["baseline"]["walls_s"])[i] for i in identical],
+                    [cast(list[float], arm_rows["speculative"]["walls_s"])[i] for i in identical],
                 )
             )
         configs[name] = [row]
         print(
-            f"[spec] {name}: baseline {row['baseline']['median_request_s']:.3f} s, speculative "
-            f"{row['speculative']['median_request_s']:.3f} s per request; "
-            f"{row['speculative']['tokens_per_verify']:.2f} tokens/verify; "
+            f"[spec] {name}: baseline {arm_rows['baseline']['median_request_s']:.3f} s, "
+            f"speculative {arm_rows['speculative']['median_request_s']:.3f} s per request; "
+            f"{arm_rows['speculative']['tokens_per_verify']:.2f} tokens/verify; "
             f"{len(identical)}/{len(measured)} identical; nontie "
-            f"{row['baseline']['agreement']['nontie']}/{row['speculative']['agreement']['nontie']}"
+            f"{agreements['baseline']['nontie']}/{agreements['speculative']['nontie']}"
         )
         stall_guard.progress()
     return json.dumps(

@@ -36,6 +36,7 @@ import json
 import math
 import time
 from pathlib import Path
+from typing import TypedDict
 
 import modal
 
@@ -166,7 +167,7 @@ def bench_hf_and_engine(
     max_new_tokens: int,
     warmup: int,
     iters: int,
-    vllm_outputs: dict,
+    vllm_outputs: dict[str, list[int]],
     headline: bool,
     approved: bool = False,
 ) -> str:
@@ -250,7 +251,7 @@ def bench_hf_and_engine(
         outputs=vllm_norm,
     )
 
-    def _row(t: SystemTiming) -> dict:
+    def _row(t: SystemTiming) -> dict[str, object]:
         agreement = agreements[t.system]
         return {
             "system": t.system,
@@ -280,7 +281,26 @@ def bench_hf_and_engine(
     )
 
 
-def _print_table(rows: list[dict]) -> None:
+class _TableAgreement(TypedDict):
+    exact: int
+    tie: int
+    nontie: int
+    total: int
+    ties_sample: list[object]
+    divergences_sample: list[object]
+
+
+class _TableRow(TypedDict):
+    """The keys of a decoded result row that the summary table reads."""
+
+    system: str
+    agreement: _TableAgreement
+    median_seconds: float
+    total_output_tokens: int
+    tokens_per_second: float | None
+
+
+def _print_table(rows: list[_TableRow]) -> None:
     header = (
         "| model | system | agrees fp32 oracle | median s | output tok | tok/s |\n"
         "| --- | --- | --- | --- | --- | --- |"

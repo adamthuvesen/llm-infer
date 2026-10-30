@@ -37,9 +37,9 @@ import json
 import math
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, NotRequired, TextIO, TypedDict, Unpack, cast
 
 import modal
 
@@ -56,8 +56,17 @@ from scripts.modal_esme_bundle import (
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
 
 if TYPE_CHECKING:
+    import torch
+
+    from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
+    from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
+    from llm_infer.kv_cache.paged_kv_cache import KVPagePlan, KVReadPlan
+    from llm_infer.model.decode_graph import DecodeGraphRunner
+    from llm_infer.model.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
     from llm_infer.model.interface import ModelRuntime
     from llm_infer.model.pretrain_bundle import PretrainBundleModel
+    from llm_infer.profiling import TimingProfiler
+    from llm_infer.serving import InferenceEngine, SamplingParams
 
 BLOCK_SIZE = 128
 MAX_NEW_TOKENS = 64
@@ -82,6 +91,52 @@ class _SamplingSettings(TypedDict):
 
 SAMPLED_SETTINGS: _SamplingSettings = {"temperature": 0.8, "top_p": 0.95, "top_k": 32, "seed": 17}
 
+
+class _EngineConfig(TypedDict, total=False):
+    decode_window_size: int
+    planned_decode: bool
+    sampling: SamplingParams | None
+    profiler: TimingProfiler | None
+    decode_graphs: bool
+
+
+class _WindowKwargs(TypedDict, total=False):
+    decode_window_size: int
+
+
+class _RequestSamplingKwargs(TypedDict, total=False):
+    sampling: SamplingParams
+
+
+class _GroupedEngineKwargs(TypedDict, total=False):
+    grouped_decode_graphs: bool
+    grouped_capture_sizes: tuple[int, ...]
+    grouped_shared_workspace: bool
+
+
+class _FusionArm(TypedDict):
+    rows: list[dict[str, object]]
+    capture_s: float | None
+    load_compile_capture_s: NotRequired[float]
+
+
+class _HostTimelineRow(TypedDict):
+    batch_size: int
+    passes: list[dict[str, object]]
+
+
+class _TimelineGaps(TypedDict):
+    token_steps: int
+    gpu_activities: int
+    gpu_activities_per_token_step: float
+    idle_gaps_per_token_step: float
+    span_ms_per_token_step: float
+    busy_ms_per_token_step: float
+    busy_ms_by_category_per_token_step: dict[str, float]
+    idle_ms_per_token_step: dict[str, float]
+    host_wait_ms_by_api_per_token_step: dict[str, float]
+
+
 app = modal.App("llm-infer-esme-decode-profile")
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -94,7 +149,9 @@ def _parse_batch_sizes(raw: str) -> list[int]:
     return sizes
 
 
-def _build_engine(runtime, num_requests: int, device: str, config: dict | None = None):
+def _build_engine(
+    runtime: ModelRuntime, num_requests: int, device: str, config: _EngineConfig | None = None
+) -> tuple[InferenceEngine, list[EsmeBenchRequest]]:
     """A fresh engine with the benchmark's block sizing and all requests queued (greedy).
 
     ``config`` overrides engine knobs for the same-GPU ablation: ``decode_window_size``
@@ -111,7 +168,7 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
     capabilities = runtime.capabilities
     if config.get("planned_decode") is False:
         capabilities = replace(capabilities, planned_decode=False)
-    window_kwargs = (
+    window_kwargs: _WindowKwargs = (
         {"decode_window_size": config["decode_window_size"]}
         if "decode_window_size" in config
         else {}
@@ -127,6 +184,7 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
         profiler=config.get("profiler"),
         **window_kwargs,
     )
+    sampling_kwargs: _RequestSamplingKwargs = {"sampling": sampling} if sampling is not None else {}
     for req in requests:
         engine.add_request(
             Request(
@@ -134,18 +192,20 @@ def _build_engine(runtime, num_requests: int, device: str, config: dict | None =
                 list(req.prompt_ids),
                 MAX_NEW_TOKENS,
                 runtime.eos_token_ids,
-                **({"sampling": sampling} if sampling is not None else {}),
+                **sampling_kwargs,
             )
         )
     return engine, requests
 
 
-def _run_prefill_step(engine) -> None:
+def _run_prefill_step(engine: InferenceEngine) -> None:
     """Advance the engine through its first step (prefill + first sampled token)."""
     engine.step()
 
 
-def _decode_wall(runtime, num_requests: int, config: dict | None = None) -> dict:
+def _decode_wall(
+    runtime: ModelRuntime, num_requests: int, config: _EngineConfig | None = None
+) -> dict[str, object]:
     """Un-instrumented decode timing: wall per decode step after prefill, one synced run."""
     import torch
 
@@ -171,7 +231,9 @@ def _decode_wall(runtime, num_requests: int, config: dict | None = None) -> dict
     }
 
 
-def _torch_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
+def _torch_profile(
+    runtime: ModelRuntime, num_requests: int, config: _EngineConfig | None = None
+) -> dict[str, object]:
     """GPU busy time vs CPU dispatch over a short decode slice, via torch.profiler.
 
     CUDA *event* spans include GPU idle gaps while the CPU is still issuing work, so they
@@ -223,7 +285,7 @@ def _torch_profile(runtime, num_requests: int, config: dict | None = None) -> di
     }
 
 
-def _sync_op_isolation() -> dict:
+def _sync_op_isolation() -> dict[str, int]:
     """Sync-debug warning counts for the primitive ops the window flush is built from.
 
     The pass-level probe counts warnings but the c10 message never names the caller; this
@@ -271,7 +333,7 @@ def _sync_op_isolation() -> dict:
     return counts
 
 
-def _sync_first_site(runtime, num_requests: int) -> dict:
+def _sync_first_site(runtime: ModelRuntime, num_requests: int) -> dict[str, list[str]]:
     """Python stacks of every synchronizing op in one decode pass.
 
     Sync-debug warnings are emitted synchronously in the calling thread, so the stack at
@@ -289,7 +351,14 @@ def _sync_first_site(runtime, num_requests: int) -> dict:
 
     sites: list[str] = []
 
-    def record_site(message, category, filename, lineno, file=None, line=None):
+    def record_site(
+        message: Warning | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file: TextIO | None = None,
+        line: str | None = None,
+    ) -> None:
         del message, category, filename, lineno, file, line
         stack = traceback.format_stack(limit=14)
         sites.append("".join(stack[:-1]))  # drop the record_site frame itself
@@ -306,7 +375,7 @@ def _sync_first_site(runtime, num_requests: int) -> dict:
     return {"sync_sites": sites}
 
 
-def _sync_probe(runtime, num_requests: int) -> dict:
+def _sync_probe(runtime: ModelRuntime, num_requests: int) -> dict[str, object]:
     """Host-sync inventory of the decode loop under ``torch.cuda.set_sync_debug_mode``.
 
     Each engine step (one scheduler pass = one whole deferred window) runs with sync-debug
@@ -341,7 +410,9 @@ def _sync_probe(runtime, num_requests: int) -> dict:
     }
 
 
-def _python_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
+def _python_profile(
+    runtime: ModelRuntime, num_requests: int, config: _EngineConfig | None = None
+) -> dict[str, object]:
     """Function-level Python attribution of the decode loop via cProfile (diagnostic only)."""
     import cProfile
     import pstats
@@ -374,14 +445,16 @@ def _python_profile(runtime, num_requests: int, config: dict | None = None) -> d
     return {"profile_total_s": total_s, "top_functions_by_tottime": rows}
 
 
-def _phase_profile(runtime, num_requests: int, config: dict | None = None) -> dict:
+def _phase_profile(
+    runtime: ModelRuntime, num_requests: int, config: _EngineConfig | None = None
+) -> dict[str, object]:
     """One diagnostic generation projected to the ``TimingProfiler`` buckets."""
     import torch
 
     from llm_infer.profiling import TimingProfiler
 
     profiler = TimingProfiler("cuda")
-    build_config = {**(config or {}), "profiler": profiler}
+    build_config: _EngineConfig = {**(config or {}), "profiler": profiler}
     engine, _ = _build_engine(runtime, num_requests, "cuda", build_config)
     engine.run()
     torch.cuda.synchronize()
@@ -389,8 +462,11 @@ def _phase_profile(runtime, num_requests: int, config: dict | None = None) -> di
 
 
 def _bench_batch(
-    oracle_runtime, flash_runtime, num_requests: int, config: dict | None = None
-) -> dict:
+    oracle_runtime: ModelRuntime,
+    flash_runtime: ModelRuntime,
+    num_requests: int,
+    config: _EngineConfig | None = None,
+) -> dict[str, object]:
     """One oracle-gated flash-engine row: median wall over fresh-engine iterations."""
     import torch
 
@@ -429,11 +505,7 @@ def _bench_batch(
 
 def _bundle_model(runtime: ModelRuntime) -> PretrainBundleModel:
     """The Esme bundle model behind ``runtime``; decode-graph probes need its graph runners."""
-    from llm_infer.model.pretrain_bundle import PretrainBundleModel
-
-    if not isinstance(runtime.model, PretrainBundleModel):
-        raise TypeError(f"expected an Esme bundle model, got {type(runtime.model).__name__}")
-    return runtime.model
+    return cast("PretrainBundleModel", runtime.model)
 
 
 @app.function(
@@ -518,7 +590,7 @@ def profile_sampled_decode(batch_sizes: list[int], approved: bool = False) -> st
         dtype=torch.bfloat16,
         device="cuda",
     )
-    sampled_config = {"sampling": SamplingParams(**SAMPLED_SETTINGS)}
+    sampled_config: _EngineConfig = {"sampling": SamplingParams(**SAMPLED_SETTINGS)}
     results = []
     for size in batch_sizes:
         stall_guard.progress()
@@ -608,7 +680,7 @@ def bench_decode(batch_sizes: list[int], approved: bool = False) -> str:
 # comparison is free of Modal's machine-to-machine variance (GPU SKU, clocks, host CPU).
 # ``decode_graphs`` is a model-level toggle (the runner is built once and reused), applied
 # by the harness around each row rather than by ``_build_engine``.
-ABLATION_CONFIGS: dict[str, dict] = {
+ABLATION_CONFIGS: dict[str, _EngineConfig] = {
     "per-step (window=1)": {"decode_window_size": 1},
     "window, classic decode_many": {"planned_decode": False},
     "window + planned buffers (default)": {},
@@ -616,7 +688,7 @@ ABLATION_CONFIGS: dict[str, dict] = {
 }
 
 
-def _graph_runner(flash_runtime):
+def _graph_runner(flash_runtime: ModelRuntime) -> DecodeGraphRunner:
     """Capture the decode-graph buckets once (outside any timed region) and return the runner."""
     start = time.perf_counter()
     runner = _bundle_model(flash_runtime).enable_decode_graphs(CAPTURE_SIZES)
@@ -625,7 +697,7 @@ def _graph_runner(flash_runtime):
     return runner
 
 
-def _runner_for(config: dict, graph_runner):
+def _runner_for(config: _EngineConfig, graph_runner: DecodeGraphRunner) -> DecodeGraphRunner | None:
     return graph_runner if config.get("decode_graphs") else None
 
 
@@ -731,7 +803,7 @@ def sync_report(batch_sizes: list[int], approved: bool = False) -> str:
 def flashinfer_graph_probe(approved: bool = False) -> str:
     """Capture only FlashInfer ``run`` and re-plan fixed buffers across page boundaries."""
     require_spend_approval(approved, __file__)
-    import flashinfer
+    import flashinfer  # pyright: ignore[reportMissingImports]
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -1068,10 +1140,10 @@ def grouped_layer_ab(
 
         def build_engine(
             label: str,
-            runtimes=runtimes,
-            requests_by_mode=requests_by_mode,
-            batch_size=batch_size,
-        ):
+            runtimes: dict[str, ModelRuntime] = runtimes,
+            requests_by_mode: dict[str, list[EsmeBenchRequest]] = requests_by_mode,
+            batch_size: int = batch_size,
+        ) -> InferenceEngine:
             runtime = runtimes[label]
             requests = requests_by_mode[label]
             needed = sum(
@@ -1099,10 +1171,10 @@ def grouped_layer_ab(
 
         def decode_once(
             label: str,
-            runtimes=runtimes,
-            requests_by_mode=requests_by_mode,
-            engines=engines,
-            batch_size=batch_size,
+            runtimes: dict[str, ModelRuntime] = runtimes,
+            requests_by_mode: dict[str, list[EsmeBenchRequest]] = requests_by_mode,
+            engines: dict[str, InferenceEngine] = engines,
+            batch_size: int = batch_size,
         ) -> tuple[float, int, dict[str, list[int]]]:
             nonlocal candidate_runner
             runtime = runtimes[label]
@@ -1124,12 +1196,13 @@ def grouped_layer_ab(
                 outputs[request_id].extend(int(token) for token in tokens)
             if label == candidate_label and candidate_runner is None:
                 tables = [request.block_table for request in live_requests]
-                capture_plan = runtime.model.open_decode_window(engine.cache, tables, budget=8)
+                bundle_model = _bundle_model(runtime)
+                capture_plan = bundle_model.open_decode_window(engine.cache, tables, budget=8)
                 if capture_plan is None:
                     raise RuntimeError("two-layer capture could not open a planned window")
                 candidate_start = time.perf_counter()
                 candidate_runner = EngineOwnedGroupedDecodeGraphRunner(
-                    runtime.model,
+                    bundle_model,
                     engine.cache,
                     batch_size,
                     grouped_layers=grouped_layers,
@@ -1213,7 +1286,7 @@ def grouped_layer_ab(
             agreements[label] = agreement
             median_s = statistics.median(timings[label])
             tokens = token_counts[label][-1]
-            row = {
+            row: dict[str, object] = {
                 "batch_size": batch_size,
                 "context_length": context_length,
                 "runner": label,
@@ -1429,7 +1502,12 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
         oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
     )
 
-    def build_engine(runtime, requests, batch_size: int, **grouped_kwargs) -> InferenceEngine:
+    def build_engine(
+        runtime: ModelRuntime,
+        requests: list[EsmeBenchRequest],
+        batch_size: int,
+        **grouped_kwargs: Unpack[_GroupedEngineKwargs],
+    ) -> InferenceEngine:
         needed = sum(
             math.ceil((len(request.prompt_ids) + max_new_tokens) / 64) for request in requests
         )
@@ -1442,7 +1520,9 @@ def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> st
             **grouped_kwargs,
         )
 
-    def decode_once(engine, requests) -> tuple[float, int, dict[str, list[int]]]:
+    def decode_once(
+        engine: InferenceEngine, requests: list[EsmeBenchRequest]
+    ) -> tuple[float, int, dict[str, list[int]]]:
         """Add every request, absorb the first (prefill) step, then time the decode drain."""
         for request in requests:
             engine.add_request(
@@ -1735,8 +1815,8 @@ def _kernel_category(name: str) -> str:
 
 
 def _roofline_rows(
-    runtime, batch_sizes: list[int], peak_bytes_per_s: float
-) -> tuple[list[dict], dict[int, dict[str, list[int]]]]:
+    runtime: ModelRuntime, batch_sizes: list[int], peak_bytes_per_s: float
+) -> tuple[list[dict[str, object]], dict[int, dict[str, list[int]]]]:
     """Roofline rows per batch size, plus each batch's fixed-length greedy outputs for gating.
 
     One persistent engine per batch decodes ``ROOFLINE_NEW_TOKENS`` with EOS ignored, so the
@@ -1755,7 +1835,7 @@ def _roofline_rows(
         model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
     )
 
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     outputs_by_batch: dict[int, dict[str, list[int]]] = {}
     for size in batch_sizes:
         stall_guard.progress()
@@ -1771,7 +1851,9 @@ def _roofline_rows(
             capabilities=runtime.capabilities,
         )
 
-        def prefill(engine=engine, requests=requests) -> None:
+        def prefill(
+            engine: InferenceEngine = engine, requests: list[EsmeBenchRequest] = requests
+        ) -> None:
             for req in requests:
                 engine.add_request(
                     Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
@@ -1779,7 +1861,7 @@ def _roofline_rows(
             engine.step()
             torch.cuda.synchronize()
 
-        def decode(engine=engine) -> float:
+        def decode(engine: InferenceEngine = engine) -> float:
             start = time.perf_counter()
             while engine.scheduler.has_work():
                 engine.step()
@@ -1805,9 +1887,9 @@ def _roofline_rows(
         kernels = [
             evt
             for evt in events
-            if evt.device_type == torch.autograd.DeviceType.CUDA and evt.self_device_time_total > 0
+            if evt.device_type == torch.profiler.DeviceType.CUDA and evt.self_device_time_total > 0
         ]
-        host_events = [evt for evt in events if evt.device_type == torch.autograd.DeviceType.CPU]
+        host_events = [evt for evt in events if evt.device_type == torch.profiler.DeviceType.CPU]
         by_category = {"gemm": 0.0, "attention": 0.0, "other": 0.0}
         for evt in kernels:
             by_category[_kernel_category(evt.key)] += evt.self_device_time_total / 1000.0
@@ -1945,7 +2027,7 @@ def roofline_report(batch_sizes: list[int], approved: bool = False) -> str:
 
 
 @contextlib.contextmanager
-def _compiled_elementwise() -> Iterator[None]:
+def _compiled_elementwise() -> Generator[None]:
     """Swap ``rms_norm`` and ``apply_rope`` for ``torch.compile`` versions in the model modules.
 
     The decode graphs and the bundle model look both names up as module globals at call time, so
@@ -2037,7 +2119,7 @@ def fusion_probe(batch_sizes: list[int], approved: bool = False) -> str:
         raise RuntimeError(f"no spec HBM bandwidth recorded for GPU {gpu.get('name')!r}")
     capture_sizes = tuple(sorted(set(batch_sizes)))
 
-    arms: dict[str, dict] = {}
+    arms: dict[str, _FusionArm] = {}
     outputs: dict[str, dict[int, dict[str, list[int]]]] = {}
     runtime, capture_s = _load_bf16_with_graphs(capture_sizes, warm=False)
     rows, outputs["eager"] = _roofline_rows(runtime, batch_sizes, peak_bytes_per_s)
@@ -2062,7 +2144,7 @@ def fusion_probe(batch_sizes: list[int], approved: bool = False) -> str:
     oracle_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
-    gates: list[dict] = []
+    gates: list[dict[str, object]] = []
     for size in batch_sizes:
         stall_guard.progress()
         requests = build_requests(tokenizer, size)
@@ -2125,7 +2207,7 @@ GPU_ACTIVITY_TABLES = (
 )
 
 
-def _timeline_gaps(sqlite_path: Path, token_steps: int) -> dict:
+def _timeline_gaps(sqlite_path: Path, token_steps: int) -> _TimelineGaps:
     """Split GPU idle time in an nsys trace by cause, per token step.
 
     Every GPU activity (kernel, memcpy, memset) carries the correlation id of the host API call
@@ -2257,7 +2339,7 @@ def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
         [str(nsys), "--version"], capture_output=True, text=True
     ).stdout.strip()
     token_steps = TIMELINE_NEW_TOKENS - 1
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="esme-timeline-") as tmp:
         for size in batch_sizes:
             stall_guard.progress()
@@ -2278,15 +2360,15 @@ def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
                         f"nsys {arm} b{size} failed ({result.returncode}):\n"
                         f"{result.stdout[-3000:]}\n{result.stderr[-3000:]}"
                     )
-                row = {"arm": arm, "batch_size": size, **_timeline_gaps(sqlite_path, token_steps)}
-                rows.append(row)
-                idle = row["idle_ms_per_token_step"]
+                gaps = _timeline_gaps(sqlite_path, token_steps)
+                rows.append({"arm": arm, "batch_size": size, **gaps})
+                idle = gaps["idle_ms_per_token_step"]
                 print(
-                    f"[timeline] {arm} b{size}: span {row['span_ms_per_token_step']:.3f} busy "
-                    f"{row['busy_ms_per_token_step']:.3f} ms/step; idle graph-internal "
+                    f"[timeline] {arm} b{size}: span {gaps['span_ms_per_token_step']:.3f} busy "
+                    f"{gaps['busy_ms_per_token_step']:.3f} ms/step; idle graph-internal "
                     f"{idle['graph_internal']:.3f}, host-wait {idle['host_wait']:.3f}, launch "
                     f"{idle['launch_latency']:.3f}; activities "
-                    f"{row['gpu_activities_per_token_step']:.0f}/step"
+                    f"{gaps['gpu_activities_per_token_step']:.0f}/step"
                 )
     return json.dumps(
         {
@@ -2308,7 +2390,7 @@ HOST_TIMELINE_REGIONS = (
 )
 
 
-def _host_timeline_row(runtime, size: int) -> dict:
+def _host_timeline_row(runtime: ModelRuntime, size: int) -> _HostTimelineRow:
     """The three host-timeline passes for one batch size on one persistent engine."""
     from collections import defaultdict
 
@@ -2368,7 +2450,7 @@ def _host_timeline_row(runtime, size: int) -> dict:
             active["on"] = False
         return walls
 
-    def summarize(pass_name: str, walls: list[float]) -> dict:
+    def summarize(pass_name: str, walls: list[float]) -> dict[str, object]:
         median_run = sorted(range(len(walls)), key=walls.__getitem__)[len(walls) // 2]
         wall_ms = walls[median_run] * 1000.0 / token_steps
         totals, calls = run_totals[-len(walls) :][median_run], run_calls[-len(walls) :][median_run]
@@ -2420,16 +2502,16 @@ def _host_timeline_row(runtime, size: int) -> dict:
         for _, target_name, method in HOST_TIMELINE_REGIONS:
             if method in vars(targets[target_name]):
                 delattr(targets[target_name], method)
-    base = passes[0]["wall_ms_per_token_step"]
+    base = cast(float, passes[0]["wall_ms_per_token_step"])
     for row in passes[1:]:
-        row["overhead_vs_uninstrumented"] = row["wall_ms_per_token_step"] / base - 1
+        row["overhead_vs_uninstrumented"] = cast(float, row["wall_ms_per_token_step"]) / base - 1
     issue_row = passes[1]
     print(
         f"[host-timeline] b{size}: wall {base:.3f} ms/step; issue pass wall "
         f"{issue_row['wall_ms_per_token_step']:.3f}, host issue "
         f"{issue_row['host_issue_ms_per_token_step']:.3f} "
         f"({issue_row['host_issue_fraction_of_wall']:.0%} of wall), sync "
-        f"{issue_row['host_ms_per_token_step'].get('event_synchronize', 0.0):.3f}"
+        f"{cast('dict[str, float]', issue_row['host_ms_per_token_step']).get('event_synchronize', 0.0):.3f}"
     )
     return {"batch_size": size, "passes": passes}
 
@@ -2467,15 +2549,15 @@ def host_timeline(batch_sizes: list[int], approved: bool = False) -> str:
     esme_bundles.reload()
     capture_sizes = tuple(sorted(set(batch_sizes)))
 
-    def measure_arm(runtime) -> list[dict]:
-        rows = []
+    def measure_arm(runtime: ModelRuntime) -> list[_HostTimelineRow]:
+        rows: list[_HostTimelineRow] = []
         for size in batch_sizes:
             stall_guard.progress()
             rows.append(_host_timeline_row(runtime, size))
             torch.cuda.empty_cache()
         return rows
 
-    arms: dict[str, list[dict]] = {}
+    arms: dict[str, list[_HostTimelineRow]] = {}
     runtime, _ = _load_bf16_with_graphs(capture_sizes, warm=False)
     arms["eager"] = measure_arm(runtime)
     del runtime
@@ -2488,8 +2570,8 @@ def host_timeline(batch_sizes: list[int], approved: bool = False) -> str:
 
     effect_reproduces = {
         str(eager["batch_size"]): (
-            compiled["passes"][0]["wall_ms_per_token_step"]
-            > eager["passes"][0]["wall_ms_per_token_step"]
+            cast(float, compiled["passes"][0]["wall_ms_per_token_step"])
+            > cast(float, eager["passes"][0]["wall_ms_per_token_step"])
         )
         for eager, compiled in zip(arms["eager"], arms["compiled"], strict=True)
     }
@@ -2511,7 +2593,7 @@ HOST_PLAN_METADATA = ("device", "host")
 
 
 @contextlib.contextmanager
-def _device_page_metadata() -> Iterator[None]:
+def _device_page_metadata() -> Generator[None]:
     """Give FlashInfer's planner device-only page metadata, as the engine did before the fix.
 
     Both planner call sites (the piecewise backend and the grouped-graph runner) see the same
@@ -2526,13 +2608,28 @@ def _device_page_metadata() -> Iterator[None]:
     original_plan = backend_class.plan_decode_batch_paged
     original_group_plan = runner_class._plan_group_wrapper
 
-    def strip(page_plan):
+    def strip(page_plan: KVPagePlan) -> KVPagePlan:
         return dataclasses.replace(page_plan, indptr_host=None, last_page_len_host=None)
 
-    def plan(self, page_plan, *args, **kwargs):
-        return original_plan(self, strip(page_plan), *args, **kwargs)
+    def plan(
+        self: FlashInferPagedAttention,
+        page_plan: KVPagePlan,
+        *,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+    ) -> None:
+        return original_plan(
+            self,
+            strip(page_plan),
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            dtype=dtype,
+        )
 
-    def plan_group(self, read_plan):
+    def plan_group(self: EngineOwnedGroupedDecodeGraphRunner, read_plan: KVReadPlan) -> None:
         if read_plan.page_plan is not None:
             read_plan = dataclasses.replace(read_plan, page_plan=strip(read_plan.page_plan))
         return original_group_plan(self, read_plan)
@@ -2547,8 +2644,8 @@ def _device_page_metadata() -> Iterator[None]:
 
 
 def _host_plan_rows(
-    runtime, batch_sizes: list[int], *, grouped: bool
-) -> tuple[list[dict], dict[str, dict[int, dict[str, list[int]]]]]:
+    runtime: ModelRuntime, batch_sizes: list[int], *, grouped: bool
+) -> tuple[list[dict[str, object]], dict[str, dict[int, dict[str, list[int]]]]]:
     """Device vs host page metadata on one persistent engine per batch size.
 
     Each round runs one decode per metadata arm, alternating which goes first, so drift over
@@ -2562,7 +2659,7 @@ def _host_plan_rows(
     from llm_infer.serving import InferenceEngine, Request
 
     token_steps = ROOFLINE_NEW_TOKENS - 1
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     outputs: dict[str, dict[int, dict[str, list[int]]]] = {arm: {} for arm in HOST_PLAN_METADATA}
     for size in batch_sizes:
         requests = build_requests(runtime.tokenizer, size)
@@ -2582,7 +2679,11 @@ def _host_plan_rows(
         if grouped and size not in engine.grouped_decode_runners:
             raise AssertionError(f"no grouped runner captured for batch {size}")
 
-        def decode(arm: str, engine=engine, requests=requests) -> float:
+        def decode(
+            arm: str,
+            engine: InferenceEngine = engine,
+            requests: list[EsmeBenchRequest] = requests,
+        ) -> float:
             for req in requests:
                 engine.add_request(
                     Request(req.request_id, list(req.prompt_ids), ROOFLINE_NEW_TOKENS, frozenset())
@@ -2662,7 +2763,7 @@ def host_plan_ab(batch_sizes: list[int], approved: bool = False) -> str:
     esme_bundles.reload()
     capture_sizes = tuple(sorted(set(batch_sizes)))
 
-    configs: dict[str, list[dict]] = {}
+    configs: dict[str, list[dict[str, object]]] = {}
     outputs: dict[str, dict[str, dict[int, dict[str, list[int]]]]] = {}
     runtime, _ = _load_bf16_with_graphs(capture_sizes, warm=False)
     for name, grouped in (("piecewise", False), ("grouped", True)):
@@ -2694,11 +2795,13 @@ def host_plan_ab(batch_sizes: list[int], approved: bool = False) -> str:
         }
         for name, rows in configs.items():
             row = next(r for r in rows if r["batch_size"] == size)
+            agreements: dict[str, dict[str, object]] = {}
             for arm in HOST_PLAN_METADATA:
                 agreement = tie_tolerant_agreement(
                     oracle_runtime.model, requests, outputs[name][arm][size], reference, frozenset()
                 )
-                row[arm]["agreement"] = agreement.as_dict()
+                agreements[arm] = agreement.as_dict()
+                cast("dict[str, object]", row[arm])["agreement"] = agreements[arm]
             device_outputs, host_outputs = (
                 outputs[name]["device"][size],
                 outputs[name]["host"][size],
@@ -2712,7 +2815,7 @@ def host_plan_ab(batch_sizes: list[int], approved: bool = False) -> str:
             )
             print(
                 f"[host-plan] {name} b{size}: parity {row['parity_status']}, nontie "
-                f"{row['device']['agreement']['nontie']}/{row['host']['agreement']['nontie']}"
+                f"{agreements['device']['nontie']}/{agreements['host']['nontie']}"
             )
             stall_guard.progress()
 

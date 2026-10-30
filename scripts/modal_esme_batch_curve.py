@@ -30,7 +30,7 @@ import functools
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, TypedDict, cast
 
 import modal
 
@@ -51,7 +51,14 @@ from scripts.modal_flash_image import (
 )
 
 if TYPE_CHECKING:
+    import torch
+
+    from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
+    from llm_infer.benchmarks.reference_policy import EsmeAgreement
+    from llm_infer.kv_cache.block_allocator import BlockPoolEvent
+    from llm_infer.model.interface import ModelRuntime
     from llm_infer.model.pretrain_bundle import PretrainBundleModel
+    from llm_infer.serving import InferenceEngine
 
 ESME_HF_DIR = "esme-214m-chat-hf"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
@@ -78,6 +85,19 @@ vllm_image = (
     .run_commands("pip install --no-deps -e .")
 )
 
+
+class _HfGenerator(Protocol):
+    """The part of a transformers causal LM that the batched HF floor calls."""
+
+    def generate(self, input_ids: torch.Tensor, **kwargs: object) -> torch.Tensor: ...
+
+
+class _VllmBatchRow(TypedDict):
+    batch_size: int
+    median_seconds: float
+    outputs: dict[str, list[int]]
+
+
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
@@ -102,7 +122,7 @@ class _PeakBlocks:
     def __init__(self) -> None:
         self.peak = 0
 
-    def __call__(self, event) -> None:
+    def __call__(self, event: BlockPoolEvent) -> None:
         self.peak = max(self.peak, event.num_used)
 
 
@@ -135,7 +155,7 @@ def bench_vllm_batches(
     pool_requests = build_requests(runtime.tokenizer, max(batch_sizes), HEADLINE_PROMPTS)
     max_model_len = max(len(req.prompt_ids) for req in pool_requests) + max_new_tokens
     llm, vllm_config = build_vllm_llm(Path(REMOTE_HF_PATH), max_model_len=max_model_len)
-    rows = []
+    rows: list[_VllmBatchRow] = []
     for size in batch_sizes:
         stall_guard.progress()
         requests = build_requests(runtime.tokenizer, size, HEADLINE_PROMPTS)
@@ -226,7 +246,9 @@ def sweep_baseline(
         oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
     )
 
-    def agreement_record(requests, outputs):
+    def agreement_record(
+        requests: list[EsmeBenchRequest], outputs: dict[str, list[int]]
+    ) -> tuple[dict[str, object], EsmeAgreement]:
         agreement = tie_tolerant_agreement(
             oracle_runtime.model, requests, outputs, reference_for(requests), eos
         )
@@ -245,7 +267,7 @@ def sweep_baseline(
             agreement,
         )
 
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     for context_length in context_lengths:
         stall_guard.progress()
         for size in batch_sizes:
@@ -269,7 +291,9 @@ def sweep_baseline(
             torch.cuda.synchronize()
             engine_kv_startup_s = time.perf_counter() - startup_start
 
-            def persistent_once(requests=requests, engine=engine) -> dict[str, list[int]]:
+            def persistent_once(
+                requests: list[EsmeBenchRequest] = requests, engine: InferenceEngine = engine
+            ) -> dict[str, list[int]]:
                 for request in requests:
                     engine.add_request(
                         Request(
@@ -399,7 +423,7 @@ def sweep_baseline(
     }
     for row in rows:
         row["all_prompt_single_request_coverage_passed"] = coverage_by_context[
-            row["context_length"]
+            cast(int, row["context_length"])
         ]
 
     return json.dumps(
@@ -426,7 +450,7 @@ def sweep(
     max_new_tokens: int,
     warmup: int,
     iters: int,
-    vllm_rows: list[dict],
+    vllm_rows: list[_VllmBatchRow],
     approved: bool = False,
 ) -> str:
     """All llm_infer and HF-floor rows in ONE container, plus the oracle gate for every row."""
@@ -478,7 +502,13 @@ def sweep(
         oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
     )
 
-    def gated_row(system: str, size: int, requests, outputs, per_iter: list[float]) -> dict:
+    def gated_row(
+        system: str,
+        size: int,
+        requests: list[EsmeBenchRequest],
+        outputs: dict[str, list[int]],
+        per_iter: list[float],
+    ) -> dict[str, object]:
         return {
             "system": system,
             "batch_size": size,
@@ -487,7 +517,7 @@ def sweep(
             ),
         }
 
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
 
     # llm_infer rows: fresh engine per iteration, serving defaults (window + planned buffers
     # + decode graphs; the runner is model-owned, so every fresh engine replays the same
@@ -503,7 +533,9 @@ def sweep(
         peak = _PeakBlocks()
 
         def decode_once(
-            requests=requests, num_blocks=num_blocks, peak=peak
+            requests: list[EsmeBenchRequest] = requests,
+            num_blocks: int = num_blocks,
+            peak: _PeakBlocks = peak,
         ) -> dict[str, list[int]]:
             engine = InferenceEngine(
                 engine_runtime.model,
@@ -658,7 +690,7 @@ def sweep_grouped_ab(
         oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
     )
 
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     for size in batch_sizes:
         stall_guard.progress()
         requests = build_requests(engine_runtime.tokenizer, size, HEADLINE_PROMPTS)
@@ -667,7 +699,7 @@ def sweep_grouped_ab(
         )
         num_blocks = needed + max(4, len(requests))
 
-        def build(grouped: bool, num_blocks=num_blocks, size=size) -> InferenceEngine:
+        def build(grouped: bool, num_blocks: int = num_blocks, size: int = size) -> InferenceEngine:
             return InferenceEngine(
                 engine_runtime.model,
                 block_size=BLOCK_SIZE,
@@ -682,7 +714,9 @@ def sweep_grouped_ab(
         engines = {"piecewise": build(False), "grouped": build(True)}
         grouped_capture = engines["grouped"].grouped_decode_runners[size].total_capture_seconds
 
-        def run_once(engine, requests=requests) -> dict[str, list[int]]:
+        def run_once(
+            engine: InferenceEngine, requests: list[EsmeBenchRequest] = requests
+        ) -> dict[str, list[int]]:
             for req in requests:
                 engine.add_request(
                     Request(req.request_id, list(req.prompt_ids), max_new_tokens, eos)
@@ -706,7 +740,7 @@ def sweep_grouped_ab(
         if grouped_steps == 0:
             raise RuntimeError(f"grouped runner never fired at batch {size}")
         reference = reference_for(requests)
-        arm_rows: dict[str, dict] = {}
+        arm_rows: dict[str, dict[str, object]] = {}
         for arm in ("piecewise", "grouped"):
             agreement = tie_tolerant_agreement(
                 oracle_runtime.model, requests, outputs[arm], reference, eos
@@ -736,7 +770,9 @@ def sweep_grouped_ab(
             )
 
         parity_exact = normalized_outputs_match(outputs["piecewise"], outputs["grouped"], eos)
-        ratio = arm_rows["grouped"]["median_seconds"] / arm_rows["piecewise"]["median_seconds"]
+        ratio = cast(float, arm_rows["grouped"]["median_seconds"]) / cast(
+            float, arm_rows["piecewise"]["median_seconds"]
+        )
         rows.append(
             {
                 "policy_version": 2,
@@ -843,8 +879,13 @@ def sweep_flashinfer_compare(
     )
 
     def gated_row(
-        system: str, size: int, runtime, requests, outputs, per_iter: list[float]
-    ) -> dict:
+        system: str,
+        size: int,
+        runtime: ModelRuntime,
+        requests: list[EsmeBenchRequest],
+        outputs: dict[str, list[int]],
+        per_iter: list[float],
+    ) -> dict[str, object]:
         model = runtime.model
         kv_bytes_per_token = (
             model.num_layers * 2 * model.num_kv_heads * model.head_dim * model.dtype.itemsize
@@ -858,7 +899,7 @@ def sweep_flashinfer_compare(
             "kv_bytes_per_token": kv_bytes_per_token,
         }
 
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     for size in batch_sizes:
         stall_guard.progress()
         for system, runtime in runtimes:
@@ -870,10 +911,10 @@ def sweep_flashinfer_compare(
             peak = _PeakBlocks()
 
             def decode_once(
-                runtime=runtime,
-                requests=requests,
-                num_blocks=num_blocks,
-                peak=peak,
+                runtime: ModelRuntime = runtime,
+                requests: list[EsmeBenchRequest] = requests,
+                num_blocks: int = num_blocks,
+                peak: _PeakBlocks = peak,
             ) -> dict[str, list[int]]:
                 engine = InferenceEngine(
                     runtime.model,
@@ -898,17 +939,17 @@ def sweep_flashinfer_compare(
                 "block_size": BLOCK_SIZE,
                 "num_blocks": num_blocks,
                 "peak_used_blocks": peak.peak,
-                "peak_kv_bytes": peak.peak * BLOCK_SIZE * row["kv_bytes_per_token"],
+                "peak_kv_bytes": peak.peak * BLOCK_SIZE * cast(int, row["kv_bytes_per_token"]),
             }
             rows.append(row)
             tps = row["tokens_per_second"]
+            agreement = cast(dict[str, object], row["agreement"])
             print(
                 f"[flashinfer-curve] batch={size} | {system}: "
                 f"median {row['median_seconds']:.3f} s, "
                 f"tok/s {f'{tps:.1f}' if tps else 'NOT REPORTED (diverged)'}, "
                 f"agreement exact/tie/nontie "
-                f"{row['agreement']['exact']}/{row['agreement']['tie']}/"
-                f"{row['agreement']['nontie']}"
+                f"{agreement['exact']}/{agreement['tie']}/{agreement['nontie']}"
             )
 
     return json.dumps(
@@ -1018,7 +1059,13 @@ def sweep_ladder(
         oracle_runtime.model, max_new_tokens=max_new_tokens, eos_token_ids=eos
     )
 
-    def gated_row(system: str, size: int, requests, outputs, per_iter: list[float]) -> dict:
+    def gated_row(
+        system: str,
+        size: int,
+        requests: list[EsmeBenchRequest],
+        outputs: dict[str, list[int]],
+        per_iter: list[float],
+    ) -> dict[str, object]:
         return {
             "system": system,
             "batch_size": size,
@@ -1028,15 +1075,17 @@ def sweep_ladder(
         }
 
     pad_id = sorted(eos)[0]
-    hf_model = (
+    # transformers types from_pretrained as a protocol that lacks Module.to and a callable
+    # generate, so the loaded model is typed by the two interfaces this floor really uses.
+    hf_module = cast(
+        "torch.nn.Module",
         AutoModelForCausalLM.from_pretrained(
             REMOTE_HF_PATH, dtype=torch.bfloat16, local_files_only=True
-        )
-        .eval()
-        .to("cuda")
+        ),
     )
+    hf_model = cast("_HfGenerator", hf_module.eval().to("cuda"))
 
-    def hf_batched_once(requests) -> dict[str, list[int]]:
+    def hf_batched_once(requests: list[EsmeBenchRequest]) -> dict[str, list[int]]:
         width = max(len(req.prompt_ids) for req in requests)
         input_ids = torch.full((len(requests), width), pad_id, dtype=torch.long)
         attention_mask = torch.zeros((len(requests), width), dtype=torch.long)
@@ -1054,7 +1103,7 @@ def sweep_ladder(
         )
         return {req.request_id: generated[row, width:].tolist() for row, req in enumerate(requests)}
 
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     floor_batch, floor_iters = hf_floor_spec
     floor_requests = build_requests(engine_runtime.tokenizer, floor_batch, HEADLINE_PROMPTS)
     per_iter, outputs = measure_repeated(
@@ -1140,7 +1189,7 @@ def sweep_ladder(
             if engines[grouped_rung][0].grouped_decode_runners[size].steps_handled == 0:
                 raise RuntimeError(f"{grouped_rung}: grouped runner never fired at batch {size}")
         grouped_runner = engines["+grouped_graphs"][0].grouped_decode_runners[size]
-        previous: dict | None = None
+        previous: dict[str, object] | None = None
         for name in names:
             row = gated_row(name, size, requests, rung_outputs[name], timings[name])
             if name == "+grouped_graphs":
@@ -1148,9 +1197,9 @@ def sweep_ladder(
                 row["grouped_steps_handled"] = grouped_runner.steps_handled
             if previous is not None:
                 parity = normalized_outputs_match(
-                    rung_outputs[previous["system"]], rung_outputs[name], eos
+                    rung_outputs[cast(str, previous["system"])], rung_outputs[name], eos
                 )
-                ratio = previous["median_seconds"] / row["median_seconds"]
+                ratio = cast(float, previous["median_seconds"]) / cast(float, row["median_seconds"])
                 row["vs_previous_rung"] = {
                     "rung": previous["system"],
                     "parity_status": "exact" if parity else "review_required",
@@ -1454,7 +1503,7 @@ def main(
             max_new_tokens,
             warmup,
             iters,
-            cast("list[dict]", vllm_res["rows"]),
+            cast("list[_VllmBatchRow]", vllm_res["rows"]),
             approved=True,
         )
     )

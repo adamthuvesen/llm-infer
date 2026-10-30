@@ -18,6 +18,7 @@ import math
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -32,6 +33,11 @@ from scripts.modal_esme_bundle import (
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
 
+if TYPE_CHECKING:
+    from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
+    from llm_infer.model.interface import ModelRuntime
+    from llm_infer.serving import InferenceEngine
+
 BATCH_SIZES = (1, 8, 64)
 ARMS = ("grouped4", "full_step")
 WARMUP_ROUNDS = 2
@@ -43,7 +49,9 @@ app = modal.App("llm-infer-esme-full-step-ab")
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
-def _arm_rows(runtime, batch_sizes: list[int]):
+def _arm_rows(
+    runtime: ModelRuntime, batch_sizes: list[int]
+) -> tuple[list[dict[str, object]], dict[str, dict[int, dict[str, list[int]]]]]:
     """Per-batch walls for both arms on persistent engines, plus each arm's final outputs."""
     import statistics
 
@@ -55,13 +63,13 @@ def _arm_rows(runtime, batch_sizes: list[int]):
     model = runtime.model
     grouped_layers = {"grouped4": 4, "full_step": model.num_layers}
     token_steps = NEW_TOKENS - 1
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     outputs: dict[str, dict[int, dict[str, list[int]]]] = {arm: {} for arm in ARMS}
     for size in batch_sizes:
         requests = build_requests(runtime.tokenizer, size)
         needed = sum(math.ceil((len(req.prompt_ids) + NEW_TOKENS) / BLOCK_SIZE) for req in requests)
-        engines = {}
-        capture_s = {}
+        engines: dict[str, InferenceEngine] = {}
+        capture_s: dict[str, float] = {}
         for arm in ARMS:
             start = time.perf_counter()
             engines[arm] = InferenceEngine(
@@ -78,13 +86,13 @@ def _arm_rows(runtime, batch_sizes: list[int]):
             if size not in engines[arm].grouped_decode_runners:
                 raise AssertionError(f"{arm}: no grouped runner captured for batch {size}")
 
-        def submit(engine, requests=requests) -> None:
+        def submit(engine: InferenceEngine, requests: list[EsmeBenchRequest] = requests) -> None:
             for req in requests:
                 engine.add_request(
                     Request(req.request_id, list(req.prompt_ids), NEW_TOKENS, frozenset())
                 )
 
-        def decode(arm: str, engines=engines) -> float:
+        def decode(arm: str, engines: dict[str, InferenceEngine] = engines) -> float:
             engine = engines[arm]
             submit(engine)
             engine.step()
@@ -104,6 +112,7 @@ def _arm_rows(runtime, batch_sizes: list[int]):
                 walls[arm].append(decode(arm))
         row: dict[str, object] = {"batch_size": size}
         wall_ms_by_arm: dict[str, float] = {}
+        runner = None
         for arm in ARMS:
             submit(engines[arm])
             outputs[arm][size] = engines[arm].run()
@@ -167,7 +176,7 @@ def full_step_ab(batch_sizes: list[int], approved: bool = False) -> str:
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.float32, device="cuda"
     )
     for row in rows:
-        size = int(row["batch_size"])
+        size = cast(int, row["batch_size"])
         requests = build_requests(runtime.tokenizer, size)
         reference = {
             req.request_id: greedy_decode(
@@ -178,11 +187,13 @@ def full_step_ab(batch_sizes: list[int], approved: bool = False) -> str:
             )
             for req in requests
         }
+        agreements: dict[str, dict[str, object]] = {}
         for arm in ARMS:
             agreement = tie_tolerant_agreement(
                 oracle_runtime.model, requests, outputs[arm][size], reference, frozenset()
             )
-            row[arm]["agreement"] = agreement.as_dict()
+            agreements[arm] = agreement.as_dict()
+            cast(dict[str, object], row[arm])["agreement"] = agreements[arm]
         baseline, candidate = outputs["grouped4"][size], outputs["full_step"][size]
         row["parity_status"] = (
             "failed"
@@ -193,7 +204,7 @@ def full_step_ab(batch_sizes: list[int], approved: bool = False) -> str:
         )
         print(
             f"[full-step] b{size}: parity {row['parity_status']}, nontie "
-            f"{row['grouped4']['agreement']['nontie']}/{row['full_step']['agreement']['nontie']}"
+            f"{agreements['grouped4']['nontie']}/{agreements['full_step']['nontie']}"
         )
         stall_guard.progress()
 

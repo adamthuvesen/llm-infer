@@ -23,6 +23,7 @@ definition every flash harness imports, so flash-attn installs from a prebuilt w
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import modal
 
@@ -36,6 +37,9 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE
+
+if TYPE_CHECKING:
+    from llm_infer.model.interface import ModelRuntime
 
 BLOCK_SIZE = 128
 
@@ -110,7 +114,7 @@ def check_esme_flash(num_requests: int, max_new_tokens: int, approved: bool = Fa
             raise ValueError(f"Esme tokenizer returned invalid prompt ids for request {index}")
         requests.append((f"esme-{index:03d}", [int(token_id) for token_id in tokenized]))
 
-    def decode_all(runtime) -> dict[str, list[int]]:
+    def decode_all(runtime: ModelRuntime) -> dict[str, list[int]]:
         engine = InferenceEngine(
             runtime.model,
             block_size=BLOCK_SIZE,

@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import modal
 
@@ -37,6 +37,9 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
+
+if TYPE_CHECKING:
+    from llm_infer.model.interface import TokenizerLike
 
 app = modal.App("llm-infer-esme-technique-gallery")
 
@@ -59,7 +62,9 @@ _REPEATED_PARAGRAPH = (
 )
 
 
-def _long_chat_prompt(tokenizer, *, target_tokens: int, question: str, tag: str) -> list[int]:
+def _long_chat_prompt(
+    tokenizer: TokenizerLike, *, target_tokens: int, question: str, tag: str
+) -> list[int]:
     """A chat prompt around ``target_tokens`` long: repeated manual text plus one question."""
     sentences: list[str] = []
     index = 0
@@ -70,6 +75,8 @@ def _long_chat_prompt(tokenizer, *, target_tokens: int, question: str, tag: str)
         ids = tokenizer.apply_chat_template(
             [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
         )
+        if not isinstance(ids, list):
+            raise ValueError(f"tokenizer returned {type(ids).__name__}, not prompt ids")
         if len(ids) >= target_tokens:
             return [int(t) for t in ids]
         if index > 200:

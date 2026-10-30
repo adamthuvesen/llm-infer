@@ -33,7 +33,7 @@ import json
 import math
 import statistics
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -53,7 +53,14 @@ from scripts.modal_esme_bundle import (
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
 
 if TYPE_CHECKING:
+    import torch
+
+    from llm_infer.kv_cache.block_table import BlockTable
+    from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
     from llm_infer.model.pretrain_bundle import PretrainBundleModel
+
+    # The prefill-divergence replay: one cache, each request's table, and its prefill logits.
+    type PackedReplayState = tuple[PagedKVCache, dict[str, BlockTable], dict[str, torch.Tensor]]
 
 BLOCK_SIZE = 128
 RAGGED_LENGTHS = (16, 37, 79, 128, 257, 389, 512)
@@ -81,7 +88,7 @@ def row_key(row: dict[str, object], key_fields: tuple[str, ...]) -> dict[str, ob
     return {field: row[field] for field in key_fields}
 
 
-def key_tuple(key: dict[str, object], key_fields: tuple[str, ...]) -> tuple[object, ...]:
+def key_tuple(key: Mapping[str, object], key_fields: tuple[str, ...]) -> tuple[object, ...]:
     """Hashable form of a row key for set membership."""
     return tuple(key[field] for field in key_fields)
 
@@ -1112,7 +1119,6 @@ def diagnose_prefill_divergence(
         requests_at_context_length,
     )
     from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
-    from llm_infer.kv_cache.block_table import BlockTable
     from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
@@ -1180,7 +1186,9 @@ def diagnose_prefill_divergence(
             "golden_logit": float(values[golden_token].item()),
         }
 
-    def drive_engine(batched_prefill: bool) -> tuple[dict[str, list], dict[str, list[int]]]:
+    def drive_engine(
+        batched_prefill: bool,
+    ) -> tuple[dict[str, list[tuple[torch.Tensor, torch.Tensor]]], dict[str, list[int]]]:
         """One engine run; return prompt-length KV snapshot and per-request generated tokens."""
         needed_blocks = sum(
             math.ceil((len(r.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for r in requests
@@ -1201,7 +1209,7 @@ def diagnose_prefill_divergence(
         # and _release_finished_in recycles its block table at finish, so this is the only point
         # the prefill KV is still addressable. engine._requests is engine-internal; this is a
         # diagnostic driver reading it directly, not the production serving path.
-        kv_snapshot: dict[str, list] = {}
+        kv_snapshot: dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         for r in requests:
             table = engine._requests[r.request_id].block_table
             if table is None:
@@ -1220,7 +1228,9 @@ def diagnose_prefill_divergence(
         return kv_snapshot, step_tokens
 
     def kv_diffs(
-        serial_kv: dict[str, list], packed_kv: dict[str, list], request_id: str
+        serial_kv: dict[str, list[tuple[torch.Tensor, torch.Tensor]]],
+        packed_kv: dict[str, list[tuple[torch.Tensor, torch.Tensor]]],
+        request_id: str,
     ) -> tuple[list[float], list[float]]:
         max_by_layer: list[float] = []
         mean_by_layer: list[float] = []
@@ -1244,8 +1254,6 @@ def diagnose_prefill_divergence(
             dtype=model.dtype,
             device="cuda",
         )
-
-    PackedReplayState = tuple[PagedKVCache, dict[str, BlockTable], dict[str, torch.Tensor]]
 
     def packed_replay_state() -> PackedReplayState:
         """Full-batch packed prefill replay: the same packed group shape as the real run.
@@ -1473,30 +1481,6 @@ def main(
             f"'mixed-load-smoke', or 'mixed-load'; got {command!r}"
         )
 
-    if command == "prefill-smoke":
-        batch_sizes = [8]
-        uniform_lengths: list[int] = []
-        output_lengths = [4]
-        include_ragged = True
-        warmup, iters = 1, 2
-    elif command == "prefill-ab":
-        batch_sizes = [1, 8, 64]
-        uniform_lengths = [16, 128, 512]
-        output_lengths = [1, 64]
-        include_ragged = True
-        warmup, iters = 2, 10
-    elif command == "mixed-load-smoke":
-        # One cheap cell, short outputs, one measured pair — a Modal-side wiring check.
-        cells = [{"burst_size": 8, "burst_shape": "ragged", "burst_context": None}]
-        steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 32, 8
-        warmup_tokens = 4
-        warmup, iters = 1, 1
-    else:  # mixed-load
-        cells = MIXED_LOAD_CELLS
-        steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 256, 16
-        warmup_tokens = 8
-        warmup, iters = 1, 5
-
     out_dir = REPO_ROOT / "bench-results"
     out_dir.mkdir(exist_ok=True)
     # Deterministic (no timestamp) so --resume finds the log of a prior interrupted run.
@@ -1522,6 +1506,18 @@ def main(
     stage_bundle(esme_bundles, local_bundle, label=f"esme-{command}")
 
     if command in prefill_commands:
+        if command == "prefill-smoke":
+            batch_sizes = [8]
+            uniform_lengths: list[int] = []
+            output_lengths = [4]
+            include_ragged = True
+            warmup, iters = 1, 2
+        else:  # prefill-ab
+            batch_sizes = [1, 8, 64]
+            uniform_lengths = [16, 128, 512]
+            output_lengths = [1, 64]
+            include_ragged = True
+            warmup, iters = 2, 10
         events = benchmark_prefill_ab.remote_gen(
             batch_sizes,
             uniform_lengths,
@@ -1558,6 +1554,17 @@ def main(
             "repro_command": f"modal run scripts/modal_esme_prefill_ab.py --command {command}",
         }
     else:
+        if command == "mixed-load-smoke":
+            # One cheap cell, short outputs, one measured pair — a Modal-side wiring check.
+            cells = [{"burst_size": 8, "burst_shape": "ragged", "burst_context": None}]
+            steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 32, 8
+            warmup_tokens = 4
+            warmup, iters = 1, 1
+        else:  # mixed-load
+            cells = MIXED_LOAD_CELLS
+            steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 256, 16
+            warmup_tokens = 8
+            warmup, iters = 1, 5
         events = benchmark_mixed_load.remote_gen(
             cells,
             steady_decoders,
