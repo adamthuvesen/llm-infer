@@ -68,15 +68,15 @@ def test_esme_trace_is_a_real_engine_run_with_preemption() -> None:
 def _ints(event: dict[str, object], key: str) -> list[int]:
     values = event.get(key, [])
     assert isinstance(values, list)
-    assert all(isinstance(value, int) for value in values)  # pyright: ignore[reportUnknownVariableType]
-    return values  # pyright: ignore[reportUnknownVariableType]
+    assert all(isinstance(value, int) for value in values)
+    return values
 
 
 def _strs(event: dict[str, object], key: str) -> list[str]:
     values = event.get(key, [])
     assert isinstance(values, list)
-    assert all(isinstance(value, str) for value in values)  # pyright: ignore[reportUnknownVariableType]
-    return values  # pyright: ignore[reportUnknownVariableType]
+    assert all(isinstance(value, str) for value in values)
+    return values
 
 
 def test_esme_trace_models_shared_prefix_ownership() -> None:

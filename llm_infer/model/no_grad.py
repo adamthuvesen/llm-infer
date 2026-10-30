@@ -7,4 +7,4 @@ import torch
 
 
 def no_grad[F: Callable[..., object]](function: F) -> F:
-    return cast(F, torch.no_grad()(function))  # pyright: ignore[reportUnknownMemberType]
+    return cast(F, torch.no_grad()(function))

@@ -60,7 +60,7 @@ def _chat_ids(runtime: ModelRuntime, content: str) -> list[int]:
         [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
     )
     assert isinstance(ids, list)
-    return [int(token) for token in ids]  # pyright: ignore[reportUnknownVariableType]
+    return [int(token) for token in ids]
 
 
 def _convert(bundle: Path, out: Path) -> Path:

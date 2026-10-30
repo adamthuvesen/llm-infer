@@ -5,11 +5,14 @@ local entrypoints and GPU functions must refuse, and the deployable server must 
 CPU-only Modal functions are listed but not called.
 """
 
+from __future__ import annotations
+
 import importlib
 import inspect
 import json
 import sys
 import warnings
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import modal
@@ -18,7 +21,7 @@ HELPERS = {"modal_approval", "modal_stall_guard", "modal_flash_image"}
 MODAL_BIN = "/usr/local/bin/modal"
 
 
-def outcome(call) -> str:
+def outcome(call: Callable[[], object]) -> str:
     try:
         result = call()
         if inspect.isgenerator(result):
@@ -30,14 +33,14 @@ def outcome(call) -> str:
     return "RAN"
 
 
-def placeholders(function: modal.Function) -> dict[str, None]:
+def placeholders(function: modal.Function[..., object, object]) -> dict[str, None]:
     # `modal run script::fn` makes the caller pass required arguments, so fill them.
     params = inspect.signature(function.get_raw_f()).parameters.values()
     return {p.name: None for p in params if p.default is inspect.Parameter.empty}
 
 
 warnings.simplefilter("ignore")
-plan: dict[str, dict] = {}
+plan: dict[str, Mapping[str, object]] = {}
 for path in sorted(Path("scripts").glob("modal_*.py")):
     if path.stem in HELPERS:
         continue
@@ -47,7 +50,7 @@ for path in sorted(Path("scripts").glob("modal_*.py")):
         plan[path.stem] = {"import": imported}
         continue
     module = sys.modules[f"scripts.{path.stem}"]
-    entry: dict[str, list] = {}
+    entry: dict[str, list[object]] = {}
     for name, obj in vars(module).items():
         sys.argv = [MODAL_BIN, "run", f"{path}::{name}"]
         if isinstance(obj, modal.app.LocalEntrypoint):

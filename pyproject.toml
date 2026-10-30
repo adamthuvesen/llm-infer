@@ -56,8 +56,10 @@ ignore = ["E501"]
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
 pythonVersion = "3.13"
-include = ["llm_infer", "scripts", "tests", ".agents/skills/verify-llm-infer"]
+include = ["llm_infer", "scripts", "tests"]
 venvPath = "."
 venv = ".venv"
 extraPaths = ["."]

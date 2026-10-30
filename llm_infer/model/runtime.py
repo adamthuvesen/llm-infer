@@ -66,7 +66,7 @@ class TokenizersJsonTokenizer:
         default_add_special_tokens: bool = True,
         chat_template: Mapping[str, object] | None = None,
     ) -> None:
-        from tokenizers import Tokenizer  # type: ignore[import-untyped]
+        from tokenizers import Tokenizer
 
         self.path = tokenizer_path
         self._tokenizer = Tokenizer.from_file(str(tokenizer_path))

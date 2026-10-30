@@ -56,6 +56,7 @@ run `make architecture-check` and `make check`.
 | Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` | 2026-11-06 |
 | `make verify` reports a pass only when its control observes FAIL | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` | 2026-11-06 |
 | Every row cites names its file defines | `tests/test_agents_rules_table.py::test_enforced_rules_cite_defined_names` | 2026-11-06 |
+| No file downgrades strict type checking with a `# pyright:` mode comment | `tests/test_strict_mode.py::test_no_file_downgrades_type_checking_mode` | 2026-11-07 |
 
 The scheduler views restrict typed callers but do not enforce runtime immutability. Change
 membership through `add`, `admit`, `release`, `requeue`, or `cancel`.

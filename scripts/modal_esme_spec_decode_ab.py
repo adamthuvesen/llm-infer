@@ -133,7 +133,7 @@ def _workload_row(
         verify["steps"] += 1
         verify["tokens"] += len(request.generated) - before
 
-    speculative_engine._decode_speculative = counted_verify  # type: ignore[method-assign]
+    speculative_engine._decode_speculative = counted_verify  # pyright: ignore[reportPrivateUsage]
 
     def run(arm: str, req: EsmeBenchRequest) -> tuple[float, list[int]]:
         engine = engines[arm]

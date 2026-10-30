@@ -427,10 +427,10 @@ def _python_profile(
     profiler.disable()
 
     stats = pstats.Stats(profiler)
-    total_s = stats.total_tt  # type: ignore[attr-defined]
+    total_s = stats.total_tt  # pyright: ignore[reportAttributeAccessIssue]
     rows = []
     for (filename, lineno, name), (_cc, ncalls, tottime, cumtime, _callers) in sorted(
-        stats.stats.items(),  # type: ignore[attr-defined]
+        stats.stats.items(),  # pyright: ignore[reportAttributeAccessIssue]
         key=lambda item: item[1][2],
         reverse=True,
     )[:25]:
@@ -1212,7 +1212,7 @@ def grouped_layer_ab(
                 candidate_runner.total_capture_seconds = time.perf_counter() - candidate_start
                 # The probe swaps the grouped runner into the piecewise slot; it serves the
                 # same decode-window interface.
-                _bundle_model(runtime).decode_graphs = candidate_runner  # type: ignore[assignment]
+                _bundle_model(runtime).decode_graphs = candidate_runner  # pyright: ignore[reportAttributeAccessIssue]
             torch.cuda.synchronize()
             decode_tokens = 0
             start = time.perf_counter()
@@ -2488,7 +2488,7 @@ def _host_timeline_row(runtime: ModelRuntime, size: int) -> _HostTimelineRow:
         "backend": runtime.model.backend,
         "model": runtime.model,
     }
-    torch.cuda.Event.synchronize = timed_synchronize  # type: ignore[method-assign, assignment]
+    torch.cuda.Event.synchronize = timed_synchronize  # pyright: ignore[reportAttributeAccessIssue]
     try:
         timed(engine, "step", "engine_step")
         passes.append(summarize("issue", decode_runs()))
@@ -2496,7 +2496,7 @@ def _host_timeline_row(runtime: ModelRuntime, size: int) -> _HostTimelineRow:
             timed(targets[target_name], method, bucket)
         passes.append(summarize("regions", decode_runs()))
     finally:
-        torch.cuda.Event.synchronize = original_synchronize  # type: ignore[method-assign]
+        torch.cuda.Event.synchronize = original_synchronize
         # The region timers wrap shared model objects; drop them so the next batch size and
         # arm start unwrapped.
         for _, target_name, method in HOST_TIMELINE_REGIONS:
@@ -2634,13 +2634,13 @@ def _device_page_metadata() -> Generator[None]:
             read_plan = dataclasses.replace(read_plan, page_plan=strip(read_plan.page_plan))
         return original_group_plan(self, read_plan)
 
-    backend_class.plan_decode_batch_paged = plan  # type: ignore[method-assign]
-    runner_class.plan_group_wrapper = plan_group  # type: ignore[method-assign]
+    backend_class.plan_decode_batch_paged = plan
+    runner_class.plan_group_wrapper = plan_group
     try:
         yield
     finally:
-        backend_class.plan_decode_batch_paged = original_plan  # type: ignore[method-assign]
-        runner_class.plan_group_wrapper = original_group_plan  # type: ignore[method-assign]
+        backend_class.plan_decode_batch_paged = original_plan
+        runner_class.plan_group_wrapper = original_group_plan
 
 
 def _host_plan_rows(

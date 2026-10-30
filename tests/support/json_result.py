@@ -17,7 +17,7 @@ def dig(value: object, *path: str | int) -> object:
 def dig_dict(value: object, *path: str | int) -> dict[str, object]:
     found = dig(value, *path)
     assert isinstance(found, dict), f"{path}: expected a dict, got {type(found).__name__}"
-    return found  # pyright: ignore[reportUnknownVariableType]
+    return found
 
 
 def dig_number(value: object, *path: str | int) -> float:
@@ -29,4 +29,4 @@ def dig_number(value: object, *path: str | int) -> float:
 def dig_rows(value: object, *path: str | int) -> list[dict[str, object]]:
     rows = dig(value, *path)
     assert isinstance(rows, list)
-    return [row for row in rows if isinstance(row, dict)]  # pyright: ignore[reportUnknownVariableType]
+    return [row for row in rows if isinstance(row, dict)]

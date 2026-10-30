@@ -11,7 +11,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,10 +37,12 @@ class DriveError(Exception):
 class Drive:
     proves: str
     paths: list[str]
-    run: Callable[[Path, dict], str]
+    run: Callable[[Path, dict[str, str]], str]
 
 
-def _record(evidence: Path, name: str, argv: list[str], env: dict, code: int | None) -> None:
+def _record(
+    evidence: Path, name: str, argv: list[str], env: dict[str, str], code: int | None
+) -> None:
     redacted = {
         k: ("<redacted>" if any(m in k for m in SECRET_MARKERS) else v) for k, v in env.items()
     }
@@ -49,8 +51,8 @@ def _record(evidence: Path, name: str, argv: list[str], env: dict, code: int | N
 
 
 def run(
-    evidence: Path, env: dict, name: str, argv: list[str], timeout: float = 30
-) -> subprocess.CompletedProcess:
+    evidence: Path, env: dict[str, str], name: str, argv: list[str], timeout: float = 30
+) -> subprocess.CompletedProcess[str]:
     proc = subprocess.Popen(
         argv,
         cwd=ROOT,
@@ -80,7 +82,7 @@ def expect(condition: bool, message: str) -> None:
         raise DriveError(message)
 
 
-def ok(result: subprocess.CompletedProcess, name: str) -> None:
+def ok(result: subprocess.CompletedProcess[str], name: str) -> None:
     tail = result.stderr.strip()[-400:]
     expect(result.returncode == 0, f"{name} exited {result.returncode}: {tail}")
 
@@ -94,7 +96,7 @@ def free_port() -> int:
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def http(base: str, path: str, body: dict | None = None) -> tuple[int, str]:
+def http(base: str, path: str, body: Mapping[str, object] | None = None) -> tuple[int, str]:
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(
         base + path, data=data, headers={"content-type": "application/json"}
@@ -107,7 +109,7 @@ def http(base: str, path: str, body: dict | None = None) -> tuple[int, str]:
 
 
 @contextmanager
-def server(evidence: Path, env: dict) -> Iterator[str]:
+def server(evidence: Path, env: dict[str, str]) -> Generator[str]:
     """Serve the tiny random-weight Esme bundle through the real `python -m llm_infer.serve`."""
     bundle_root = Path(tempfile.mkdtemp(dir=env["HOME"]))
     writer = "from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as w"
@@ -153,7 +155,9 @@ def server(evidence: Path, env: dict) -> Iterator[str]:
         log.close()
 
 
-def drive_serve_http(evidence: Path, env: dict, expected_reply: str = GREEDY_REPLY) -> str:
+def drive_serve_http(
+    evidence: Path, env: dict[str, str], expected_reply: str = GREEDY_REPLY
+) -> str:
     with server(evidence, env) as base:
         status, body = http(base, "/v1/models")
         expect(json.loads(body)["data"][0]["id"] == MODEL_ID, f"/v1/models served {body}")
@@ -193,11 +197,11 @@ def drive_serve_http(evidence: Path, env: dict, expected_reply: str = GREEDY_REP
     )
 
 
-def control_serve_http(evidence: Path, env: dict) -> str:
+def control_serve_http(evidence: Path, env: dict[str, str]) -> str:
     return drive_serve_http(evidence, env, expected_reply="tok_1 tok_2 tok_3 tok_4")
 
 
-def drive_loadgen(evidence: Path, env: dict) -> str:
+def drive_loadgen(evidence: Path, env: dict[str, str]) -> str:
     summary_path = evidence / "loadgen.json"
     with server(evidence, env) as base:
         argv = [str(PYTHON), "scripts/loadgen.py", "--base-url", base, "--model", MODEL_ID]
@@ -213,7 +217,7 @@ def drive_loadgen(evidence: Path, env: dict) -> str:
     return "loadgen streamed 8 requests at concurrency 4: 8 ok, 0 errors, 32 output tokens"
 
 
-def drive_launch_plan(evidence: Path, env: dict) -> str:
+def drive_launch_plan(evidence: Path, env: dict[str, str]) -> str:
     probe = [str(PYTHON), "-W", "ignore", str(HERE / "launch_plan.py")]
     result = run(evidence, env | {"PYTHONPATH": str(ROOT)}, "launch-plan", probe, timeout=40)
     ok(result, "launch plan")

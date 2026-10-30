@@ -88,9 +88,9 @@ def preflight(scratch: Path) -> None:
         stub.chmod(0o755)
 
 
-def run_drives(names: list[str], run_dir: Path, control: bool) -> list[dict]:
+def run_drives(names: list[str], run_dir: Path, control: bool) -> list[dict[str, object]]:
     scratch = Path(tempfile.mkdtemp(prefix="verify-"))
-    results: list[dict] = []
+    results: list[dict[str, object]] = []
     try:
         preflight(scratch)
         env = child_env(scratch)
@@ -135,7 +135,7 @@ def main(argv: list[str]) -> int:
     suffix = ("-dirty" if dirty else "") + ("-control" if control else "")
     run_dir = ROOT / ".verify" / "runs" / f"{stamp}-{sha[:7]}{suffix}"
     run_dir.mkdir(parents=True)
-    results: list[dict] = []
+    results: list[dict[str, object]] = []
     try:
         results = run_drives(names, run_dir, control)
     finally:
