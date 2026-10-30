@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import modal
 
+from scripts.modal_approval import require_spend_approval
+
 if TYPE_CHECKING:
     from llm_infer.benchmarks.reference_policy import EsmeAgreement
 
@@ -729,8 +731,10 @@ def run_same_host(
     max_new_tokens: int,
     warmup: int,
     iters: int,
+    approved: bool = False,
 ) -> str:
     """Reserve one A100, run both systems in children, then apply the fp32 output gate."""
+    require_spend_approval(approved, __file__)
     from llm_infer.benchmarks import gpu_snapshot
     from llm_infer.benchmarks.report import total_output_tokens
     from llm_infer.model.pretrain_bundle_loader import read_json_object
@@ -865,13 +869,14 @@ def _command_config(command: str) -> tuple[tuple[int, ...], tuple[int, ...], int
 
 
 @app.local_entrypoint()
-def main(command: str = "focused", bundle_path: str = "") -> None:
+def main(command: str = "focused", bundle_path: str = "", approved: bool = False) -> None:
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     batch_sizes, context_lengths, max_new_tokens, warmup, iters = _command_config(command)
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-vllm-baseline")
     result = json.loads(
         run_same_host.remote(
-            list(batch_sizes), list(context_lengths), max_new_tokens, warmup, iters
+            list(batch_sizes), list(context_lengths), max_new_tokens, warmup, iters, approved=True
         )
     )
     record = {

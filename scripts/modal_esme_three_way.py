@@ -40,6 +40,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -108,9 +109,15 @@ def convert_bundle_to_hf() -> str:
     timeout=60 * 60,
 )
 def bench_vllm(
-    num_requests: int, max_new_tokens: int, warmup: int, iters: int, headline: bool
+    num_requests: int,
+    max_new_tokens: int,
+    warmup: int,
+    iters: int,
+    headline: bool,
+    approved: bool = False,
 ) -> str:
     """Run the vLLM ceiling on the converted Qwen3 checkpoint; return tokens, timing, flags."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks.esme_paged import (
@@ -161,8 +168,10 @@ def bench_hf_and_engine(
     iters: int,
     vllm_outputs: dict,
     headline: bool,
+    approved: bool = False,
 ) -> str:
     """Run naive HF + llm_infer (flash) on the A100; tie-tolerant agreement vs the fp32 oracle."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks.esme_paged import (
@@ -307,13 +316,14 @@ def _print_table(rows: list[dict]) -> None:
 
 
 @app.local_entrypoint()
-def main(command: str = "bench", bundle_path: str = "") -> None:
+def main(command: str = "bench", bundle_path: str = "", approved: bool = False) -> None:
     """Stage the raw bundle, convert it to HF remotely, run all three systems, write the record.
 
     The local ``modal run`` client has no torch, so it only uploads the raw bundle files (file IO).
     The bundle->HF conversion (which imports torch) runs in the remote :func:`convert_bundle_to_hf`
     on ``FLASH_IMAGE``; the HF + vLLM legs then read the converted checkpoint from the volume.
     """
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     if command == "smoke":
         defaults = {"num_requests": 2, "max_new_tokens": 8, "warmup": 0, "iters": 1}
     elif command == "bench":
@@ -345,6 +355,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             effective_warmup,
             effective_iters,
             headline,
+            approved=True,
         )
     )
     print("[esme-3way] running naive HF + llm_infer + oracle gate ...")
@@ -356,6 +367,7 @@ def main(command: str = "bench", bundle_path: str = "") -> None:
             effective_iters,
             vllm_res["outputs"],
             headline,
+            approved=True,
         )
     )
 

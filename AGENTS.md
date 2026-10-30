@@ -16,7 +16,9 @@ and the reference contract. [`docs/benchmark.md`](docs/benchmark.md) holds the b
 - A difference above the 0.1-logit bf16 bound needs a durable review. `docs/findings.md` entry 20
   says when a review may cite the measured bf16 error.
 - Do not rerun a settled experiment only to move its record to a newer policy format.
-- Modal runs bill until they finish. Run one GPU job at a time unless the experiment needs more.
+- Modal runs bill until they finish. Never add `--approved` or `LLM_INFER_SERVE_APPROVED=1`
+  yourself: when a run refuses, stop and ask Adam, quoting the printed command.
+- Run one GPU job at a time unless the experiment needs more.
   Whoever starts a background run watches its log and raises an alarm after 10 minutes of silence.
 
 ## Commands
@@ -46,6 +48,7 @@ run `make architecture-check` and `make check`.
 | Decode-ready requests always have a KV table | `llm_infer/serving/request.py`, `tests/correctness/test_request_lifecycle.py` | 2026-11-04 |
 | Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py`, `tests/scheduler/test_scheduler.py` | 2026-11-04 |
 | Trace replay rejects malformed events | `llm_infer/tracing.py`, `visualizer/trace_loader.js`, `tests/serving/test_tracing.py` | 2026-11-04 |
+| Modal entrypoints and GPU functions refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1` | `scripts/modal_approval.py`, `scripts/modal_esme_serve.py`, `tests/test_modal_stall_guard.py` | 2026-11-06 |
 | Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py`, `tests/test_modal_stall_guard.py` | 2026-11-06 |
 | Paths and targets in this table exist | `tests/test_agents_rules_table.py` | 2026-11-06 |
 

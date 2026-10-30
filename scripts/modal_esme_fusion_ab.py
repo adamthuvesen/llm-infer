@@ -30,6 +30,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -150,7 +151,8 @@ def _arm_rows(runtime, batch_sizes: list[int]):
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def fusion_ab(batch_sizes: list[int]) -> str:
+def fusion_ab(batch_sizes: list[int], approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -231,7 +233,8 @@ def fusion_ab(batch_sizes: list[int]) -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
-def server_startup() -> str:
+def server_startup(approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -322,7 +325,12 @@ def server_startup() -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "ab", bundle_path: str = "", batch_sizes: str = "1,8,64") -> None:
+def main(
+    command: str = "ab", bundle_path: str = "", batch_sizes: str = "1,8,64", approved: bool = False
+) -> None:
+    require_spend_approval(
+        approved, __file__, command=command, bundle_path=bundle_path, batch_sizes=batch_sizes
+    )
     if command not in {"ab", "startup"}:
         raise ValueError(f"command must be 'ab' or 'startup'; got {command!r}")
     sizes = [int(part) for part in batch_sizes.split(",") if part.strip()]
@@ -330,14 +338,14 @@ def main(command: str = "ab", bundle_path: str = "", batch_sizes: str = "1,8,64"
         raise ValueError(f"batch sizes must be positive integers; got {batch_sizes!r}")
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="fusion")
     if command == "startup":
-        record = json.loads(server_startup.remote())
+        record = json.loads(server_startup.remote(approved=True))
         record["config"] = {
             "model": "Esme-214M-Chat",
             "repro_command": "modal run scripts/modal_esme_fusion_ab.py --command startup",
         }
         name = "esme-server-startup"
     else:
-        record = json.loads(fusion_ab.remote(sizes))
+        record = json.loads(fusion_ab.remote(sizes, approved=True))
         record["config"] = {
             "model": "Esme-214M-Chat",
             "batch_sizes": sizes,

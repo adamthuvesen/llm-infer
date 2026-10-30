@@ -29,6 +29,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -207,7 +208,8 @@ def measure(bf16_runtime, fp32_runtime, prompts: list[str], *, batch_size: int, 
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def bf16_error(prompts: list[str]) -> str:
+def bf16_error(prompts: list[str], approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -239,10 +241,12 @@ def bf16_error(prompts: list[str]) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "run", bundle_path: str = "") -> None:
+def main(command: str = "run", bundle_path: str = "", approved: bool = False) -> None:
     """``run`` measures on the A100; ``smoke`` runs a tiny CPU version locally."""
     if command not in ("run", "smoke"):
         raise ValueError(f"command must be 'run' or 'smoke', got {command!r}")
+    if command == "run":
+        require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     local_bundle = local_bundle_path(bundle_path)
     count = PROMPT_COUNT if command == "run" else 4
     prompt_indices, prompts = load_prompts(count)
@@ -261,7 +265,7 @@ def main(command: str = "run", bundle_path: str = "") -> None:
         batch_size, new_tokens = 2, 8
     else:
         stage_bundle(esme_bundles, local_bundle, label="bf16-error")
-        record = json.loads(bf16_error.remote(prompts))
+        record = json.loads(bf16_error.remote(prompts, approved=True))
         batch_size, new_tokens = BATCH_SIZE, NEW_TOKENS
     record["config"] = {
         "command": command,

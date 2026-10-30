@@ -32,4 +32,11 @@ visualizer-test:  ## Test trace loading in Node
 
 reproduce: evidence-check  ## Re-derive every committed verdict from its records (no GPU)
 
-check: architecture-check lint typecheck test evidence-check visualizer-test  ## Run all CPU verification checks
+# The test suite and the evidence check are the slow parts and share no files, so they run in
+# parallel. Evidence and visualizer output is buffered and printed after the tests finish.
+check: architecture-check lint typecheck  ## Run all CPU verification checks
+	@log=$$(mktemp); \
+	$(MAKE) --no-print-directory evidence-check visualizer-test >$$log 2>&1 & side=$$!; \
+	$(MAKE) --no-print-directory test; test_status=$$?; \
+	wait $$side; side_status=$$?; cat $$log; rm -f $$log; \
+	exit $$((test_status || side_status))

@@ -22,6 +22,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -137,7 +138,8 @@ def _arm_rows(runtime, batch_sizes: list[int]):
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def full_step_ab(batch_sizes: list[int]) -> str:
+def full_step_ab(batch_sizes: list[int], approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -208,12 +210,13 @@ def full_step_ab(batch_sizes: list[int]) -> str:
 
 
 @app.local_entrypoint()
-def main(bundle_path: str = "", batch_sizes: str = "1,8,64") -> None:
+def main(bundle_path: str = "", batch_sizes: str = "1,8,64", approved: bool = False) -> None:
+    require_spend_approval(approved, __file__, bundle_path=bundle_path, batch_sizes=batch_sizes)
     sizes = [int(part) for part in batch_sizes.split(",") if part.strip()]
     if not sizes or min(sizes) < 1:
         raise ValueError(f"batch sizes must be positive integers; got {batch_sizes!r}")
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="full-step")
-    record = json.loads(full_step_ab.remote(sizes))
+    record = json.loads(full_step_ab.remote(sizes, approved=True))
     record["config"] = {
         "model": "Esme-214M-Chat",
         "batch_sizes": sizes,

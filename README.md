@@ -134,7 +134,9 @@ Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/respon
 that streams 8 or 16 concurrent prompts and compares concurrent against sequential wall time. Its
 base-URL field can point at a remote deployment.
 
-To serve from a GPU on your own Modal account, run `modal deploy scripts/modal_esme_serve.py`.
+To serve from a GPU on your own Modal account, run
+`LLM_INFER_SERVE_APPROVED=1 modal deploy scripts/modal_esme_serve.py`. Without the variable it
+refuses, because it spends money.
 It scales to zero and enables CORS, so a locally served bench page can point at it. The Modal
 scripts find the bundle through `--bundle-path`, then `ESME_BUNDLE_PATH`, then the sibling
 checkout `../esme-posttrain/exports/esme-214m-chat`.

@@ -45,7 +45,12 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
 python_version = "3.13"
-files = ["llm_infer", "scripts/check_benchmark_evidence.py", "scripts/judge_paired_ab.py"]
+files = [
+    "llm_infer",
+    "scripts/check_benchmark_evidence.py",
+    "scripts/judge_paired_ab.py",
+    "scripts/modal_approval.py",
+]
 check_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_defs = true

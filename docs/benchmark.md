@@ -167,3 +167,6 @@ modal run scripts/modal_esme_batch_curve.py --command ladder
 modal run scripts/modal_esme_vllm_baseline.py --command full
 modal run scripts/modal_esme_batch_curve.py --command curve
 ```
+
+Each run spends money, so it refuses until you add `--approved`. The refusal prints the exact
+approved command.

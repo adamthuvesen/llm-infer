@@ -27,6 +27,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -80,8 +81,9 @@ def _long_chat_prompt(tokenizer, *, target_tokens: int, question: str, tag: str)
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def run_gallery(command: str) -> str:
+def run_gallery(command: str, approved: bool = False) -> str:
     """All four technique experiments, back to back on one GPU, bf16 default engine rows."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -234,15 +236,16 @@ def run_gallery(command: str) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "gallery", bundle_path: str = "") -> None:
+def main(command: str = "gallery", bundle_path: str = "", approved: bool = False) -> None:
     """Stage the bundle, run the four experiments in one container, write the JSON record."""
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     if command not in ("smoke", "gallery"):
         raise ValueError(f"command must be 'smoke' or 'gallery', got {command!r}")
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-gallery")
 
     print(f"[esme-gallery] {command}: 4 experiments, one A100 container, bf16 default rows")
-    record = json.loads(run_gallery.remote(command))
+    record = json.loads(run_gallery.remote(command, approved=True))
     record["config"] = {
         "command": command,
         "model": "Esme-214M-Chat",

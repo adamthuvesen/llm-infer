@@ -21,6 +21,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -64,8 +65,9 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
-def check_esme(num_requests: int, max_new_tokens: int) -> str:
+def check_esme(num_requests: int, max_new_tokens: int, approved: bool = False) -> str:
     """Fail if engine generation diverges from direct bundle-logits greedy decode."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import normalize_at_eos
@@ -149,12 +151,13 @@ def check_esme(num_requests: int, max_new_tokens: int) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "smoke", bundle_path: str = "") -> None:
+def main(command: str = "smoke", bundle_path: str = "", approved: bool = False) -> None:
     """Run the cheap smoke or fuller Esme reference check on the A100.
 
     smoke:   modal run scripts/modal_esme_reference_check.py --command smoke
     check:   modal run scripts/modal_esme_reference_check.py --command check
     """
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     if command == "smoke":
         num_requests, max_new_tokens = 2, 8
     elif command == "check":
@@ -162,4 +165,4 @@ def main(command: str = "smoke", bundle_path: str = "") -> None:
     else:
         raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="esme-reference")
-    print(check_esme.remote(num_requests, max_new_tokens))
+    print(check_esme.remote(num_requests, max_new_tokens, approved=True))

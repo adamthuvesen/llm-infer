@@ -41,6 +41,7 @@ import modal
 
 from llm_infer.benchmarks.reference_policy import EsmeAgreement, reference_status
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -371,12 +372,14 @@ def benchmark_prefill_ab(
     warmup: int,
     iters: int,
     completed: list[dict[str, object]],
+    approved: bool = False,
 ) -> Iterator[dict[str, object]]:
     """Stream paired serial/packed-prefill measurements from one loaded model and GPU.
 
     Yields a single ``meta`` event, then one ``row`` event per completed workload cell.
     Cells whose key is in ``completed`` are skipped so a resumed run only measures the rest.
     """
+    require_spend_approval(approved, __file__)
     import math
     import statistics
 
@@ -683,6 +686,7 @@ def benchmark_mixed_load(
     warmup: int,
     iters: int,
     completed: list[dict[str, object]],
+    approved: bool = False,
 ) -> Iterator[dict[str, object]]:
     """Stream serial/packed-prefill decode-stall measurements under a mid-stream prompt burst.
 
@@ -697,6 +701,7 @@ def benchmark_mixed_load(
     Yields one ``meta`` event, then one ``row`` event per workload cell not already in
     ``completed``. Timing is reported for every mode regardless of the fp32-oracle verdict.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -1075,6 +1080,7 @@ def diagnose_prefill_divergence(
     context_length: int | None,
     max_new_tokens: int,
     repeats: int,
+    approved: bool = False,
 ) -> dict[str, object]:
     """Rerun one offending A/B cell outside the timed path, recording why serial vs packed diverge.
 
@@ -1085,6 +1091,7 @@ def diagnose_prefill_divergence(
     the fp32 oracle. Diagnostic only: no serial or fp32 fallback is added to the production
     engine and the 0.1-logit tie rule is untouched.
     """
+    require_spend_approval(approved, __file__)
     import math
 
     import torch
@@ -1413,6 +1420,7 @@ def _run_prefill_divergence(bundle_path: str, context_length: int) -> None:
         context_length=None if context_length == 0 else context_length,
         max_new_tokens=64,
         repeats=5,
+        approved=True,
     )
     stamp = time.strftime("%Y%m%dT%H%M%S")
     out_path = out_dir / f"esme-prefill-divergence-{stamp}.json"
@@ -1426,8 +1434,17 @@ def main(
     bundle_path: str = "",
     resume: bool = False,
     context_length: int = 0,
+    approved: bool = False,
 ) -> None:
     """Stage Esme, stream a benchmark protocol to a rows log, and write the combined JSON record."""
+    require_spend_approval(
+        approved,
+        __file__,
+        command=command,
+        bundle_path=bundle_path,
+        resume=resume,
+        context_length=context_length,
+    )
     if command == "prefill-divergence":
         _run_prefill_divergence(bundle_path, context_length)
         return
@@ -1503,6 +1520,7 @@ def main(
             warmup,
             iters,
             completed,
+            approved=True,
         )
         config = {
             "command": command,
@@ -1539,6 +1557,7 @@ def main(
             warmup,
             iters,
             completed,
+            approved=True,
         )
         config = {
             "command": command,

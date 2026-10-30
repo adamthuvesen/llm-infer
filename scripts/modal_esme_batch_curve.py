@@ -33,6 +33,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -106,8 +107,11 @@ class _PeakBlocks:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def bench_vllm_batches(batch_sizes: list[int], max_new_tokens: int, warmup: int, iters: int) -> str:
+def bench_vllm_batches(
+    batch_sizes: list[int], max_new_tokens: int, warmup: int, iters: int, approved: bool = False
+) -> str:
     """vLLM ceiling rows for every batch size, all in this one container."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot
@@ -160,8 +164,10 @@ def sweep_baseline(
     max_new_tokens: int,
     warmup: int,
     iters: int,
+    approved: bool = False,
 ) -> str:
     """Reference-gated batch/context matrix with cold startup and persistent timing separated."""
+    require_spend_approval(approved, __file__)
     import math
     import statistics
 
@@ -416,8 +422,10 @@ def sweep(
     warmup: int,
     iters: int,
     vllm_rows: list[dict],
+    approved: bool = False,
 ) -> str:
     """All llm_infer and HF-floor rows in ONE container, plus the oracle gate for every row."""
+    require_spend_approval(approved, __file__)
     import math
 
     import torch
@@ -595,6 +603,7 @@ def sweep_grouped_ab(
     max_new_tokens: int,
     warmup: int,
     iters: int,
+    approved: bool = False,
 ) -> str:
     """Same-container curve A/B: piecewise-only engines vs engines with grouped dispatch.
 
@@ -605,6 +614,7 @@ def sweep_grouped_ab(
     span covering prefill and decode exactly like serving steady state. Alternating pair
     order per iteration keeps thermal/clock drift out of the ratio.
     """
+    require_spend_approval(approved, __file__)
     import math
     import statistics
 
@@ -765,8 +775,10 @@ def sweep_flashinfer_compare(
     max_new_tokens: int,
     warmup: int,
     iters: int,
+    approved: bool = False,
 ) -> str:
     """Headline workload A/B: current llm_infer graph path vs FlashInfer paged decode."""
+    require_spend_approval(approved, __file__)
     import math
 
     import torch
@@ -932,6 +944,7 @@ def sweep_ladder(
     max_new_tokens: int,
     warmup: int,
     iters: int,
+    approved: bool = False,
 ) -> str:
     """Same-container ablation ladder: HF baselines, then one engine technique per rung.
 
@@ -943,6 +956,7 @@ def sweep_ladder(
         engine's techniques; HF sequential is the naive floor at one ``[batch, iters]`` spec, with
     the curve's floor protocol (one warmup only when it measures more than once).
     """
+    require_spend_approval(approved, __file__)
     import math
     import statistics
 
@@ -1185,8 +1199,13 @@ def sweep_ladder(
 
 
 @app.local_entrypoint()
-def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False) -> None:
+def main(
+    command: str = "curve", bundle_path: str = "", skip_vllm: bool = False, approved: bool = False
+) -> None:
     """Stage + convert the bundle, run the (optional) vLLM rows, then the one-container sweep."""
+    require_spend_approval(
+        approved, __file__, command=command, bundle_path=bundle_path, skip_vllm=skip_vllm
+    )
     if command == "smoke":
         llm_infer_batches = [2, 4]
         context_lengths: list[int] = []
@@ -1260,7 +1279,9 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
         print(f"[esme-curve] {convert_bundle_to_hf.remote()}")
         print(f"[esme-curve] ablation ladder: batches {llm_infer_batches}, HF floor {hf_specs[0]}")
         sweep_res = json.loads(
-            sweep_ladder.remote(llm_infer_batches, hf_specs[0], max_new_tokens, warmup, iters)
+            sweep_ladder.remote(
+                llm_infer_batches, hf_specs[0], max_new_tokens, warmup, iters, approved=True
+            )
         )
         record = {
             **sweep_res,
@@ -1290,7 +1311,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
     if command.startswith("grouped-ab"):
         print(f"[esme-curve] grouped A/B: batches {llm_infer_batches}")
         sweep_res = json.loads(
-            sweep_grouped_ab.remote(llm_infer_batches, max_new_tokens, warmup, iters)
+            sweep_grouped_ab.remote(llm_infer_batches, max_new_tokens, warmup, iters, approved=True)
         )
         record = {
             **sweep_res,
@@ -1320,7 +1341,9 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
     if command.startswith("flashinfer-"):
         print(f"[esme-curve] flashinfer compare: llm_infer {llm_infer_batches}")
         sweep_res = json.loads(
-            sweep_flashinfer_compare.remote(llm_infer_batches, max_new_tokens, warmup, iters)
+            sweep_flashinfer_compare.remote(
+                llm_infer_batches, max_new_tokens, warmup, iters, approved=True
+            )
         )
         record = {
             "rows": sweep_res["rows"],
@@ -1365,6 +1388,7 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
                 max_new_tokens,
                 warmup,
                 iters,
+                approved=True,
             )
         )
         record = {
@@ -1416,11 +1440,19 @@ def main(command: str = "curve", bundle_path: str = "", skip_vllm: bool = False)
     else:
         print(f"[esme-curve] vLLM rows (own container): batches {vllm_batches}")
         vllm_res = json.loads(
-            bench_vllm_batches.remote(vllm_batches, max_new_tokens, warmup, iters)
+            bench_vllm_batches.remote(vllm_batches, max_new_tokens, warmup, iters, approved=True)
         )
     print(f"[esme-curve] one-container sweep: llm_infer {llm_infer_batches}, HF {hf_specs}")
     sweep_res = json.loads(
-        sweep.remote(llm_infer_batches, hf_specs, max_new_tokens, warmup, iters, vllm_res["rows"])
+        sweep.remote(
+            llm_infer_batches,
+            hf_specs,
+            max_new_tokens,
+            warmup,
+            iters,
+            vllm_res["rows"],
+            approved=True,
+        )
     )
 
     record = {

@@ -18,6 +18,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -53,6 +54,7 @@ def measure_serving(
     measured_runs: int,
     grouped: bool = False,
     grouped_ab: bool = False,
+    approved: bool = False,
 ) -> str:
     """Run greedy and sampled HTTP rows in one A100 process.
 
@@ -61,6 +63,7 @@ def measure_serving(
     comparison is like-for-like on one GPU. The arm that runs first alternates from cell to
     cell. Each row carries a ``grouped`` field naming its arm and a ``run_order`` (0 first).
     """
+    require_spend_approval(approved, __file__)
     import asyncio
 
     import torch
@@ -183,7 +186,19 @@ def main(
     bundle_path: str = "",
     grouped: bool = False,
     grouped_ab: bool = False,
+    approved: bool = False,
 ) -> None:
+    require_spend_approval(
+        approved,
+        __file__,
+        batch_sizes=batch_sizes,
+        max_new_tokens=max_new_tokens,
+        warmup_runs=warmup_runs,
+        measured_runs=measured_runs,
+        bundle_path=bundle_path,
+        grouped=grouped,
+        grouped_ab=grouped_ab,
+    )
     sizes = _parse_batch_sizes(batch_sizes)
     if max_new_tokens < 2:
         raise ValueError(f"max_new_tokens must be >= 2 to measure ITL; got {max_new_tokens}")
@@ -198,7 +213,7 @@ def main(
     )
     record = json.loads(
         measure_serving.remote(
-            sizes, max_new_tokens, warmup_runs, measured_runs, grouped, grouped_ab
+            sizes, max_new_tokens, warmup_runs, measured_runs, grouped, grouped_ab, approved=True
         )
     )
     record["config"] = {

@@ -24,6 +24,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -96,7 +97,8 @@ def _child(arm: str) -> dict:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=45 * 60,
 )
-def fused_startup() -> str:
+def fused_startup(approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -145,9 +147,10 @@ def fused_startup() -> str:
 
 
 @app.local_entrypoint()
-def main(bundle_path: str = "") -> None:
+def main(bundle_path: str = "", approved: bool = False) -> None:
+    require_spend_approval(approved, __file__, bundle_path=bundle_path)
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="fused-startup")
-    record = json.loads(fused_startup.remote())
+    record = json.loads(fused_startup.remote(approved=True))
     record["config"] = {
         "model": "Esme-214M-Chat",
         "arms": list(ARMS),

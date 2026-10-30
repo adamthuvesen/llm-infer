@@ -30,6 +30,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -168,7 +169,8 @@ def _workload_row(runtime, prompts: list[str]):
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def spec_decode_ab(workloads: dict[str, list[str]]) -> str:
+def spec_decode_ab(workloads: dict[str, list[str]], approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -242,11 +244,14 @@ def spec_decode_ab(workloads: dict[str, list[str]]) -> str:
 
 
 @app.local_entrypoint()
-def main(bundle_path: str = "") -> None:
+def main(bundle_path: str = "", approved: bool = False) -> None:
+    require_spend_approval(approved, __file__, bundle_path=bundle_path)
     workloads = load_workloads()
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="spec-decode")
     record = json.loads(
-        spec_decode_ab.remote({name: texts for name, (_, texts) in workloads.items()})
+        spec_decode_ab.remote(
+            {name: texts for name, (_, texts) in workloads.items()}, approved=True
+        )
     )
     record["config"] = {
         "model": "Esme-214M-Chat",

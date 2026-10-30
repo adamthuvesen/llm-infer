@@ -44,6 +44,7 @@ import modal
 
 from llm_infer.benchmarks.report import TIMELINE_MEASURED_RUNS, TIMELINE_WARMUP_RUNS
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -418,8 +419,9 @@ def _bench_batch(
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def profile_decode(batch_sizes: list[int]) -> str:
+def profile_decode(batch_sizes: list[int], approved: bool = False) -> str:
     """Decode-overhead profile per batch size: wall/step, GPU busy/step, Python attribution."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -470,7 +472,7 @@ def profile_decode(batch_sizes: list[int]) -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def profile_sampled_decode(batch_sizes: list[int]) -> str:
+def profile_sampled_decode(batch_sizes: list[int], approved: bool = False) -> str:
     """Greedy-vs-sampled decode attribution per batch size, in one container.
 
     Sampled requests run the serving eval's phase0 settings (temperature 0.8, top-p 0.95,
@@ -478,6 +480,7 @@ def profile_sampled_decode(batch_sizes: list[int]) -> str:
     sampled-minus-greedy delta is the engine-side cost of sampling. Diagnostic only, never a
     speed claim.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -538,8 +541,9 @@ def profile_sampled_decode(batch_sizes: list[int]) -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def bench_decode(batch_sizes: list[int]) -> str:
+def bench_decode(batch_sizes: list[int], approved: bool = False) -> str:
     """Oracle-gated flash-engine bench per batch size (fresh engine per iter, median wall)."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -608,8 +612,9 @@ def _runner_for(config: dict, graph_runner):
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def ablate_decode(batch_sizes: list[int]) -> str:
+def ablate_decode(batch_sizes: list[int], approved: bool = False) -> str:
     """Oracle-gated A/B of engine decode configs on ONE GPU — the attribution measurement."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -658,8 +663,9 @@ def ablate_decode(batch_sizes: list[int]) -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
-def sync_report(batch_sizes: list[int]) -> str:
+def sync_report(batch_sizes: list[int], approved: bool = False) -> str:
     """Sync-attribution probe only: op isolation, first-site traceback, per-pass counts."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -699,8 +705,9 @@ def sync_report(batch_sizes: list[int]) -> str:
     gpu="A100-80GB",
     timeout=30 * 60,
 )
-def flashinfer_graph_probe() -> str:
+def flashinfer_graph_probe(approved: bool = False) -> str:
     """Capture only FlashInfer ``run`` and re-plan fixed buffers across page boundaries."""
+    require_spend_approval(approved, __file__)
     import flashinfer
     import torch
 
@@ -960,6 +967,7 @@ def grouped_layer_ab(
     grouped_layers: int,
     correctness_only: bool = False,
     batch_sizes: list[int] | None = None,
+    approved: bool = False,
 ) -> str:
     """A/B of piecewise decode versus one cache-owned grouped graph.
 
@@ -968,6 +976,7 @@ def grouped_layer_ab(
     ``batch_sizes`` defaults to the exact low-batch protocol (1 and 8); pass larger sizes for
     the high-batch regression check that gates any serving adoption of the grouped runner.
     """
+    require_spend_approval(approved, __file__)
     import statistics
 
     import torch
@@ -1342,7 +1351,7 @@ def grouped_layer_ab(
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=3 * 60 * 60,
 )
-def bucket_policy_report(probe_batches: list[int]) -> str:
+def bucket_policy_report(probe_batches: list[int], approved: bool = False) -> str:
     """The grouped bucket-policy record: off-bucket A/B, capture budget, workspace sharing.
 
     Three questions, one container:
@@ -1357,6 +1366,7 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
        FlashInfer workspace) and gate a mixed-bucket decode on the shared engine against
        the fp32 oracle — deciding ~200 MiB versus ~1.1 GiB for an 8-bucket set.
     """
+    require_spend_approval(approved, __file__)
     import statistics
 
     import torch
@@ -1642,8 +1652,9 @@ def bucket_policy_report(probe_batches: list[int]) -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
-def serve_smoke() -> str:
+def serve_smoke(approved: bool = False) -> str:
     """Build the HTTP app far enough to run FlashInfer warmup and decode-graph capture."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -1855,7 +1866,7 @@ def _roofline_rows(
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def roofline_report(batch_sizes: list[int]) -> str:
+def roofline_report(batch_sizes: list[int], approved: bool = False) -> str:
     """Where one decode token-step goes, against the HBM floor of streaming the weights once.
 
     Runs the default CUDA path (bf16, FlashInfer, piecewise decode graphs, decode window 8) on a
@@ -1866,6 +1877,7 @@ def roofline_report(batch_sizes: list[int]) -> str:
     times inside graph replays come from CUPTI device records; the profiled run's own wall is
     not used.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -1967,7 +1979,7 @@ def _load_bf16_with_graphs(capture_sizes: tuple[int, ...], *, warm: bool) -> tup
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def fusion_probe(batch_sizes: list[int]) -> str:
+def fusion_probe(batch_sizes: list[int], approved: bool = False) -> str:
     """Does compiling the elementwise chains cut decode kernel count and device time?
 
     Two arms in one container, each measured with the roofline protocol. ``eager`` is the
@@ -1977,6 +1989,7 @@ def fusion_probe(batch_sizes: list[int]) -> str:
     compiled kernels. Both arms gate against the fp32 oracle, which runs with the original
     functions, and the record stores direct eager/compiled parity.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2189,7 +2202,7 @@ def _timeline_gaps(sqlite_path: Path, token_steps: int) -> dict:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def timeline_trace(batch_sizes: list[int]) -> str:
+def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
     """nsys timeline of eager and compiled decode, with every idle gap attributed to a cause.
 
     Each arm runs ``scripts/nsys_decode_step.py`` in a fresh process under ``nsys profile`` with
@@ -2197,6 +2210,7 @@ def timeline_trace(batch_sizes: list[int]) -> str:
     only the measured decode. Tracing adds overhead, so the spans here are diagnostic and are not
     compared with the uninstrumented roofline walls.
     """
+    require_spend_approval(approved, __file__)
     import glob
     import subprocess
     import tempfile
@@ -2395,7 +2409,7 @@ def _host_timeline_row(runtime, size: int) -> dict:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def host_timeline(batch_sizes: list[int]) -> str:
+def host_timeline(batch_sizes: list[int], approved: bool = False) -> str:
     """Host issue time per decode step, eager vs compiled elementwise, without CUPTI.
 
     Three passes per arm on one persistent engine with a fixed output length:
@@ -2412,6 +2426,7 @@ def host_timeline(batch_sizes: list[int]) -> str:
     visible. Diagnostic only: no reference gate and no speed claim.
     """
 
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2591,7 +2606,7 @@ def _host_plan_rows(
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def host_plan_ab(batch_sizes: list[int]) -> str:
+def host_plan_ab(batch_sizes: list[int], approved: bool = False) -> str:
     """Does handing FlashInfer host-side page metadata, which drops a per-step sync, pay?
 
     Three engine configurations, each with both metadata arms on the same engine and graphs:
@@ -2600,6 +2615,7 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     entry 17). Fixed 128-token greedy output, EOS ignored. Every arm gates against the fp32
     oracle, and the record stores direct device/host parity per configuration and batch.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2688,13 +2704,14 @@ def host_plan_ab(batch_sizes: list[int]) -> str:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=60 * 60,
 )
-def capture_report(batch_sizes: list[int]) -> str:
+def capture_report(batch_sizes: list[int], approved: bool = False) -> str:
     """The one-container decode-graph report: sync probe, launch counts, oracle-gated A/B.
 
     Everything runs on ONE GPU in one process so every comparison — sync warnings,
     launches/step, eager-window vs captured tok/s — is like-for-like (Modal containers vary
     ±20% machine to machine on this CPU-bound loop).
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2803,8 +2820,16 @@ def capture_report(batch_sizes: list[int]) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: str = "") -> None:
+def main(
+    command: str = "bench",
+    batch_sizes: str = "1,8,64,256",
+    bundle_path: str = "",
+    approved: bool = False,
+) -> None:
     """Stage the bundle, run the selected command on the A100, write the JSON record."""
+    require_spend_approval(
+        approved, __file__, command=command, batch_sizes=batch_sizes, bundle_path=bundle_path
+    )
     if command not in (
         "profile",
         "sampled-profile",
@@ -2838,56 +2863,56 @@ def main(command: str = "bench", batch_sizes: str = "1,8,64,256", bundle_path: s
 
     if command == "flashinfer-graph-probe":
         print("[esme-decode] FlashInfer fixed-buffer graph probe: exact batches 1,8")
-        record = json.loads(flashinfer_graph_probe.remote())
+        record = json.loads(flashinfer_graph_probe.remote(approved=True))
     elif command == "two-layer-group-ab":
         print(f"[esme-decode] cache-owned two-layer graph A/B: exact batches {sizes}")
-        record = json.loads(grouped_layer_ab.remote(2, False, sizes))
+        record = json.loads(grouped_layer_ab.remote(2, False, sizes, approved=True))
     elif command == "four-layer-group-ab":
         print(f"[esme-decode] cache-owned four-layer graph A/B: exact batches {sizes}")
-        record = json.loads(grouped_layer_ab.remote(4, False, sizes))
+        record = json.loads(grouped_layer_ab.remote(4, False, sizes, approved=True))
     elif command == "four-layer-parity":
         print("[esme-decode] cache-owned four-layer graph: batch-8 correctness only")
-        record = json.loads(grouped_layer_ab.remote(4, True))
+        record = json.loads(grouped_layer_ab.remote(4, True, approved=True))
     elif command == "bucket-policy":
         print(f"[esme-decode] grouped bucket-policy record: off-bucket batches {sizes}")
-        record = json.loads(bucket_policy_report.remote(sizes))
+        record = json.loads(bucket_policy_report.remote(sizes, approved=True))
     elif command == "profile":
         print(
             f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, greedy, "
             f"bf16 default attention, prefix caching off"
         )
-        record = json.loads(profile_decode.remote(sizes))
+        record = json.loads(profile_decode.remote(sizes, approved=True))
     elif command == "sampled-profile":
         print(
             f"[esme-decode] {command}: batches {sizes}, {MAX_NEW_TOKENS} new tokens, "
             f"greedy vs sampled {SAMPLED_SETTINGS}, bf16 default attention, prefix caching off"
         )
-        record = json.loads(profile_sampled_decode.remote(sizes))
+        record = json.loads(profile_sampled_decode.remote(sizes, approved=True))
     elif command == "ablate":
-        record = json.loads(ablate_decode.remote(sizes))
+        record = json.loads(ablate_decode.remote(sizes, approved=True))
     elif command == "capture":
-        record = json.loads(capture_report.remote(sizes))
+        record = json.loads(capture_report.remote(sizes, approved=True))
     elif command == "sync":
-        record = json.loads(sync_report.remote(sizes))
+        record = json.loads(sync_report.remote(sizes, approved=True))
     elif command == "serve-smoke":
-        record = json.loads(serve_smoke.remote())
+        record = json.loads(serve_smoke.remote(approved=True))
     elif command == "roofline":
         print(f"[esme-decode] roofline: batches {sizes}, {ROOFLINE_NEW_TOKENS} fixed new tokens")
-        record = json.loads(roofline_report.remote(sizes))
+        record = json.loads(roofline_report.remote(sizes, approved=True))
     elif command == "fusion-probe":
         print(f"[esme-decode] fusion probe: batches {sizes}, eager vs compiled elementwise")
-        record = json.loads(fusion_probe.remote(sizes))
+        record = json.loads(fusion_probe.remote(sizes, approved=True))
     elif command == "timeline":
         print(f"[esme-decode] nsys timeline: batches {sizes}, eager vs compiled elementwise")
-        record = json.loads(timeline_trace.remote(sizes))
+        record = json.loads(timeline_trace.remote(sizes, approved=True))
     elif command == "host-timeline":
         print(f"[esme-decode] host timeline: batches {sizes}, eager vs compiled, no CUPTI")
-        record = json.loads(host_timeline.remote(sizes))
+        record = json.loads(host_timeline.remote(sizes, approved=True))
     elif command == "host-plan-ab":
         print(f"[esme-decode] host-plan A/B: batches {sizes}, device vs host page metadata")
-        record = json.loads(host_plan_ab.remote(sizes))
+        record = json.loads(host_plan_ab.remote(sizes, approved=True))
     else:
-        record = json.loads(bench_decode.remote(sizes))
+        record = json.loads(bench_decode.remote(sizes, approved=True))
     record["config"] = {
         "command": command,
         "model": "Esme-214M-Chat",
