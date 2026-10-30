@@ -9,6 +9,11 @@ from llm_infer.kernels.base import PackedPrefillAttentionBackend
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 
 
+def _shape(value: object) -> torch.Size:
+    assert isinstance(value, torch.Tensor)
+    return value.shape
+
+
 def _packed_inputs() -> tuple[torch.Tensor, ...]:
     generator = torch.Generator().manual_seed(7)
     query = torch.randn(5, 4, 8, generator=generator)
@@ -126,9 +131,9 @@ def test_flash_attention_packed_prefill_uses_one_native_gqa_varlen_call(
     assert actual.shape == query.shape
     assert actual.dtype == query.dtype
     assert len(calls) == 1
-    assert calls[0]["query"].shape == (5, 4, 8)
-    assert calls[0]["key"].shape == (5, 2, 8)
-    assert calls[0]["value"].shape == (5, 2, 8)
+    assert _shape(calls[0]["query"]) == (5, 4, 8)
+    assert _shape(calls[0]["key"]) == (5, 2, 8)
+    assert _shape(calls[0]["value"]) == (5, 2, 8)
     assert calls[0]["cu_seqlens_q"] is cu_seqlens
     assert calls[0]["cu_seqlens_k"] is cu_seqlens
     assert calls[0]["max_seqlen_q"] == 3

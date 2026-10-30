@@ -44,7 +44,7 @@ class _FakeWrapper:
 
 def _fake_flashinfer_module() -> ModuleType:
     module = ModuleType("flashinfer")
-    module.BatchDecodeWithPagedKVCacheWrapper = _FakeWrapper
+    module.__dict__["BatchDecodeWithPagedKVCacheWrapper"] = _FakeWrapper
     return module
 
 
@@ -73,14 +73,14 @@ def test_import_guard_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -
 
 def test_decode_wrapper_class_prefers_top_level() -> None:
     module = ModuleType("flashinfer")
-    module.BatchDecodeWithPagedKVCacheWrapper = _FakeWrapper
+    module.__dict__["BatchDecodeWithPagedKVCacheWrapper"] = _FakeWrapper
 
     assert FlashInferPagedAttention.decode_wrapper_class(module) is _FakeWrapper
 
 
 def test_decode_wrapper_class_falls_back_to_submodule() -> None:
     module = ModuleType("flashinfer")
-    module.decode = SimpleNamespace(BatchDecodeWithPagedKVCacheWrapper=_FakeWrapper)
+    module.__dict__["decode"] = SimpleNamespace(BatchDecodeWithPagedKVCacheWrapper=_FakeWrapper)
 
     assert FlashInferPagedAttention.decode_wrapper_class(module) is _FakeWrapper
 

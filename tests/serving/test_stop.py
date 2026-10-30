@@ -16,13 +16,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import cast
 
 import httpx
 import pytest
 
 from llm_infer.serving.server import create_app
-from llm_infer.serving.server.async_engine import TokenStreamItem
+from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.stop import StopSequenceDetokenizer
+from tests.support.json_result import dig, dig_dict
 
 
 class CharTokenizer:
@@ -39,7 +41,11 @@ class CharTokenizer:
         return "".join(chr(t) for t in token_ids)
 
     def apply_chat_template(
-        self, messages: list[dict], add_generation_prompt: bool = True, tokenize: bool = True
+        self,
+        messages: list[dict[str, str]],
+        *,
+        add_generation_prompt: bool = True,
+        tokenize: bool = True,
     ) -> list[int]:
         return self.encode(messages[-1]["content"])
 
@@ -188,7 +194,7 @@ def _scripted_app(text: str, *, eos_id: int = 0):
     """An app whose engine emits ``text`` one character-token at a time (no EOS unless given)."""
     engine = ScriptedAsyncEngine(_ids(text), eos_id=eos_id)
     app = create_app(
-        async_engine=engine,
+        async_engine=cast(AsyncInferenceEngine, engine),
         tokenizer=CharTokenizer(),
         model_id="scripted",
         eos_token_ids=frozenset({eos_id}),
@@ -201,19 +207,20 @@ def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
-def _parse_sse(text: str) -> list:
-    chunks = []
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            payload = line[len("data: ") :]
-            chunks.append("[DONE]" if payload == "[DONE]" else json.loads(payload))
-    return chunks
+def _parse_sse(text: str) -> list[dict[str, object]]:
+    """Return the JSON data chunks of an SSE stream, without the ``[DONE]`` sentinel."""
+    payloads = [line[len("data: ") :] for line in text.splitlines() if line.startswith("data: ")]
+    return [json.loads(payload) for payload in payloads if payload != "[DONE]"]
+
+
+def _delta_content(chunk: dict[str, object]) -> str:
+    content = dig_dict(chunk, "choices", 0, "delta").get("content", "")
+    assert isinstance(content, str)
+    return content
 
 
 def _stream_content(raw: str) -> str:
-    return "".join(
-        c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
-    )
+    return "".join(_delta_content(c) for c in _parse_sse(raw))
 
 
 def test_non_streaming_truncates_before_stop_with_finish_reason_stop() -> None:
@@ -270,16 +277,16 @@ def test_streaming_deltas_equal_non_streaming_and_never_leak_the_stop() -> None:
                 raw = ""
                 async for piece in resp.aiter_text():
                     raw += piece
-            chunks = [c for c in _parse_sse(raw) if c != "[DONE]"]
+            chunks = _parse_sse(raw)
 
         streamed = _stream_content(raw)
         assert streamed == non_streaming == "abc "
         # No individual delta contains the stop string or any character after it.
         for chunk in chunks:
-            assert "STOP" not in chunk["choices"][0]["delta"].get("content", "")
-            assert "xyz" not in chunk["choices"][0]["delta"].get("content", "")
+            assert "STOP" not in _delta_content(chunk)
+            assert "xyz" not in _delta_content(chunk)
         # The finish chunk reports the stop, and the engine request was aborted.
-        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+        assert dig(chunks[-1], "choices", 0, "finish_reason") == "stop"
         assert engine.aborted
 
     asyncio.run(go())

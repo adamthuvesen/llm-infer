@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -18,17 +19,18 @@ from llm_infer.benchmarks.reference_policy import (
 )
 from scripts import check_benchmark_evidence as evidence_check
 from scripts.judge_paired_ab import main as judge_main
+from tests.support.json_result import dig_dict, dig_number
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _pair(stem: str) -> tuple[dict, dict]:
+def _pair(stem: str) -> tuple[dict[str, object], dict[str, object]]:
     return tuple(
         json.loads((ROOT / "assets" / f"{stem}-{index}.json").read_text()) for index in (1, 2)
     )
 
 
-def _judge(records: tuple[dict, dict]):
+def _judge(records: tuple[dict[str, object], dict[str, object]]):
     return judge_json_records(*(json.dumps(record).encode() for record in records))
 
 
@@ -91,12 +93,12 @@ def test_public_tables_reject_raw_timing_disguised_as_a_headline(
 def test_fusion_exact_direct_parity_cannot_bypass_its_registered_fp32_gate() -> None:
     # f209bfe fixed the exact-parity branch bypassing both arms' fp32 checks.
     records = _pair("esme-fusion-ab")
-    row = records[0]["configs"]["grouped"][2]
+    row = dig_dict(records[0], "configs", "grouped", 2)
     assert row["parity_status"] == "exact"
-    agreement = row["full_step"]["agreement"]
-    agreement["exact"] -= 1
-    agreement["nontie"] += 1
-    agreement["review_required"] += 1
+    agreement = dig_dict(row, "full_step", "agreement")
+    agreement["exact"] = dig_number(agreement, "exact") - 1
+    agreement["nontie"] = dig_number(agreement, "nontie") + 1
+    agreement["review_required"] = dig_number(agreement, "review_required") + 1
     result = _judge(records)
     assert result.exit_code == 1
     assert "grouped b64: not confirmed (non-tie divergence from fp32)" in result.lines
@@ -105,10 +107,10 @@ def test_fusion_exact_direct_parity_cannot_bypass_its_registered_fp32_gate() -> 
 def test_exact_relative_parity_can_share_a_pending_reference_review() -> None:
     records = _pair("esme-full-step-ab")
     for record in records:
-        row = record["configs"]["grouped"][0]
+        row = dig_dict(record, "configs", "grouped", 0)
         assert row["parity_status"] == "exact"
         for arm in ("grouped4", "full_step"):
-            agreement = row[arm]["agreement"]
+            agreement = dig_dict(row, arm, "agreement")
             agreement["exact"] = agreement["tie"] = 0
             agreement["nontie"] = agreement["review_required"] = agreement["total"]
     result = _judge(records)
@@ -171,13 +173,14 @@ def test_paired_record_snapshots_measured_rounds_and_row_membership() -> None:
     key = ("grouped", 1)
     walls = record.rows[key].baseline.walls_s
     agreement = record.rows[key].baseline.agreement.as_dict()
-    source["configs"]["grouped"][0]["grouped4"]["walls_s"][0] = 999.0
-    source["configs"]["grouped"][0]["grouped4"]["agreement"]["exact"] = 0
+    arm = dig_dict(source, "configs", "grouped", 0, "grouped4")
+    cast(list[float], arm["walls_s"])[0] = 999.0
+    dig_dict(arm, "agreement")["exact"] = 0
     assert record.rows[key].baseline.walls_s == walls
     assert record.rows[key].baseline.agreement.as_dict() == agreement
     assert isinstance(walls, tuple)
     with pytest.raises(TypeError):
-        record.rows[key] = record.rows[key]
+        record.rows[key] = record.rows[key]  # pyright: ignore[reportIndexIssue]  # Mapping is read-only on purpose
 
 
 def test_wire_evidence_accepts_measured_rate_without_new_timing_metadata() -> None:

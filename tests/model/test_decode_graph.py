@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
+from llm_infer.kv_cache import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.decode_graph import select_bucket
 from llm_infer.model.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
@@ -51,7 +52,7 @@ def _fresh_cache(model) -> PagedKVCache:
     )
 
 
-def _prefill(model, cache) -> tuple[list, torch.Tensor]:
+def _prefill(model, cache) -> tuple[list[BlockTable], torch.Tensor]:
     tables, first_tokens = [], []
     for prompt in _PROMPTS:
         table = cache.new_request()

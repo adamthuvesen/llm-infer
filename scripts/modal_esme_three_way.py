@@ -49,7 +49,7 @@ from scripts.modal_esme_bundle import (
     local_bundle_path,
     stage_bundle,
 )
-from scripts.modal_flash_image import FLASH_IMAGE, IGNORE, REMOTE_ROOT, REPO_ROOT
+from scripts.modal_flash_image import FLASH_IMAGE, IGNORE, LOCAL_PYTHON, REMOTE_ROOT, REPO_ROOT
 
 ESME_HF_DIR = "esme-214m-chat-hf"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
@@ -65,7 +65,7 @@ esme_image = FLASH_IMAGE
 # vLLM image: vLLM pulls its own torch + CUDA, so it must not share the flash env. Same two env
 # pins for the vLLM ceiling run: spawn the engine core, native sampler, no nvcc JIT.
 vllm_image = (
-    modal.Image.debian_slim(python_version="3.13")
+    modal.Image.debian_slim(python_version=LOCAL_PYTHON)
     .pip_install("vllm")
     .env(
         {

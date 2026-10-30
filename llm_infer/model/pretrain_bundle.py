@@ -927,7 +927,7 @@ class PretrainBundleModel:
             token_id
             for token_id in token_ids
             if isinstance(token_id, bool)
-            or not isinstance(token_id, int)
+            or not isinstance(token_id, int)  # pyright: ignore[reportUnnecessaryIsInstance]  # untrusted token ids
             or not 0 <= token_id < self.config.vocab_size
         ]
         if bad:

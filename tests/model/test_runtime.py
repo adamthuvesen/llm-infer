@@ -88,7 +88,7 @@ def test_bundle_runtime_disables_batched_prefill_for_narrow_attention_backend(
     runtime = load_model_runtime(
         "esme",
         bundle_path=_write_tiny_bundle(tmp_path),
-        attention_backend=NarrowAttention(),
+        attention_backend=NarrowAttention(),  # pyright: ignore[reportArgumentType]  # narrow backend on purpose
     )
 
     assert runtime.capabilities.batched_prefill is False
@@ -285,7 +285,7 @@ def test_esme_runtime_honors_bundle_chat_template_and_special_token_policy(
     assert rendered == "user\nhello\nassistant\n"
     assert tokenized == [2, 5, 3]
     assert runtime.tokenizer.encode("hello") == [5]
-    assert runtime.tokenizer.encode("hello", add_special_tokens=True) == [5, 9]
+    assert runtime.tokenizer.encode("hello", add_special_tokens=True) == [5, 9]  # pyright: ignore[reportCallIssue]  # the concrete tokenizer takes extra kwargs
 
 
 def test_dense_runtime_drives_serving_path(tmp_path: Path) -> None:

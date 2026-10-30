@@ -89,7 +89,7 @@ def test_loadgen_rejects_nonpositive_concurrency() -> None:
     with pytest.raises(ValueError, match="concurrency"):
         asyncio.run(
             run_load(
-                None,  # rejected before the client is touched
+                None,  # pyright: ignore[reportArgumentType]  # rejected before the client is touched
                 model="m",
                 prompt="p",
                 max_tokens=4,

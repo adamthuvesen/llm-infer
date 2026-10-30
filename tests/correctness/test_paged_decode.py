@@ -30,6 +30,7 @@ from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving import InferenceEngine, Request
+from tests.support.golden_fixture import GoldenCase
 
 FIXTURE = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
 EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
@@ -65,7 +66,7 @@ def _first_divergence(ours: list[int], expected: list[int]) -> int | None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["case_id"])
-def test_cached_paged_decode_matches_golden(model: QwenModel, case: dict) -> None:
+def test_cached_paged_decode_matches_golden(model: QwenModel, case: GoldenCase) -> None:
     """Full 40-token paged/cached decode == the committed HF full-recompute golden."""
     out = _run_single(model, case["prompt_ids"], MAX_NEW)
     expected = case["continuation_ids"]
@@ -78,7 +79,7 @@ def test_cached_paged_decode_matches_golden(model: QwenModel, case: dict) -> Non
 
 @pytest.mark.slow
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["case_id"])
-def test_cached_matches_full_recompute_path(model: QwenModel, case: dict) -> None:
+def test_cached_matches_full_recompute_path(model: QwenModel, case: GoldenCase) -> None:
     """The cached path and the engine's own full-recompute path agree (same engine, two paths)."""
     steps = 6
     cached = _run_single(model, case["prompt_ids"], steps)

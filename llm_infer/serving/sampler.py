@@ -66,7 +66,7 @@ class SamplingParams:
             raise ValueError(f"presence_penalty must be in [-2, 2]; got {self.presence_penalty}")
         if not (-2.0 <= self.frequency_penalty <= 2.0):
             raise ValueError(f"frequency_penalty must be in [-2, 2]; got {self.frequency_penalty}")
-        if not isinstance(self.seed, int) or isinstance(self.seed, bool):
+        if not isinstance(self.seed, int) or isinstance(self.seed, bool):  # pyright: ignore[reportUnnecessaryIsInstance]  # seed arrives from request JSON
             raise ValueError(f"seed must be an integer; got {self.seed!r}")
         if not (_MIN_TORCH_SEED <= self.seed <= _MAX_TORCH_SEED):
             raise ValueError(

@@ -7,12 +7,15 @@ from types import SimpleNamespace
 import pytest
 
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
-from llm_infer.benchmarks.esme_three_way import vllm_decode_closure
+from llm_infer.benchmarks.esme_three_way import VllmRequestOutput, vllm_decode_closure
 from llm_infer.benchmarks.reference_policy import EsmeAgreement
 from scripts.modal_esme_vllm_baseline import (
     ENGINE_SYSTEMS,
     VLLM_PYTHON,
+    OracleCase,
     ProcessIdentity,
+    RequestSpec,
+    WorkerRow,
     _command_config,
     _parse_worker_args,
     build_context_workloads,
@@ -21,6 +24,8 @@ from scripts.modal_esme_vllm_baseline import (
     validate_child_identity,
     worker_command,
 )
+from tests.support.fake_tokenizer import as_tokenizer
+from tests.support.json_result import dig
 
 
 class _Tokenizer:
@@ -32,7 +37,7 @@ class _Tokenizer:
 
 
 def test_full_matrix_builds_exact_context_lengths_and_batches() -> None:
-    workloads = build_context_workloads(_Tokenizer(), (1, 8, 64, 256), (32, 256, 768))
+    workloads = build_context_workloads(as_tokenizer(_Tokenizer()), (1, 8, 64, 256), (32, 256, 768))
 
     assert len(workloads) == 12
     assert {(row["batch_size"], row["context_tokens"]) for row in workloads} == {
@@ -60,6 +65,13 @@ def test_full_command_pins_phase_zero_protocol() -> None:
     assert iters == 10
 
 
+class _UnusedEngine:
+    def generate(
+        self, prompts: list[dict[str, list[int]]], params: object, *, use_tqdm: bool
+    ) -> list[VllmRequestOutput]:
+        raise AssertionError("the closure under test is never run")
+
+
 def test_vllm_ignore_eos_does_not_keep_eos_as_custom_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -71,7 +83,7 @@ def test_vllm_ignore_eos_does_not_keep_eos_as_custom_stop(monkeypatch: pytest.Mo
     requests = [EsmeBenchRequest("r0", "prompt", (1, 2, 3))]
 
     vllm_decode_closure(
-        object(),
+        _UnusedEngine(),
         requests,
         max_new_tokens=8,
         eos_token_ids=frozenset({2}),
@@ -154,7 +166,7 @@ def _typed_agreement(*, exact: int = 0, tie: int = 0, failed: int = 0) -> EsmeAg
 
 
 def test_failed_reference_gate_suppresses_throughput() -> None:
-    worker_row = {
+    worker_row: WorkerRow = {
         "batch_size": 1,
         "context_tokens": 32,
         "per_iter_seconds": [1.0, 2.0, 3.0],
@@ -181,7 +193,7 @@ def test_failed_reference_gate_suppresses_throughput() -> None:
     assert passed["raw_tokens_per_second"] == 3.0
     assert passed["headline_eligible"] is True
     assert passed["tokens_per_second"] == 3.0
-    assert passed["agreement"]["exact"] == 1
+    assert dig(passed, "agreement", "exact") == 1
     assert failed["reference_status"] == "failed"
     assert failed["raw_tokens_per_second"] == 3.0
     assert failed["headline_eligible"] is False
@@ -189,8 +201,8 @@ def test_failed_reference_gate_suppresses_throughput() -> None:
 
 
 def test_serialized_fp32_gate_accepts_only_recorded_near_max_tokens() -> None:
-    request = {"request_id": "r0", "prompt": "prompt", "prompt_ids": [3, 4]}
-    oracle_case = {
+    request: RequestSpec = {"request_id": "r0", "prompt": "prompt", "prompt_ids": [3, 4]}
+    oracle_case: OracleCase = {
         "context_tokens": 2,
         "output_tokens": [7, 2],
         "tie_tolerance": 0.1,

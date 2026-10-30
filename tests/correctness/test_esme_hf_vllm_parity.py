@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from llm_infer.model.decode import greedy_decode
+from llm_infer.model.interface import ModelRuntime
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import load_model_runtime
 
@@ -52,6 +53,14 @@ def _bundle_path() -> Path:
     if bundle is None:
         pytest.skip("set ESME_BUNDLE_PATH to run the Esme HF/vLLM external-baseline parity check")
     return Path(bundle)
+
+
+def _chat_ids(runtime: ModelRuntime, content: str) -> list[int]:
+    ids = runtime.tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
+    )
+    assert isinstance(ids, list)
+    return [int(token) for token in ids]  # pyright: ignore[reportUnknownVariableType]
 
 
 def _convert(bundle: Path, out: Path) -> Path:
@@ -124,15 +133,13 @@ def test_hf_greedy_chat_matches_bundle_oracle(hf_checkpoint: Path) -> None:
     ).eval()
 
     for content in CHAT_PROMPTS:
-        prompt_ids = runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
-        )
+        prompt_ids = _chat_ids(runtime, content)
         reference = greedy_decode(
-            runtime.model, list(prompt_ids), max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=set(eos)
+            runtime.model, prompt_ids, max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=set(eos)
         )
         input_ids = torch.tensor([prompt_ids])
         with torch.no_grad():
-            generated = hf.generate(
+            generated = hf.generate(  # pyright: ignore[reportAttributeAccessIssue]  # transformers typing gap
                 input_ids,
                 attention_mask=torch.ones_like(input_ids),
                 max_new_tokens=MAX_NEW_TOKENS,
@@ -201,9 +208,7 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
 
     runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
     eos = runtime.eos_token_ids
-    prompt = runtime.tokenizer.apply_chat_template(
-        [{"role": "user", "content": CHAT_PROMPTS[0]}], add_generation_prompt=True, tokenize=True
-    )
+    prompt = _chat_ids(runtime, CHAT_PROMPTS[0])
     requests = [EsmeBenchRequest(request_id="r0", prompt=CHAT_PROMPTS[0], prompt_ids=tuple(prompt))]
     reference = reference_outputs(runtime.model, requests, max_new_tokens=8, eos_token_ids=eos)
 
@@ -216,6 +221,7 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
     # NON-tie -> not agreement, so the system would report no tok/s. This proves the gate still
     # rejects real divergences; it is not a blanket pass.
     gold = reference["r0"]
+    assert isinstance(runtime.model, PretrainBundleModel)
     wrong = [(gold[0] + 1) % runtime.model.config.vocab_size, *gold[1:]]
     bad = tie_tolerant_agreement(runtime.model, requests, {"r0": wrong}, reference, eos)
     assert bad.nontie == 1
@@ -228,16 +234,11 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
 def test_vllm_greedy_matches_bundle_oracle(hf_checkpoint: Path) -> None:
     """vLLM greedy ids on the converted checkpoint match the oracle, token-for-token (GPU only)."""
     pytest.importorskip("vllm", reason="vLLM not installed (GPU-deferred path)")
-    from vllm import LLM, SamplingParams
+    from vllm import LLM, SamplingParams  # pyright: ignore[reportMissingImports]  # GPU-only package
 
     runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
     eos = runtime.eos_token_ids
-    prompts = [
-        runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
-        )
-        for content in CHAT_PROMPTS
-    ]
+    prompts = [_chat_ids(runtime, content) for content in CHAT_PROMPTS]
     reference = [
         greedy_decode(
             runtime.model, list(ids), max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=set(eos)

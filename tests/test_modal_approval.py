@@ -63,6 +63,7 @@ def test_gpu_function_calls_forward_approval() -> None:
     for name, tree in modules():
         gpu_names = {fn.name for fn in modal_functions(tree, "gpu")}
         for call in modal_calls(tree):
+            assert isinstance(call.func, ast.Attribute)
             target = ast.unparse(call.func.value)
             forwarded = any(
                 kw.arg == "approved" and ast.unparse(kw.value) == "True" for kw in call.keywords

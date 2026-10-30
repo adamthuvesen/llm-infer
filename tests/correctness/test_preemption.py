@@ -63,7 +63,7 @@ def test_preemption_actually_fires_under_a_tight_budget() -> None:
     # Each preemption frees the victim's KV clearly and names the pressure reason.
     for event in preemptions:
         assert event.preempt_reason == "kv_pressure"
-        assert event.block_count >= 1
+        assert event.block_count is not None and event.block_count >= 1
         assert event.pool_used is not None and event.pool_free is not None
 
 

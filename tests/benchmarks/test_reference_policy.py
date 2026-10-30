@@ -27,7 +27,7 @@ def _agreement(
     review_required: int = 0,
     failed: int = 0,
 ) -> EsmeAgreement:
-    review_rows = [
+    review_rows: list[dict[str, object]] = [
         {
             "request": "r0",
             "step": 0,
@@ -179,18 +179,22 @@ def test_evidence_derives_claims_and_rejects_independent_policy_fields() -> None
     assert evidence.headline_eligible is False
     assert evidence.tokens_per_second is None
     with pytest.raises(TypeError, match="headline_eligible"):
-        SystemEvidence(agreement=_agreement(), raw_tokens_per_second=20.0, headline_eligible=True)
+        SystemEvidence(
+            agreement=_agreement(),
+            raw_tokens_per_second=20.0,
+            headline_eligible=True,  # pyright: ignore[reportCallIssue]  # derived field on purpose
+        )
     with pytest.raises(FrozenInstanceError):
-        evidence.agreement.exact = 1
+        evidence.agreement.exact = 1  # pyright: ignore[reportAttributeAccessIssue]  # frozen on purpose
     with pytest.raises(FrozenInstanceError):
-        evidence.raw_tokens_per_second = 100.0
+        evidence.raw_tokens_per_second = 100.0  # pyright: ignore[reportAttributeAccessIssue]  # frozen on purpose
     with pytest.raises(FrozenInstanceError):
-        evidence.headline_eligible = True
+        evidence.headline_eligible = True  # pyright: ignore[reportAttributeAccessIssue]  # frozen on purpose
 
 
 def test_agreement_diagnostics_cannot_change_stored_evidence() -> None:
     nested = {"tokens": [1, 2]}
-    samples = [{"detail": nested}]
+    samples: list[dict[str, object]] = [{"detail": nested}]
     agreement = EsmeAgreement(0, 1, 0, 1, samples, [], numerical_evidence=samples)
     evidence = SystemEvidence(agreement, 20.0)
     before = agreement.as_dict()
@@ -198,7 +202,9 @@ def test_agreement_diagnostics_cannot_change_stored_evidence() -> None:
     samples.clear()
     agreement.ties_sample[0]["detail"] = "changed"
     serialized = agreement.as_dict()
-    serialized["numerical_evidence"].clear()
+    numerical_evidence = serialized["numerical_evidence"]
+    assert isinstance(numerical_evidence, list)
+    numerical_evidence.clear()
     assert agreement.as_dict() == before
     assert evidence.reference_status == "accepted_numerical"
     assert evidence.tokens_per_second == 20.0

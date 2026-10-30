@@ -10,6 +10,7 @@ import torch
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
+from llm_infer.kv_cache import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVPagePlan, PagedKVCache
 from llm_infer.model.interface import CausalLMBackend
 from llm_infer.model.layers import expand_grouped_kv
@@ -114,7 +115,7 @@ def bundle(tmp_path: Path) -> Path:
     return write_tiny_pretrain_bundle(tmp_path)
 
 
-def _prefill(model, cache: PagedKVCache) -> tuple[list, torch.Tensor]:
+def _prefill(model, cache: PagedKVCache) -> tuple[list[BlockTable], torch.Tensor]:
     tables, tokens = [], []
     for prompt in _PROMPTS:
         table = cache.new_request()

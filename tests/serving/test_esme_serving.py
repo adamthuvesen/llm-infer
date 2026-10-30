@@ -26,6 +26,7 @@ import pytest
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
+from llm_infer.model.interface import CausalLMBackend
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serve import build_app_from_runtime
 from llm_infer.serving.engine import InferenceEngine
@@ -273,9 +274,9 @@ def test_build_app_passes_decode_window_size_to_engine(
     captured: dict[str, object] = {}
     real_engine = serve_module.InferenceEngine
 
-    def capturing_engine(*args: object, **kwargs: object) -> InferenceEngine:
+    def capturing_engine(model: CausalLMBackend, **kwargs: object) -> InferenceEngine:
         captured.update(kwargs)
-        return real_engine(*args, **kwargs)
+        return real_engine(model, **kwargs)  # pyright: ignore[reportArgumentType]  # kwargs pass through untyped
 
     monkeypatch.setattr(serve_module, "InferenceEngine", capturing_engine)
     build_app_from_runtime(runtime, block_size=8, num_blocks=32, decode_window_size=3)

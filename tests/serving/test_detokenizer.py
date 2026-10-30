@@ -9,6 +9,7 @@ finish right after a split is flushed by ``finalize``.
 from __future__ import annotations
 
 from llm_infer.serving.server.detokenizer import IncrementalDetokenizer
+from tests.support.fake_tokenizer import as_tokenizer
 
 
 class ByteSplitTokenizer:
@@ -25,7 +26,7 @@ class ByteSplitTokenizer:
 
 def test_multibyte_character_is_not_emitted_until_complete() -> None:
     # "é" is U+00E9 -> two UTF-8 bytes 0xC3 0xA9; feeding them one at a time must not leak U+FFFD.
-    detok = IncrementalDetokenizer(ByteSplitTokenizer())
+    detok = IncrementalDetokenizer(as_tokenizer(ByteSplitTokenizer()))
     first = detok.feed(0xC3)
     assert first == "", "a half-formed multibyte character must be buffered, not emitted"
     assert "�" not in first
@@ -35,7 +36,7 @@ def test_multibyte_character_is_not_emitted_until_complete() -> None:
 
 def test_emoji_split_across_four_tokens() -> None:
     # "😀" is U+1F600 -> four UTF-8 bytes; only the final byte completes the character.
-    detok = IncrementalDetokenizer(ByteSplitTokenizer())
+    detok = IncrementalDetokenizer(as_tokenizer(ByteSplitTokenizer()))
     emoji_bytes = "😀".encode()
     deltas = [detok.feed(b) for b in emoji_bytes]
     assert deltas[:-1] == ["", "", ""]
@@ -44,7 +45,7 @@ def test_emoji_split_across_four_tokens() -> None:
 
 
 def test_deltas_reassemble_to_full_text() -> None:
-    detok = IncrementalDetokenizer(ByteSplitTokenizer())
+    detok = IncrementalDetokenizer(as_tokenizer(ByteSplitTokenizer()))
     text = "café — déjà vu 🚀"
     deltas = [detok.feed(b) for b in text.encode()]
     assert "".join(deltas) == text
@@ -52,7 +53,7 @@ def test_deltas_reassemble_to_full_text() -> None:
 
 def test_finalize_flushes_buffered_tail() -> None:
     # If the stream ends mid-character (truncated), finalize releases whatever decoded so far.
-    detok = IncrementalDetokenizer(ByteSplitTokenizer())
+    detok = IncrementalDetokenizer(as_tokenizer(ByteSplitTokenizer()))
     assert detok.feed(ord("a")) == "a"
     assert detok.feed(0xC3) == ""  # dangling lead byte of a 2-byte char, held back
     tail = detok.finalize()

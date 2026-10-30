@@ -8,7 +8,7 @@ import torch
 
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.serving import InferenceEngine, Request
-from llm_infer.tracing import TRACE_SCHEMA_VERSION, TraceRecorder
+from llm_infer.tracing import TRACE_SCHEMA_VERSION, TraceEvent, TraceRecorder
 from tests.support.fake_causal_lm import FakeCausalLMBase, as_backend
 
 
@@ -179,7 +179,7 @@ def test_trace_recorder_captures_real_engine_events() -> None:
     assert first_json_event["event"] == "request_admitted"
 
 
-def _assert_block_lifecycle_is_clear(events: tuple, pool_size: int) -> None:
+def _assert_block_lifecycle_is_clear(events: tuple[TraceEvent, ...], pool_size: int) -> None:
     """Every freed block was live, pool counts stay valid, and nothing frees before alloc."""
     live: set[int] = set()
     for event in events:

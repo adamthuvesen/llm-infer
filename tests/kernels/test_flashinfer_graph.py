@@ -14,18 +14,60 @@ from llm_infer.kernels.flashinfer_graph import (
 
 
 class _FakeWrapper:
-    def __init__(self, *args, **kwargs) -> None:
-        self.init_args = args
-        self.init_kwargs = kwargs
-        self.plan_args = None
-        self.plan_kwargs = None
+    def __init__(
+        self,
+        workspace: torch.Tensor,
+        kv_layout: str,
+        *,
+        use_tensor_cores: bool,
+        backend: str,
+        use_cuda_graph: bool = False,
+        paged_kv_indptr_buffer: torch.Tensor | None = None,
+        paged_kv_indices_buffer: torch.Tensor | None = None,
+        paged_kv_last_page_len_buffer: torch.Tensor | None = None,
+    ) -> None:
+        self.init_args = (workspace, kv_layout)
+        self.init_kwargs: dict[str, object] = {
+            "use_tensor_cores": use_tensor_cores,
+            "backend": backend,
+            "use_cuda_graph": use_cuda_graph,
+            "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
+            "paged_kv_indices_buffer": paged_kv_indices_buffer,
+            "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+        }
+        self.plan_args: tuple[object, ...] | None = None
 
-    def plan(self, *args, **kwargs) -> None:
-        self.plan_args = args
-        self.plan_kwargs = kwargs
+    def plan(
+        self,
+        indptr: torch.Tensor,
+        indices: torch.Tensor,
+        last_page_len: torch.Tensor,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        *,
+        pos_encoding_mode: str,
+        q_data_type: torch.dtype,
+        kv_data_type: torch.dtype,
+        o_data_type: torch.dtype,
+        sm_scale: float,
+    ) -> None:
+        self.plan_args = (
+            indptr,
+            indices,
+            last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_size,
+        )
 
-    def run(self, query, paged_kv, *, out):
+    def run(
+        self, query: torch.Tensor, paged_kv: torch.Tensor, *, out: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
         del paged_kv
+        assert out is not None
         out.copy_(query + 1)
         return out
 

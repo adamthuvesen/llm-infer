@@ -43,7 +43,7 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "RUF", "TID251"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "RUF", "PGH003", "TID251"]
 ignore = ["E501"]
 
 # The web UI strings and the tests that match them contain the real multiplication sign.

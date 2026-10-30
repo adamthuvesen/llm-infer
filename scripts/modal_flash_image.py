@@ -30,6 +30,9 @@ import modal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
+# Images mount the whole repo, so .python-version is present in the container too.
+LOCAL_PYTHON = (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip()
+_WHEEL_TAG = "cp" + LOCAL_PYTHON.replace(".", "")
 # CUDA devel is intentional: FlashInfer's paged decode wrapper may JIT through nvcc at startup.
 CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu22.04"
 FLASHINFER_VERSION = "0.6.14"
@@ -41,7 +44,7 @@ TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 FLASH_ATTN_VERSION = "2.8.3.post1"
 FLASH_ATTN_WHEEL_URL = (
     "https://github.com/Dao-AILab/flash-attention/releases/download/"
-    "v{ver}/flash_attn-{ver}+cu12torch2.8cxx11abi{abi}-cp313-cp313-linux_x86_64.whl"
+    "v{ver}/flash_attn-{ver}+cu12torch2.8cxx11abi{abi}-{tag}-{tag}-linux_x86_64.whl"
 )
 
 IGNORE = [
@@ -62,7 +65,9 @@ IGNORE = [
 # install stay in ONE run-string so the shell var ``$ABI`` persists. The URL's ``{abi}`` is left as
 # the literal shell ``${{ABI}}`` (doubled braces escape the f-string), resolved by the shell from
 # torch's real ``compiled_with_cxx11_abi()``, never guessed.
-_FLASH_WHEEL_URL_SHELL = FLASH_ATTN_WHEEL_URL.format(ver=FLASH_ATTN_VERSION, abi="${ABI}")
+_FLASH_WHEEL_URL_SHELL = FLASH_ATTN_WHEEL_URL.format(
+    ver=FLASH_ATTN_VERSION, abi="${ABI}", tag=_WHEEL_TAG
+)
 _DETECT_ABI = (
     "python -c \"import torch; print('TRUE' if torch.compiled_with_cxx11_abi() else 'FALSE')\""
 )
@@ -95,7 +100,7 @@ def build_flash_image() -> modal.Image:
 
 def _build_flash_base(*, cuda_image: str = CUDA_IMAGE) -> modal.Image:
     return (
-        modal.Image.from_registry(cuda_image, add_python="3.13")
+        modal.Image.from_registry(cuda_image, add_python=LOCAL_PYTHON)
         .apt_install("git", "build-essential")
         .pip_install(f"torch=={TORCH_VERSION}", extra_options=f"--index-url {TORCH_CUDA_INDEX}")
         .run_commands(_INSTALL_FLASH_ATTN, _GUARD_FLASH_ATTN)

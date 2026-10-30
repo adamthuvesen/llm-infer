@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from llm_infer.validation.bf16_error import concat, position_errors, summarize
+from tests.support.json_result import dig_rows
 
 
 def _rows(*tops: tuple[float, float]) -> torch.Tensor:
@@ -43,7 +44,9 @@ def test_summary_bins_flips_by_fp32_margin_and_counts_review_rows() -> None:
     assert summary["flips_beyond_tolerance"] == 1
     assert summary["max_flip_gap"] == pytest.approx(0.2)
     assert summary["competitor_shrink_above_tolerance"] == 1
-    flips_by_bin = {row["fp32_margin_low"]: row["flips"] for row in summary["by_fp32_margin"]}
+    flips_by_bin = {
+        row["fp32_margin_low"]: row["flips"] for row in dig_rows(summary, "by_fp32_margin")
+    }
     assert flips_by_bin[0.03] == 1 and flips_by_bin[0.1] == 1 and flips_by_bin[1.0] == 0
 
 

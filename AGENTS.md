@@ -44,7 +44,7 @@ run `make architecture-check` and `make check`.
 | Rule | Enforced by | Added |
 | --- | --- | --- |
 | Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` | 2026-11-04 |
-| Package, scripts, tests, and the verify helper typecheck; the baseline only shrinks | `pyproject.toml::tool.basedpyright`, `scripts/check_basedpyright_ratchet.py::main`, `Makefile::typecheck` | 2026-11-04 |
+| Package, scripts, tests, and the verify helper typecheck; basedpyright reports zero errors with no baseline | `pyproject.toml::tool.basedpyright.typeCheckingMode`, `Makefile::typecheck` | 2026-11-04 |
 | No `typing.Any`: name the real type | `pyproject.toml::tool.ruff.lint.flake8-tidy-imports.banned-api`, `Makefile::lint` | 2026-11-06 |
 | Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` | 2026-11-04 |
 | A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` | 2026-11-04 |

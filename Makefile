@@ -22,7 +22,6 @@ architecture-check:  ## Check dependency direction and policy isolation
 
 typecheck:  ## Check package, scripts, tests, and the verify helper with basedpyright strict
 	uv run basedpyright
-	uv run python scripts/check_basedpyright_ratchet.py
 
 test:  ## Run unit tests
 	uv run python -m pytest

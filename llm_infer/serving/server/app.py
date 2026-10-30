@@ -432,7 +432,7 @@ def _stop_sequences(stop: str | list[str] | None) -> list[str]:
             400, f"'stop' accepts at most {_MAX_STOP_SEQUENCES} sequences; got {len(sequences)}"
         )
     for sequence in sequences:
-        if not isinstance(sequence, str):
+        if not isinstance(sequence, str):  # pyright: ignore[reportUnnecessaryIsInstance]  # request JSON may hold non-strings
             raise HTTPException(400, "'stop' sequences must be strings")
         if len(sequence) > _MAX_STOP_LENGTH:
             raise HTTPException(

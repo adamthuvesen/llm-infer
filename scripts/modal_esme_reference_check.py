@@ -32,6 +32,7 @@ from scripts.modal_esme_bundle import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
+LOCAL_PYTHON = (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip()
 CUDA_IMAGE = "nvidia/cuda:13.0.3-devel-ubuntu22.04"
 
 app = modal.App("llm-infer-esme-reference-check")
@@ -48,7 +49,7 @@ _IGNORE = [
 ]
 
 image = (
-    modal.Image.from_registry(CUDA_IMAGE, add_python="3.13")
+    modal.Image.from_registry(CUDA_IMAGE, add_python=LOCAL_PYTHON)
     # Same torch as pyproject.toml and the flash image; --no-deps below cannot correct it later.
     .pip_install("torch==2.8.0", "transformers>=4.43", "numpy>=1.26")
     .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
