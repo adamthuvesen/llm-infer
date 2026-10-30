@@ -99,7 +99,7 @@ def test_static_buffers_hold_step_inputs_and_advance_positions(runtime) -> None:
     assert plan is not None
 
     logits = model.decode_window_step(cache, plan, tokens)
-    state = runner._buckets[4]
+    state = runner.buckets[4]
     assert logits.shape == (3, model.config.vocab_size)
     assert logits.data_ptr() == state.logits.data_ptr()  # a static-buffer view, not a copy
     assert state.tokens[:3].tolist() == tokens.tolist()

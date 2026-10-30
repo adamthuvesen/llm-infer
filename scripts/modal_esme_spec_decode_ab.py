@@ -125,7 +125,7 @@ def _workload_row(
     }
     verify = {"steps": 0, "tokens": 0}
     speculative_engine = engines["speculative"]
-    original_verify = speculative_engine._decode_speculative
+    original_verify = speculative_engine._decode_speculative  # pyright: ignore[reportPrivateUsage] -- A/B script wraps the engine verify step
 
     def counted_verify(request: EngineRequest, draft: list[int], result: StepResult) -> None:
         before = len(request.generated)

@@ -11,6 +11,8 @@ import torch
 
 from llm_infer.model.interface import BackendCapabilities
 from llm_infer.serve import (
+    EngineDefaults,
+    RuntimeDefaults,
     describe_run_config,
     resolve_engine_defaults,
     resolve_runtime_defaults,
@@ -21,15 +23,16 @@ _CAPS = BackendCapabilities(
 )
 
 
-def _runtime(**overrides: object) -> object:
-    kwargs: dict = {
-        "device": "auto",
-        "dtype": None,
-        "attention_backend": "auto",
-        "backend": "esme",
-    }
-    kwargs.update(overrides)
-    return resolve_runtime_defaults(**kwargs)
+def _runtime(
+    *,
+    device: str = "auto",
+    dtype: torch.dtype | None = None,
+    attention_backend: str = "auto",
+    backend: str = "esme",
+) -> RuntimeDefaults:
+    return resolve_runtime_defaults(
+        device=device, dtype=dtype, attention_backend=attention_backend, backend=backend
+    )
 
 
 def test_runtime_auto_is_cpu_fp16_sdpa_for_local_bundles() -> None:
@@ -66,16 +69,21 @@ def test_runtime_non_bundle_backend_keeps_auto_attention() -> None:
     assert _runtime(backend="qwen").attention_backend == "auto"
 
 
-def _engine(**overrides: object) -> object:
-    kwargs: dict = {
-        "prompt_lookup": None,
-        "prefix_cache": None,
-        "device": "cpu",
-        "backend": "esme",
-        "capabilities": _CAPS,
-    }
-    kwargs.update(overrides)
-    return resolve_engine_defaults(**kwargs)
+def _engine(
+    *,
+    prompt_lookup: bool | None = None,
+    prefix_cache: bool | None = None,
+    device: str = "cpu",
+    backend: str = "esme",
+    capabilities: BackendCapabilities = _CAPS,
+) -> EngineDefaults:
+    return resolve_engine_defaults(
+        prompt_lookup=prompt_lookup,
+        prefix_cache=prefix_cache,
+        device=device,
+        backend=backend,
+        capabilities=capabilities,
+    )
 
 
 def test_engine_auto_is_on_locally_off_on_cuda() -> None:

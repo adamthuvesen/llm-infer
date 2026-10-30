@@ -11,6 +11,7 @@ from scripts.modal_esme_prefill_ab import (
     split_itls_by_burst_step,
     summarize_run,
 )
+from tests.support.json_result import dig
 
 
 def test_percentile_interpolates_between_ranks() -> None:
@@ -103,11 +104,15 @@ def test_aggregate_medians_and_candidate_ratios() -> None:
 
     aggregate = aggregate_mixed_load(runs_by_mode)
 
-    assert aggregate["medians"]["baseline"]["itl_spanning_burst_ms"] == pytest.approx(11.0)
-    assert aggregate["medians"]["candidate"]["itl_spanning_burst_ms"] == pytest.approx(21.0)
+    assert dig(aggregate, "medians", "baseline", "itl_spanning_burst_ms") == pytest.approx(11.0)
+    assert dig(aggregate, "medians", "candidate", "itl_spanning_burst_ms") == pytest.approx(21.0)
     # candidate spanning ITL is worse: 21 / 11.
-    assert aggregate["candidate_vs_baseline"]["spanning_itl_ratio"] == pytest.approx(21.0 / 11.0)
-    assert aggregate["candidate_vs_baseline"]["burst_ttft_p50_ratio"] == pytest.approx(63.0 / 42.0)
+    assert dig(aggregate, "candidate_vs_baseline", "spanning_itl_ratio") == pytest.approx(
+        21.0 / 11.0
+    )
+    assert dig(aggregate, "candidate_vs_baseline", "burst_ttft_p50_ratio") == pytest.approx(
+        63.0 / 42.0
+    )
 
 
 def test_aggregate_rejects_missing_mode() -> None:

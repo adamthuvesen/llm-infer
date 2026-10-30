@@ -10,7 +10,7 @@ import torch
 from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
-from tests.support.fake_causal_lm import FakeCausalLMBase
+from tests.support.fake_causal_lm import FakeCausalLMBase, as_backend
 
 FIXTURE = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
 EOS = frozenset(FIXTURE["decoding"]["eos_token_ids"])
@@ -72,7 +72,7 @@ class CountingModel(FakeCausalLMBase):
 def _prefix_cache_run(*, prefix_group_id: str | None) -> tuple[dict[str, list[int]], int]:
     model = CountingModel()
     engine = InferenceEngine(
-        model,
+        as_backend(model),
         block_size=4,
         num_blocks=32,
         default_sampling=SamplingParams(temperature=1.0, top_p=1.0, seed=123),

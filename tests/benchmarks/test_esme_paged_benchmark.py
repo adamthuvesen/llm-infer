@@ -12,6 +12,7 @@ from llm_infer.benchmarks.esme_paged import (
     single_request_prompt_coverage,
 )
 from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
+from tests.support.fake_causal_lm import as_backend
 
 
 def _requests() -> list[EsmeBenchRequest]:
@@ -62,7 +63,7 @@ def test_single_request_coverage_includes_every_prompt_at_every_context() -> Non
 
 
 class _OracleMustNotBeUsed:
-    def logits(self, _token_ids: list[int]) -> torch.Tensor:
+    def logits(self, token_ids: list[int]) -> torch.Tensor:
         raise AssertionError("exact/missing-output comparison should not consult logits")
 
 
@@ -141,7 +142,7 @@ def test_malformed_output_sets_keep_failed_reference_evidence_and_raw_timing(
         assert [sample["request"] for sample in agreement.divergences_sample] == missing
 
     row = qualified_system_row(
-        _OracleMustNotBeUsed(), requests, outputs, reference, frozenset(), [1.0, 3.0]
+        as_backend(_OracleMustNotBeUsed()), requests, outputs, reference, frozenset(), [1.0, 3.0]
     )
     assert row["agreement"] == agreement.as_dict()
     assert row["reference_status"] == "failed"

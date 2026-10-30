@@ -12,6 +12,7 @@ from llm_infer.benchmarks.reference_policy import EsmeAgreement
 from scripts.modal_esme_vllm_baseline import (
     ENGINE_SYSTEMS,
     VLLM_PYTHON,
+    ProcessIdentity,
     _command_config,
     _parse_worker_args,
     build_context_workloads,
@@ -117,7 +118,7 @@ def test_worker_parser_accepts_every_launched_system(
 
 
 def test_same_host_validation_requires_distinct_pid_and_matching_gpu() -> None:
-    parent = {"pid": 10, "hostname": "worker-a", "gpu_uuid": "GPU-123"}
+    parent: ProcessIdentity = {"pid": 10, "hostname": "worker-a", "gpu_uuid": "GPU-123"}
     validate_child_identity(
         parent,
         {"pid": 11, "hostname": "worker-a", "gpu_uuid": "GPU-123"},
@@ -125,7 +126,7 @@ def test_same_host_validation_requires_distinct_pid_and_matching_gpu() -> None:
     )
 
     with pytest.raises(AssertionError, match="child process"):
-        validate_child_identity(parent, dict(parent), "vllm")
+        validate_child_identity(parent, parent.copy(), "vllm")
     with pytest.raises(AssertionError, match="reserved host"):
         validate_child_identity(
             parent,

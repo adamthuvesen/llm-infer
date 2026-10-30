@@ -21,6 +21,7 @@ from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
 from scripts.loadgen import _percentile, format_summary, run_load, summarize
 from tests.serving.test_api import EOS_ID, TinyTokenizer
+from tests.support.json_result import dig_number
 from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 
@@ -73,14 +74,14 @@ def test_loadgen_streaming_reports_nonzero_throughput() -> None:
     # Streaming usage carries the true completion-token count.
     assert summary["total_output"] == 36
     assert summary["output_unit"] == "tokens"
-    assert summary["throughput_per_s"] > 0
-    assert summary["per_request_per_s_mean"] > 0
-    assert summary["latency_p50"] > 0
+    assert dig_number(summary, "throughput_per_s") > 0
+    assert dig_number(summary, "per_request_per_s_mean") > 0
+    assert dig_number(summary, "latency_p50") > 0
     table = format_summary(summary, concurrency=2, stream=True)
     assert "throughput" in table
     assert "tok/s" in table
-    assert summary["itl_p50"] >= 0
-    assert summary["itl_p95"] >= 0
+    assert dig_number(summary, "itl_p50") >= 0
+    assert dig_number(summary, "itl_p95") >= 0
 
 
 def test_loadgen_rejects_nonpositive_concurrency() -> None:
@@ -105,7 +106,7 @@ def test_loadgen_blocking_reports_nonzero_throughput() -> None:
     assert summary["errors"] == 0
     # Blocking reads true completion tokens from usage; the table labels them tok/s.
     assert summary["total_output"] == 36
-    assert summary["throughput_per_s"] > 0
+    assert dig_number(summary, "throughput_per_s") > 0
     assert summary["output_unit"] == "tokens"
     assert summary["itl_p50"] is None
     assert summary["itl_p95"] is None
@@ -121,12 +122,12 @@ def test_percentile_uses_nearest_rank() -> None:
 
 
 def test_summary_reads_run_local_queue_percentiles_from_server_histogram() -> None:
-    before = {
+    before: dict[str, float] = {
         "llm_infer_queue_time_seconds_count": 2,
         'llm_infer_queue_time_seconds_bucket{le="0.005"}': 1,
         'llm_infer_queue_time_seconds_bucket{le="0.01"}': 2,
     }
-    after = {
+    after: dict[str, float] = {
         "llm_infer_queue_time_seconds_count": 6,
         'llm_infer_queue_time_seconds_bucket{le="0.005"}': 2,
         'llm_infer_queue_time_seconds_bucket{le="0.01"}': 5,
@@ -171,4 +172,4 @@ def test_loadgen_drives_esme_server(tmp_path: Path) -> None:
     assert summary["ok"] == 6
     assert summary["errors"] == 0
     assert summary["total_output"] == 36
-    assert summary["throughput_per_s"] > 0
+    assert dig_number(summary, "throughput_per_s") > 0

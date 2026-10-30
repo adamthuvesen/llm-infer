@@ -22,6 +22,7 @@ from scripts.esme_serving_eval import (
     run_engine_workload,
     run_network_http_workload,
 )
+from tests.support.json_result import dig, dig_number, dig_rows
 
 
 def _runtime(tmp_path: Path):
@@ -45,18 +46,18 @@ def test_tight_kv_workload_reports_reference_gated_preemption(tmp_path: Path) ->
 
     metrics = result["metrics"]
     assert result["surface"] == "engine"
-    assert result["reference"]["status"] == "pass"
+    assert dig(result, "reference", "status") == "pass"
     assert result["policy_version"] == 2
     assert result["reference_status"] == "exact"
     assert result["parity_status"] == "not_applicable"
     assert result["headline_eligible"] is True
-    assert metrics["requests_completed"] == 3
-    assert metrics["requests_failed"] == 0
-    assert metrics["preemption_count"] > 0
-    assert metrics["throughput_tokens_per_s"] is not None
-    assert metrics["raw_throughput_tokens_per_s"] is not None
-    assert metrics["throughput_status"] == "reported"
-    assert metrics["queue_time_p50_s"] is not None
+    assert dig(metrics, "requests_completed") == 3
+    assert dig(metrics, "requests_failed") == 0
+    assert dig_number(metrics, "preemption_count") > 0
+    assert dig(metrics, "throughput_tokens_per_s") is not None
+    assert dig(metrics, "raw_throughput_tokens_per_s") is not None
+    assert dig(metrics, "throughput_status") == "reported"
+    assert dig(metrics, "queue_time_p50_s") is not None
 
 
 def test_shared_prefix_workload_engages_prefix_cache(tmp_path: Path) -> None:
@@ -66,11 +67,11 @@ def test_shared_prefix_workload_engages_prefix_cache(tmp_path: Path) -> None:
         run_engine_workload(runtime, _engine_workload("shared-prefix-greedy"), device="cpu")
     )
 
-    assert result["reference"]["status"] == "pass"
-    assert result["metrics"]["throughput_status"] == "reported"
+    assert dig(result, "reference", "status") == "pass"
+    assert dig(result, "metrics", "throughput_status") == "reported"
     # One shared prompt group should prefill once, then fork the cached block table to siblings.
     # If prefix_group_id is dropped before Request construction, this count becomes 4.
-    assert result["trace"]["by_event"]["prefill_chunk_started"] == 1
+    assert dig(result, "trace", "by_event", "prefill_chunk_started") == 1
 
 
 def test_asgi_streaming_workload_records_http_and_reference_metrics(tmp_path: Path) -> None:
@@ -83,26 +84,26 @@ def test_asgi_streaming_workload_records_http_and_reference_metrics(tmp_path: Pa
     metrics = result["metrics"]
     trace = result["trace"]
     assert result["surface"] == "asgi-http"
-    assert result["reference"]["status"] == "pass"
-    assert metrics["requests_completed"] == 3
-    assert metrics["requests_failed"] == 0
-    assert metrics["output_tokens"] == 18
-    assert metrics["public_stream_tokens"] == 18
-    assert metrics["public_requests_admitted"] == 3
-    assert metrics["public_queue_time_count"] == 3
-    assert metrics["public_queue_time_avg_s"] is not None
-    assert metrics["throughput_tokens_per_s"] is not None
-    assert metrics["ttft_p50_s"] is not None
-    assert metrics["ttft_p95_s"] is not None
-    assert metrics["itl_p50_s"] is not None
-    assert metrics["itl_p95_s"] is not None
-    assert metrics["queue_time_p50_s"] is not None
-    assert metrics["queue_time_p95_s"] is not None
-    assert result["timing_scope"]["engine_build_s"] >= 0
-    assert result["timing_scope"]["server_start_s"] >= 0
-    assert result["timing_scope"]["steady_state_wall_s"] == result["wall_s"]
-    assert trace["available"] is True
-    assert trace["by_event"]["decode_step"] >= 3
+    assert dig(result, "reference", "status") == "pass"
+    assert dig(metrics, "requests_completed") == 3
+    assert dig(metrics, "requests_failed") == 0
+    assert dig(metrics, "output_tokens") == 18
+    assert dig(metrics, "public_stream_tokens") == 18
+    assert dig(metrics, "public_requests_admitted") == 3
+    assert dig(metrics, "public_queue_time_count") == 3
+    assert dig(metrics, "public_queue_time_avg_s") is not None
+    assert dig(metrics, "throughput_tokens_per_s") is not None
+    assert dig(metrics, "ttft_p50_s") is not None
+    assert dig(metrics, "ttft_p95_s") is not None
+    assert dig(metrics, "itl_p50_s") is not None
+    assert dig(metrics, "itl_p95_s") is not None
+    assert dig(metrics, "queue_time_p50_s") is not None
+    assert dig(metrics, "queue_time_p95_s") is not None
+    assert dig_number(result, "timing_scope", "engine_build_s") >= 0
+    assert dig_number(result, "timing_scope", "server_start_s") >= 0
+    assert dig(result, "timing_scope", "steady_state_wall_s") == result["wall_s"]
+    assert dig(trace, "available") is True
+    assert dig_number(trace, "by_event", "decode_step") >= 3
 
 
 def test_network_streaming_workload_uses_uvicorn_and_keeps_reference_gate(
@@ -116,16 +117,18 @@ def test_network_streaming_workload_uses_uvicorn_and_keeps_reference_gate(
     )
 
     assert result["surface"] == "network-http"
-    assert result["reference"]["status"] == "pass"
-    assert result["reference"]["passed"] == 3
-    assert result["metrics"]["requests_total"] == 3
-    assert result["metrics"]["public_requests_admitted"] == 3
-    assert result["metrics"]["throughput_tokens_per_s"] is not None
-    assert result["metrics"]["ttft_p50_s"] < result["metrics"]["latency_p50_s"]
-    assert result["timing_scope"]["transport"] == "localhost Uvicorn TCP"
-    assert result["timing_scope"]["warmup_runs"] == 1
-    assert result["timing_scope"]["measured_runs"] == 3
-    assert result["timing_scope"]["max_connections"] == 1
+    assert dig(result, "reference", "status") == "pass"
+    assert dig(result, "reference", "passed") == 3
+    assert dig(result, "metrics", "requests_total") == 3
+    assert dig(result, "metrics", "public_requests_admitted") == 3
+    assert dig(result, "metrics", "throughput_tokens_per_s") is not None
+    assert dig_number(result, "metrics", "ttft_p50_s") < dig_number(
+        result, "metrics", "latency_p50_s"
+    )
+    assert dig(result, "timing_scope", "transport") == "localhost Uvicorn TCP"
+    assert dig(result, "timing_scope", "warmup_runs") == 1
+    assert dig(result, "timing_scope", "measured_runs") == 3
+    assert dig(result, "timing_scope", "max_connections") == 1
     assert result["trace"] == {
         "available": False,
         "reason": "disabled because tracing changes deferred decode-window behavior",
@@ -141,15 +144,15 @@ def test_sampled_http_workload_is_reference_gated(tmp_path: Path) -> None:
 
     metrics = result["metrics"]
     reference = result["reference"]
-    assert reference["status"] == "pass"
-    assert reference["passed"] == 4
-    assert reference["skipped_sampled"] == 0
-    assert metrics["requests_completed"] == 4
-    assert metrics["requests_failed"] == 0
-    assert metrics["output_tokens"] == 24
-    assert metrics["throughput_tokens_per_s"] is not None
-    assert metrics["throughput_status"] == "reported"
-    assert metrics["observed_output_tokens_per_s"] is not None
+    assert dig(reference, "status") == "pass"
+    assert dig(reference, "passed") == 4
+    assert dig(reference, "skipped_sampled") == 0
+    assert dig(metrics, "requests_completed") == 4
+    assert dig(metrics, "requests_failed") == 0
+    assert dig(metrics, "output_tokens") == 24
+    assert dig(metrics, "throughput_tokens_per_s") is not None
+    assert dig(metrics, "throughput_status") == "reported"
+    assert dig(metrics, "observed_output_tokens_per_s") is not None
 
 
 def test_failed_submission_suppresses_throughput(tmp_path: Path) -> None:
@@ -167,15 +170,15 @@ def test_failed_submission_suppresses_throughput(tmp_path: Path) -> None:
     result = asyncio.run(run_engine_workload(runtime, workload, device="cpu"))
 
     metrics = result["metrics"]
-    assert result["reference"]["status"] == "pass"
-    assert metrics["requests_completed"] == 1
-    assert metrics["requests_failed"] == 1
-    assert metrics["observed_requests"] == 1
-    assert metrics["unobserved_requests"] == 1
-    assert metrics["throughput_tokens_per_s"] is None
-    assert metrics["raw_throughput_tokens_per_s"] is not None
+    assert dig(result, "reference", "status") == "pass"
+    assert dig(metrics, "requests_completed") == 1
+    assert dig(metrics, "requests_failed") == 1
+    assert dig(metrics, "observed_requests") == 1
+    assert dig(metrics, "unobserved_requests") == 1
+    assert dig(metrics, "throughput_tokens_per_s") is None
+    assert dig(metrics, "raw_throughput_tokens_per_s") is not None
     assert result["headline_eligible"] is False
-    assert metrics["throughput_status"] == "not_reported_requests_failed"
+    assert dig(metrics, "throughput_status") == "not_reported_requests_failed"
 
 
 def test_phase0_http_workloads_pair_identical_greedy_and_sampled_shapes() -> None:
@@ -220,10 +223,10 @@ def test_sampled_replay_consistent_but_anchor_divergent_is_accepted(tmp_path: Pa
 
     summary = _reference_summary(runtime, records, block_size=8)
 
-    assert summary["status"] == "pass"
-    assert summary["passed"] == 3
-    assert summary["sampled_replay_divergent_groups"] == 0
-    statuses = {detail.get("status") for detail in summary["details"]}
+    assert dig(summary, "status") == "pass"
+    assert dig(summary, "passed") == 3
+    assert dig(summary, "sampled_replay_divergent_groups") == 0
+    statuses = {detail.get("status") for detail in dig_rows(summary, "details")}
     assert "pass_replay" in statuses
     assert "replay_anchor_note" in statuses
 
@@ -241,12 +244,16 @@ def test_sampled_replay_divergence_sends_row_to_review(tmp_path: Path) -> None:
 
     summary = _reference_summary(runtime, records, block_size=8)
 
-    assert summary["status"] == "review"
-    assert summary["sampled_replay_divergent_groups"] == 1
-    divergent = next(d for d in summary["details"] if d.get("status") == "replay_divergent")
-    assert divergent["distinct_streams"] == 2
+    assert dig(summary, "status") == "review"
+    assert dig(summary, "sampled_replay_divergent_groups") == 1
+    divergent = next(
+        d for d in dig_rows(summary, "details") if d.get("status") == "replay_divergent"
+    )
+    assert dig(divergent, "distinct_streams") == 2
     assert (
-        _speed_status(summary["status"], requests_total=3, requests_completed=3, observed_count=3)
+        _speed_status(
+            dig(summary, "status"), requests_total=3, requests_completed=3, observed_count=3
+        )
         == "not_reported_reference_review_required"
     )
 
@@ -267,7 +274,7 @@ def test_admission_barrier_admits_whole_batch_and_keeps_reference(tmp_path: Path
         )
     )
 
-    assert result["timing_scope"]["admission_barrier"] is True
-    assert result["metrics"]["requests_completed"] == 4
-    assert result["reference"]["status"] == "pass"
-    assert result["reference"]["sampled_replay_divergent_groups"] == 0
+    assert dig(result, "timing_scope", "admission_barrier") is True
+    assert dig(result, "metrics", "requests_completed") == 4
+    assert dig(result, "reference", "status") == "pass"
+    assert dig(result, "reference", "sampled_replay_divergent_groups") == 0

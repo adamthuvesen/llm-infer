@@ -9,7 +9,7 @@ import torch
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.tracing import TRACE_SCHEMA_VERSION, TraceRecorder
-from tests.support.fake_causal_lm import FakeCausalLMBase
+from tests.support.fake_causal_lm import FakeCausalLMBase, as_backend
 
 
 class TraceModel(FakeCausalLMBase):
@@ -73,7 +73,7 @@ class TraceModel(FakeCausalLMBase):
 
 
 def test_tracing_is_off_by_default() -> None:
-    engine = InferenceEngine(TraceModel(), block_size=4, num_blocks=8)
+    engine = InferenceEngine(as_backend(TraceModel()), block_size=4, num_blocks=8)
     engine.add_request(Request("r", [1, 2], 2, frozenset({63})))
 
     assert engine.trace is None
@@ -82,7 +82,7 @@ def test_tracing_is_off_by_default() -> None:
 
 
 def test_run_returns_completed_outputs_without_retaining_finished_requests() -> None:
-    engine = InferenceEngine(TraceModel(), block_size=4, num_blocks=8)
+    engine = InferenceEngine(as_backend(TraceModel()), block_size=4, num_blocks=8)
     engine.add_request(Request("short", [1], 1, frozenset({63})))
     engine.add_request(Request("long", [1, 2], 3, frozenset({63})))
 
@@ -93,7 +93,7 @@ def test_run_returns_completed_outputs_without_retaining_finished_requests() -> 
 def test_trace_recorder_captures_real_engine_events() -> None:
     recorder = TraceRecorder()
     engine = InferenceEngine(
-        TraceModel(),
+        as_backend(TraceModel()),
         block_size=4,
         num_blocks=8,
         prefill_chunk_size=2,
@@ -217,7 +217,7 @@ def test_preemption_emits_clear_preempt_and_resume_events() -> None:
     # block_size 4, pool 3: three prompt-3 requests admit on footprint (1 block each), then must
     # evict as they grow past one block — a genuine forced preemption.
     engine = InferenceEngine(
-        TraceModel(), block_size=4, num_blocks=3, preemption=True, trace=recorder
+        as_backend(TraceModel()), block_size=4, num_blocks=3, preemption=True, trace=recorder
     )
     engine.add_request(Request("a", [1, 2, 3], 6, frozenset({63})))
     engine.add_request(Request("b", [4, 5, 6], 6, frozenset({63})))
@@ -234,6 +234,7 @@ def test_preemption_emits_clear_preempt_and_resume_events() -> None:
     preempts = [event for event in events if event.event == "request_preempted"]
     for event in preempts:
         assert event.preempt_reason == "kv_pressure"
+        assert event.block_count is not None
         assert event.block_count >= 1
         assert event.generated_tokens is not None
         assert event.pool_used is not None and event.pool_free is not None
@@ -262,7 +263,7 @@ def test_block_lifecycle_is_clear_for_shared_prefix() -> None:
     when the second sibling frees does the block truly return to the pool and get traced.
     """
     recorder = TraceRecorder()
-    engine = InferenceEngine(TraceModel(), block_size=4, num_blocks=8, trace=recorder)
+    engine = InferenceEngine(as_backend(TraceModel()), block_size=4, num_blocks=8, trace=recorder)
     engine.add_request(Request("sib-a", [1, 2, 3, 4], 3, frozenset({63}), prefix_group_id="g"))
     engine.add_request(Request("sib-b", [1, 2, 3, 4], 3, frozenset({63}), prefix_group_id="g"))
     engine.run()

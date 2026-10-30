@@ -82,14 +82,14 @@ class EngineOwnedGroupedDecodeGraphRunner:
         self.batch_size = batch_size
         self.grouped_layers = grouped_layers
         self.mode = mode
-        self.requires_packed_read_plan = not model._uses_paged_decode_backend()
+        self.requires_packed_read_plan = not model.uses_paged_decode_backend()
         self.piecewise = DecodeGraphRunner(
             model,
             capture_sizes=(batch_size,),
             max_position=max_position,
             mode=mode,
         )
-        self._state = self.piecewise._buckets[batch_size]
+        self._state = self.piecewise.buckets[batch_size]
         self._active_plan: DecodeWindowPlan | None = None
         self._cache_kv_pointer = cache.kv.data_ptr()
         self._static_write_slots = torch.zeros(batch_size, dtype=torch.long, device=model.device)
@@ -130,7 +130,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         elif self._active_plan is not plan:
             return None
 
-        uses_native_pages = self.model._uses_paged_decode_backend()
+        uses_native_pages = self.model.uses_paged_decode_backend()
         write_slots, read_plan = plan.begin_step(
             include_pages=uses_native_pages,
             include_packed=not uses_native_pages,
@@ -138,10 +138,10 @@ class EngineOwnedGroupedDecodeGraphRunner:
         state.tokens.copy_(token_ids.reshape(-1))
         self._static_write_slots.copy_(write_slots)
         if self._group_graph is None:
-            self.model._prepare_paged_decode(read_plan)
+            self.model.prepare_paged_decode(read_plan)
             self._run_group_eager(read_plan)
             for layer in range(self.grouped_layers, self.model.num_layers):
-                self.piecewise._attention_eager(
+                self.piecewise.attention_eager(
                     state,
                     layer,
                     cache,
@@ -149,10 +149,10 @@ class EngineOwnedGroupedDecodeGraphRunner:
                     self._static_write_slots,
                     read_plan,
                 )
-                self.piecewise._run_segment(state, layer + 1)
+                self.piecewise.run_segment(state, layer + 1)
         else:
             assert self._graph_wrapper is not None
-            self._plan_group_wrapper(read_plan)
+            self.plan_group_wrapper(read_plan)
             self._group_graph.replay()
             for layer in range(self.grouped_layers, self.model.num_layers):
                 cache.write_rows(
@@ -167,16 +167,16 @@ class EngineOwnedGroupedDecodeGraphRunner:
                     cache.layer_kv(layer),
                     state.attn,
                 )
-                self.piecewise._run_segment(state, layer + 1)
+                self.piecewise.run_segment(state, layer + 1)
         plan.complete_step()
         self.steps_handled += 1
         return state.logits
 
     def _run_group_eager(self, read_plan: KVReadPlan) -> None:
         state = self._state
-        self.piecewise._run_segment(state, 0)
+        self.piecewise.run_segment(state, 0)
         for layer in range(self.grouped_layers):
-            self.piecewise._attention_eager(
+            self.piecewise.attention_eager(
                 state,
                 layer,
                 self.cache,
@@ -184,7 +184,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
                 self._static_write_slots,
                 read_plan,
             )
-            self.piecewise._run_segment(state, layer + 1)
+            self.piecewise.run_segment(state, layer + 1)
 
     def _run_group_graph_body(self) -> None:
         if self._graph_wrapper is None:
@@ -207,7 +207,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
             state.run_segments[layer + 1]()
 
     def _capture_group(self, capture_plan: DecodeWindowPlan) -> None:
-        backend = self.model._paged_backend
+        backend = self.model.paged_backend
         if not isinstance(backend, FlashInferPagedAttention):
             raise ValueError("graph mode needs a FlashInfer paged attention backend")
         write_slots, read_plan = capture_plan.begin_step(include_pages=True, include_packed=False)
@@ -229,7 +229,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         workspace = self._shared_workspace
         if workspace is None:
             workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=self.model.device)
-        wrapper_class = backend._decode_wrapper_class(backend._flashinfer)
+        wrapper_class = backend.decode_wrapper_class(backend.flashinfer)
         self._graph_wrapper = build_graph_wrapper(wrapper_class, workspace, fixed_metadata)
         self._graph_workspace = workspace
         self._fixed_metadata = fixed_metadata
@@ -240,7 +240,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
             read_plan.page_plan.page_size,
             self.model.dtype,
         )
-        self._plan_group_wrapper(read_plan)
+        self.plan_group_wrapper(read_plan)
         torch.cuda.synchronize()
         allocated_before = torch.cuda.memory_allocated()
         start = time.perf_counter()
@@ -272,7 +272,7 @@ class EngineOwnedGroupedDecodeGraphRunner:
         # Capture writes the upcoming slots with warmup values. Every real layer overwrites
         # its own slot before attending to it, so no captured value reaches generation.
 
-    def _plan_group_wrapper(self, read_plan: KVReadPlan) -> None:
+    def plan_group_wrapper(self, read_plan: KVReadPlan) -> None:
         if self._graph_wrapper is None or self._graph_shape is None or read_plan.page_plan is None:
             raise RuntimeError("grouped graph wrapper cannot plan this read metadata")
         self._plan_fence.before_plan()

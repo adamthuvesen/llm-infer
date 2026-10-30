@@ -40,7 +40,7 @@ class FlashInferPagedAttention:
         if workspace_bytes <= 0:
             raise ValueError(f"workspace_bytes must be positive; got {workspace_bytes}")
         self._packed = FlashAttnPagedAttention()
-        self._flashinfer = self._import_flashinfer()
+        self.flashinfer = self._import_flashinfer()
         self.workspace_bytes = workspace_bytes
         self.use_tensor_cores = use_tensor_cores
         self.backend = backend
@@ -146,7 +146,7 @@ class FlashInferPagedAttention:
             return wrapper
 
         workspace = torch.zeros(self.workspace_bytes, dtype=torch.uint8, device=device)
-        wrapper_cls = self._decode_wrapper_class(self._flashinfer)
+        wrapper_cls = self.decode_wrapper_class(self.flashinfer)
         wrapper = wrapper_cls(
             workspace,
             "NHD",
@@ -170,7 +170,7 @@ class FlashInferPagedAttention:
             ) from exc
 
     @staticmethod
-    def _decode_wrapper_class(flashinfer: ModuleType) -> FlashInferDecodeWrapperFactory:
+    def decode_wrapper_class(flashinfer: ModuleType) -> FlashInferDecodeWrapperFactory:
         wrapper_cls = getattr(flashinfer, "BatchDecodeWithPagedKVCacheWrapper", None)
         if wrapper_cls is not None:
             return cast(FlashInferDecodeWrapperFactory, wrapper_cls)

@@ -8,8 +8,13 @@ import torch
 from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving import InferenceEngine, Request
-from tests.support.fake_causal_lm import FakeCausalLMBase
+from tests.support.fake_causal_lm import FakeCausalLMBase, as_backend
 from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
+
+
+def _blocks(request: Request) -> list[int]:
+    assert request.block_table is not None
+    return request.block_table.blocks
 
 
 class ChunkedModel(FakeCausalLMBase):
@@ -90,7 +95,7 @@ def test_active_decode_advances_between_prefill_chunks() -> None:
     # decode_window_size=1: this test pins per-step token *visibility* while another request
     # chunk-prefills; a deferred decode window batches that visibility into flush steps.
     engine = InferenceEngine(
-        model, block_size=4, num_blocks=8, prefill_chunk_size=2, decode_window_size=1
+        as_backend(model), block_size=4, num_blocks=8, prefill_chunk_size=2, decode_window_size=1
     )
     active = Request("active", [1], 4, frozenset({63}))
     long = Request("long", [2, 3, 4, 5, 6], 2, frozenset({63}))
@@ -123,15 +128,17 @@ def test_unknown_backend_requires_an_explicit_capability_declaration(
     model = UndeclaredModel()
 
     with pytest.raises(ValueError, match="must declare capabilities or pass capabilities="):
-        InferenceEngine(model, block_size=4, num_blocks=8)
+        InferenceEngine(as_backend(model), block_size=4, num_blocks=8)
 
-    engine = InferenceEngine(model, block_size=4, num_blocks=8, capabilities=capabilities)
+    engine = InferenceEngine(
+        as_backend(model), block_size=4, num_blocks=8, capabilities=capabilities
+    )
     engine.add_request(Request("explicit", [1], 2, frozenset()))
     assert engine.run() == {"explicit": [11, 12]}
 
 
 def test_rejected_request_does_not_reserve_its_id() -> None:
-    engine = InferenceEngine(ChunkedModel(), block_size=2, num_blocks=1)
+    engine = InferenceEngine(as_backend(ChunkedModel()), block_size=2, num_blocks=1)
     with pytest.raises(ValueError, match="never be admitted"):
         engine.add_request(Request("retry", [1, 2, 3], 1, frozenset()))
 
@@ -197,7 +204,7 @@ def test_chunked_engine_tokens_match_full_prefill_engine() -> None:
 
 def test_chunked_prefix_group_shares_full_prompt_blocks_then_cow_partial_block() -> None:
     model = ChunkedModel()
-    engine = InferenceEngine(model, block_size=4, num_blocks=24, prefill_chunk_size=2)
+    engine = InferenceEngine(as_backend(model), block_size=4, num_blocks=24, prefill_chunk_size=2)
     requests = [
         Request(f"p0-g{idx}", [11, 12, 13, 14, 15, 16], 3, frozenset({63}), "p0")
         for idx in range(4)
@@ -212,13 +219,13 @@ def test_chunked_prefix_group_shares_full_prompt_blocks_then_cow_partial_block()
     assert complete.tokens.keys() == {request.request_id for request in requests}
     assert model.prefill_chunks == [(0, 2), (2, 4), (4, 6)]
 
-    prompt_blocks = [request.block_table.blocks for request in requests]
+    prompt_blocks = [_blocks(request) for request in requests]
     assert len({blocks[0] for blocks in prompt_blocks}) == 1
     assert len({blocks[1] for blocks in prompt_blocks}) == 1
 
     engine.step()
 
-    decode_blocks = [request.block_table.blocks for request in requests]
+    decode_blocks = [_blocks(request) for request in requests]
     shared_full_block = decode_blocks[0][0]
     assert {blocks[0] for blocks in decode_blocks} == {shared_full_block}
     assert engine.cache.allocator.refcount(shared_full_block) == 4

@@ -21,12 +21,18 @@ from pathlib import Path
 import httpx
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
-from llm_infer.model.runtime import load_model_runtime
+from llm_infer.model.pretrain_bundle import PretrainBundleModel
+from llm_infer.model.runtime import ModelRuntime, load_model_runtime
 from llm_infer.serve import build_app_from_runtime
 
 # Three prompts stream concurrently so decode batches of 3 pad up to the bucket of 4.
 _PROMPTS = ("tok_4 tok_7 tok_10", "tok_5 tok_8 tok_6 tok_9", "tok_10 tok_4")
 _MAX_NEW_TOKENS = 10
+
+
+def _bundle(runtime: ModelRuntime) -> PretrainBundleModel:
+    assert isinstance(runtime.model, PretrainBundleModel)
+    return runtime.model
 
 
 def _stream_completions(runtime, **app_kwargs) -> tuple[list[list[str]], str]:
@@ -73,10 +79,10 @@ def _stream_completions(runtime, **app_kwargs) -> tuple[list[list[str]], str]:
 def test_streams_identical_with_and_without_decode_graph_runner(tmp_path: Path) -> None:
     """The graphs path and the eager path stream identical deltas for every request."""
     runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
-    assert runtime.model.decode_graphs is None  # CPU: the serve default must not enable it
+    assert _bundle(runtime).decode_graphs is None  # CPU: the serve default must not enable it
 
     plain, _ = _stream_completions(runtime)
-    runtime.model.enable_decode_graphs(capture_sizes=(4,), mode="eager")
+    _bundle(runtime).enable_decode_graphs(capture_sizes=(4,), mode="eager")
     padded, _ = _stream_completions(runtime)
 
     assert all(deltas for deltas in plain)  # every request actually streamed tokens
@@ -93,7 +99,7 @@ def test_streams_identical_with_grouped_dispatch_and_metrics_count_its_steps(
     positive, pinning that the flag reaches the engine and the runners actually fire.
     """
     runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
-    runtime.model.decode_graphs = None
+    _bundle(runtime).decode_graphs = None
 
     plain, plain_metrics = _stream_completions(runtime)
     assert "llm_infer_grouped_decode_steps_total 0" in plain_metrics
@@ -112,4 +118,4 @@ def test_build_app_decode_graphs_default_is_noop_on_cpu(tmp_path: Path) -> None:
     """`decode_graphs=True` (the default) must not capture — or pad — on a CPU model."""
     runtime = load_model_runtime("esme", bundle_path=write_tiny_pretrain_bundle(tmp_path))
     build_app_from_runtime(runtime, block_size=4, num_blocks=64, decode_graphs=True)
-    assert runtime.model.decode_graphs is None
+    assert _bundle(runtime).decode_graphs is None

@@ -147,7 +147,7 @@ class StepObserver:
     ) -> None:
         with self._lock:
             for request_id in result.admitted:
-                request = engine._requests[request_id]
+                request = engine._requests[request_id]  # pyright: ignore[reportPrivateUsage] -- diagnostic read of engine state
                 sampling = _effective_sampling(engine, request)
                 signature = RequestSignature.from_parts(
                     request.prompt_ids, request.max_new_tokens, sampling

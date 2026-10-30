@@ -13,7 +13,7 @@ from llm_infer.serving import (
     SamplingParams,
     SpeculativeDecodingConfig,
 )
-from tests.support.fake_causal_lm import FakeCausalLMBase
+from tests.support.fake_causal_lm import FakeCausalLMBase, as_backend
 
 
 class ScriptedModel(FakeCausalLMBase):
@@ -204,7 +204,7 @@ def _run(
 ) -> tuple[list[int], ScriptedModel]:
     model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
-        model,
+        as_backend(model),
         block_size=4,
         num_blocks=8,
         speculative=SpeculativeDecodingConfig(max_draft_tokens=2, max_ngram_size=3)
@@ -268,7 +268,7 @@ def test_speculative_rejection_frees_rejected_draft_blocks() -> None:
     block_size = 2  # small blocks so a rejected draft's reserve crosses a boundary (a real leak)
     model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
-        model,
+        as_backend(model),
         block_size=block_size,
         num_blocks=32,
         speculative=SpeculativeDecodingConfig(max_draft_tokens=2, max_ngram_size=3),
@@ -354,7 +354,7 @@ def test_sampled_request_skips_the_speculative_path() -> None:
 
     model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
-        model,
+        as_backend(model),
         block_size=4,
         num_blocks=8,
         default_sampling=SamplingParams(temperature=1.0),
@@ -374,7 +374,7 @@ def test_greedy_request_still_speculates_under_a_sampled_default() -> None:
 
     model = ScriptedModel({tuple(prompt): script})
     engine = InferenceEngine(
-        model,
+        as_backend(model),
         block_size=4,
         num_blocks=8,
         default_sampling=SamplingParams(temperature=1.0),
@@ -391,7 +391,7 @@ def test_greedy_request_still_speculates_under_a_sampled_default() -> None:
 
 def test_default_chunked_prefix_caching_does_not_call_speculative_verifier() -> None:
     model = NoSpecVerifierModel()
-    engine = InferenceEngine(model, block_size=4, num_blocks=24, prefill_chunk_size=2)
+    engine = InferenceEngine(as_backend(model), block_size=4, num_blocks=24, prefill_chunk_size=2)
     requests = [
         Request(f"p0-g{idx}", [11, 12, 13, 14, 15, 16], 3, frozenset({31}), "p0")
         for idx in range(4)

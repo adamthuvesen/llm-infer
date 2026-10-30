@@ -11,6 +11,7 @@ from llm_infer.benchmarks.esme_paged import (
     ReferenceOutputCache,
     measure_repeated,
 )
+from tests.support.fake_causal_lm import as_backend
 
 
 class _ConstantOracle:
@@ -24,7 +25,7 @@ class _ConstantOracle:
 
 def test_reference_cache_scopes_oracle_budget_and_eos_and_returns_copies() -> None:
     oracle = _ConstantOracle()
-    cache = ReferenceOutputCache(oracle, max_new_tokens=2, eos_token_ids=frozenset())
+    cache = ReferenceOutputCache(as_backend(oracle), max_new_tokens=2, eos_token_ids=frozenset())
     first = EsmeBenchRequest("first", "one", (1,))
     repeated = EsmeBenchRequest("repeated", "same", (1,))
     outputs = cache([first, repeated])
@@ -34,13 +35,17 @@ def test_reference_cache_scopes_oracle_budget_and_eos_and_returns_copies() -> No
     assert cache([repeated]) == {"repeated": [2, 2]}
     assert oracle.calls == 2
 
-    eos_cache = ReferenceOutputCache(oracle, max_new_tokens=2, eos_token_ids=frozenset({2}))
+    eos_cache = ReferenceOutputCache(
+        as_backend(oracle), max_new_tokens=2, eos_token_ids=frozenset({2})
+    )
     assert eos_cache([first]) == {"first": [2]}
     assert oracle.calls == 3
-    shorter = ReferenceOutputCache(oracle, max_new_tokens=1, eos_token_ids=frozenset())
+    shorter = ReferenceOutputCache(as_backend(oracle), max_new_tokens=1, eos_token_ids=frozenset())
     assert shorter([first]) == {"first": [2]}
     other_oracle = _ConstantOracle()
-    independent = ReferenceOutputCache(other_oracle, max_new_tokens=2, eos_token_ids=frozenset())
+    independent = ReferenceOutputCache(
+        as_backend(other_oracle), max_new_tokens=2, eos_token_ids=frozenset()
+    )
     assert independent([first]) == {"first": [2, 2]}
     assert other_oracle.calls == 2
 
@@ -76,7 +81,9 @@ def test_qualified_row_serializes_complete_policy_and_keeps_failed_raw_timing() 
     oracle = _ConstantOracle()
     requests = [EsmeBenchRequest("request", "one", (1,))]
     reference = {"request": [2]}
-    exact = qualified_system_row(oracle, requests, reference, reference, frozenset(), [1.0, 3.0])
+    exact = qualified_system_row(
+        as_backend(oracle), requests, reference, reference, frozenset(), [1.0, 3.0]
+    )
     assert exact["median_seconds"] == 2.0
     assert exact["raw_tokens_per_second"] == 0.5
     assert exact["tokens_per_second"] == 0.5
@@ -91,7 +98,9 @@ def test_qualified_row_serializes_complete_policy_and_keeps_failed_raw_timing() 
         "failed": 0,
         "numerical_evidence": [],
     }
-    failed = qualified_system_row(oracle, requests, {}, reference, frozenset(), [1.0, 3.0])
+    failed = qualified_system_row(
+        as_backend(oracle), requests, {}, reference, frozenset(), [1.0, 3.0]
+    )
     assert failed["reference_status"] == "failed"
     assert failed["headline_eligible"] is False
     assert failed["tokens_per_second"] is None

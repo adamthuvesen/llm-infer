@@ -1211,7 +1211,7 @@ def diagnose_prefill_divergence(
         # diagnostic driver reading it directly, not the production serving path.
         kv_snapshot: dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         for r in requests:
-            table = engine._requests[r.request_id].block_table
+            table = engine._requests[r.request_id].block_table  # pyright: ignore[reportPrivateUsage] -- diagnostic read, see comment above
             if table is None:
                 raise RuntimeError(f"request {r.request_id} has no block table after prefill")
             kv_snapshot[r.request_id] = [

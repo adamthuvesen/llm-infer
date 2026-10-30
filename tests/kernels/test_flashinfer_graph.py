@@ -34,6 +34,7 @@ def test_graph_wrapper_uses_caller_owned_fixed_buffers() -> None:
     fixed = page_metadata_for_lengths([129, 129], page_size=64, device="cpu")
     workspace = torch.empty(16, dtype=torch.uint8)
     wrapper = build_graph_wrapper(_FakeWrapper, workspace, fixed)
+    assert isinstance(wrapper, _FakeWrapper)
 
     assert wrapper.init_args == (workspace, "NHD")
     assert wrapper.init_kwargs["use_cuda_graph"] is True
@@ -48,6 +49,8 @@ def test_plan_and_run_keep_exact_metadata_and_output_contract() -> None:
     metadata = page_metadata_for_lengths([65], page_size=64, device="cpu")
     shape = FlashInferDecodeShape(8, 2, 64, 64, torch.bfloat16)
     plan_wrapper(wrapper, metadata, shape)
+    assert isinstance(wrapper, _FakeWrapper)
+    assert wrapper.plan_args is not None
 
     assert wrapper.plan_args[:3] == (
         metadata.indptr,

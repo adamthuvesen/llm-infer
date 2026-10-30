@@ -34,20 +34,15 @@ def runtime(tmp_path):
 
 
 def _build_engine(runtime, *, grouped_sizes: tuple[int, ...] | None = None) -> InferenceEngine:
-    kwargs = {}
-    if grouped_sizes is not None:
-        kwargs = {
-            "grouped_decode_graphs": True,
-            "grouped_capture_sizes": grouped_sizes,
-            "grouped_layers": 2,
-        }
     return InferenceEngine(
         runtime.model,
         block_size=4,
         num_blocks=64,
         capabilities=runtime.capabilities,
         decode_window_size=4,
-        **kwargs,
+        grouped_decode_graphs=grouped_sizes is not None,
+        grouped_capture_sizes=grouped_sizes or (),
+        grouped_layers=2 if grouped_sizes is not None else None,
     )
 
 

@@ -37,6 +37,7 @@ from llm_infer.model.layers import (
     rope_tables_for_positions,
     swiglu_mlp,
 )
+from llm_infer.model.no_grad import no_grad
 from llm_infer.model.rope_utils import apply_rope, rms_norm
 from llm_infer.profiling import TimingProfiler
 
@@ -112,7 +113,7 @@ class QwenModel:
             dtype=dtype,
         )
 
-    @torch.no_grad()
+    @no_grad
     def logits(self, token_ids: list[int]) -> torch.Tensor:
         """Next-token logits for every position. Shape ``(seq_len, vocab_size)``.
 
@@ -133,7 +134,7 @@ class QwenModel:
             hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return hidden @ self._lm_head().T
 
-    @torch.no_grad()
+    @no_grad
     def prefill(
         self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
     ) -> torch.Tensor:
@@ -165,7 +166,7 @@ class QwenModel:
             last = rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
             return (last @ self._lm_head().T)[-1]
 
-    @torch.no_grad()
+    @no_grad
     def prefill_chunk(
         self,
         prompt_ids: list[int],
@@ -218,7 +219,7 @@ class QwenModel:
             last = rms_norm(hidden[-1:], self.w["model.norm.weight"], self.rms_eps)
             return (last @ self._lm_head().T)[-1]
 
-    @torch.no_grad()
+    @no_grad
     def decode_one(
         self, cache: PagedKVCache, table: BlockTable, token_id: int | torch.Tensor
     ) -> torch.Tensor:
@@ -232,7 +233,7 @@ class QwenModel:
         tokens = [token_id] if isinstance(token_id, int) else token_id
         return self.decode_tokens(cache, table, tokens)[-1]
 
-    @torch.no_grad()
+    @no_grad
     def decode_many(
         self,
         cache: PagedKVCache,
@@ -282,7 +283,7 @@ class QwenModel:
             hidden = rms_norm(hidden, self.w["model.norm.weight"], self.rms_eps)
             return hidden @ self._lm_head().T  # (B, vocab)
 
-    @torch.no_grad()
+    @no_grad
     def decode_tokens(
         self,
         cache: PagedKVCache,

@@ -147,7 +147,7 @@ class _FixedOracle:
     def __init__(self, logits: list[float]) -> None:
         self._logits = torch.tensor([logits], dtype=torch.float32)
 
-    def logits(self, _token_ids: list[int]) -> torch.Tensor:
+    def logits(self, token_ids: list[int]) -> torch.Tensor:
         return self._logits
 
 

@@ -11,7 +11,7 @@ from llm_infer.kv_cache import BlockTable, PagedKVCache
 from llm_infer.model.interface import DENSE_CAPABILITIES, QWEN_CAPABILITIES, BackendCapabilities
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.tracing import TraceRecorder
-from tests.support.fake_causal_lm import FakeCausalLMBase
+from tests.support.fake_causal_lm import FakeCausalLMBase, as_backend
 
 
 def _capabilities(*, batched_prefill: bool) -> BackendCapabilities:
@@ -123,18 +123,15 @@ def _run_step(
     preemption: bool = False,
     trace: TraceRecorder | None = None,
 ):
-    kwargs: dict[str, object] = {}
-    if batched_prefill is not None:
-        kwargs["batched_prefill"] = batched_prefill
     engine = InferenceEngine(
-        model,
+        as_backend(model),
         block_size=4,
         num_blocks=16,
         capabilities=capabilities,
         prefill_chunk_size=prefill_chunk_size,
         preemption=preemption,
         trace=trace,
-        **kwargs,
+        batched_prefill=True if batched_prefill is None else batched_prefill,
     )
     for request in request_factory():
         engine.add_request(request)

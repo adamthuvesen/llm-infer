@@ -824,7 +824,7 @@ def flashinfer_graph_probe(approved: bool = False) -> str:
             f"FlashInfer graph probe requires {expected_version}; got {actual_version}"
         )
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
-    wrapper_class = FlashInferPagedAttention._decode_wrapper_class(flashinfer)
+    wrapper_class = FlashInferPagedAttention.decode_wrapper_class(flashinfer)
     shape = FlashInferDecodeShape(
         num_qo_heads=8,
         num_kv_heads=2,
@@ -2383,8 +2383,8 @@ def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
 
 
 HOST_TIMELINE_REGIONS = (
-    ("graph_replay", "runner", "_run_segment"),
-    ("eager_attention", "runner", "_attention_eager"),
+    ("graph_replay", "runner", "run_segment"),
+    ("eager_attention", "runner", "attention_eager"),
     ("flashinfer_plan", "backend", "plan_decode_batch_paged"),
     ("open_window", "model", "open_decode_window"),
 )
@@ -2606,7 +2606,7 @@ def _device_page_metadata() -> Generator[None]:
     backend_class = paged_module.FlashInferPagedAttention
     runner_class = grouped_module.EngineOwnedGroupedDecodeGraphRunner
     original_plan = backend_class.plan_decode_batch_paged
-    original_group_plan = runner_class._plan_group_wrapper
+    original_group_plan = runner_class.plan_group_wrapper
 
     def strip(page_plan: KVPagePlan) -> KVPagePlan:
         return dataclasses.replace(page_plan, indptr_host=None, last_page_len_host=None)
@@ -2635,12 +2635,12 @@ def _device_page_metadata() -> Generator[None]:
         return original_group_plan(self, read_plan)
 
     backend_class.plan_decode_batch_paged = plan  # type: ignore[method-assign]
-    runner_class._plan_group_wrapper = plan_group  # type: ignore[method-assign]
+    runner_class.plan_group_wrapper = plan_group  # type: ignore[method-assign]
     try:
         yield
     finally:
         backend_class.plan_decode_batch_paged = original_plan  # type: ignore[method-assign]
-        runner_class._plan_group_wrapper = original_group_plan  # type: ignore[method-assign]
+        runner_class.plan_group_wrapper = original_group_plan  # type: ignore[method-assign]
 
 
 def _host_plan_rows(

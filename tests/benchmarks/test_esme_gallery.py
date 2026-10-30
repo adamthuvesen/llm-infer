@@ -26,6 +26,7 @@ from llm_infer.benchmarks.reference_policy import EsmeAgreement
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.runtime import load_model_runtime
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
+from tests.support.json_result import dig, dig_number, dig_rows
 
 
 @pytest.fixture
@@ -52,11 +53,17 @@ def test_prefix_cache_on_off_gates_and_reports_both_rows(tiny_runtime) -> None:
         warmup=0,
         iters=1,
     )
-    assert [row["label"] for row in result["rows"]] == ["prefix caching on", "prefix caching off"]
-    assert all(row["reference_status"] in {"exact", "accepted_numerical"} for row in result["rows"])
-    assert all(row["tokens_per_second"] is not None for row in result["rows"])
-    assert result["workload"]["prefilled_prompt_tokens_on"] == 6
-    assert result["workload"]["prefilled_prompt_tokens_off"] == 18
+    assert [row["label"] for row in dig_rows(result, "rows")] == [
+        "prefix caching on",
+        "prefix caching off",
+    ]
+    assert all(
+        row["reference_status"] in {"exact", "accepted_numerical"}
+        for row in dig_rows(result, "rows")
+    )
+    assert all(row["tokens_per_second"] is not None for row in dig_rows(result, "rows"))
+    assert dig(result, "workload", "prefilled_prompt_tokens_on") == 6
+    assert dig(result, "workload", "prefilled_prompt_tokens_off") == 18
 
 
 def test_chunked_prefill_latency_reports_stall_for_both_configs(tiny_runtime) -> None:
@@ -73,15 +80,20 @@ def test_chunked_prefill_latency_reports_stall_for_both_configs(tiny_runtime) ->
         num_blocks=64,
         device="cpu",
     )
-    assert [row["label"] for row in result["rows"]] == ["whole-prompt prefill", "chunked prefill"]
-    for row in result["rows"]:
+    assert [row["label"] for row in dig_rows(result, "rows")] == [
+        "whole-prompt prefill",
+        "chunked prefill",
+    ]
+    for row in dig_rows(result, "rows"):
         assert row["reference_status"] in {"exact", "accepted_numerical"}, row["agreement"]
-        assert row["post_arrival_max_gap_s"] > 0
-        assert row["stall_vs_pre_arrival_step"] > 0
-    whole, chunked = result["rows"]
+        assert dig_number(row, "post_arrival_max_gap_s") > 0
+        assert dig_number(row, "stall_vs_pre_arrival_step") > 0
+    whole, chunked = dig_rows(result, "rows")
     # The structural budget claim: chunking bounds prompt tokens cached per engine step.
     assert whole["max_prefill_tokens_in_one_step"] == 16
-    assert chunked["max_prefill_tokens_in_one_step"] <= 4 * 2  # chunk x concurrent prefills
+    assert (
+        dig_number(chunked, "max_prefill_tokens_in_one_step") <= 4 * 2
+    )  # chunk x concurrent prefills
 
 
 def test_preemption_starved_pool_requires_real_preemptions(tiny_runtime) -> None:
@@ -94,9 +106,9 @@ def test_preemption_starved_pool_requires_real_preemptions(tiny_runtime) -> None
         num_blocks=3,
         device="cpu",
     )
-    on, reserve = result["rows"]
+    on, reserve = dig_rows(result, "rows")
     assert on["label"] == "preemption on"
-    assert on["preemptions"] > 0
+    assert dig_number(on, "preemptions") > 0
     assert on["reference_status"] in {"exact", "accepted_numerical"}, on["agreement"]
     assert reserve["preemptions"] == 0
     assert reserve["reference_status"] in {"exact", "accepted_numerical"}, reserve["agreement"]
@@ -128,11 +140,11 @@ def test_speculative_batch1_reports_acceptance_profile(tiny_runtime) -> None:
         warmup=0,
         iters=1,
     )
-    on, off = result["rows"]
+    on, off = dig_rows(result, "rows")
     assert on["label"] == "speculative on"
     assert on["reference_status"] in {"exact", "accepted_numerical"}, on["agreement"]
     assert off["reference_status"] in {"exact", "accepted_numerical"}, off["agreement"]
-    assert result["verify_steps"] >= 1
+    assert dig_number(result, "verify_steps") >= 1
     assert result["mean_tokens_per_verify_step"] is not None
 
 

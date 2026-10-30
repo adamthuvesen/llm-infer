@@ -18,7 +18,7 @@ from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 class _ReferenceMustNotBeUsed:
     """Stand-in fp32 reference: any consult means the no-divergence path took a wrong turn."""
 
-    def logits(self, *args: object, **kwargs: object) -> object:
+    def logits(self, token_ids: list[int]) -> torch.Tensor:
         raise AssertionError("reference consulted though no token diverged")
 
 
@@ -28,7 +28,7 @@ class _FixedReference:
     def __init__(self, row: list[float]) -> None:
         self._row = row
 
-    def logits(self, _ids: list[int]) -> torch.Tensor:
+    def logits(self, token_ids: list[int]) -> torch.Tensor:
         return torch.tensor([self._row], dtype=torch.float32)  # (1, vocab); caller takes [-1]
 
 
@@ -41,12 +41,14 @@ def test_fast_strict_prefix_of_golden_fails() -> None:
     result = compare_under_tie_tolerance(_ReferenceMustNotBeUsed(), [1, 2], [5, 6], [5, 6, 7])
     assert not result.ok
     assert result.divergence is None
+    assert result.failure is not None
     assert "lengths differ" in result.failure
 
 
 def test_golden_strict_prefix_of_fast_fails() -> None:
     result = compare_under_tie_tolerance(_ReferenceMustNotBeUsed(), [1, 2], [5, 6, 7], [5, 6])
     assert not result.ok
+    assert result.failure is not None
     assert "lengths differ" in result.failure
 
 
@@ -63,6 +65,7 @@ def test_small_top2_gap_does_not_excuse_a_far_off_fast_token() -> None:
     result = compare_under_tie_tolerance(ref, [1], fast_tokens=[5], golden_tokens=[0])
     assert not result.ok
     assert result.divergence is None
+    assert result.failure is not None
     assert "below the reference max" in result.failure
 
 
