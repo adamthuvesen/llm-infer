@@ -32,6 +32,8 @@ make help         # every target with its purpose
 make test-slow    # opt-in 3B Qwen reference check (minutes on CPU)
 ```
 
+Prove changes with `make verify` (`verify-llm-infer` skill at `.agents/skills/verify-llm-infer/`).
+
 GPU-only paths (FlashInfer, flash-attn) run on Modal A100-80GB through `scripts/modal_*.py`.
 An import contract failure names the forbidden import and its source line. Fix the import, then
 run `make architecture-check` and `make check`.
@@ -41,7 +43,7 @@ run `make architecture-check` and `make check`.
 | Rule | Enforced by | Added |
 | --- | --- | --- |
 | Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` | 2026-11-04 |
-| Package, evidence CLIs, and Modal harnesses typecheck | `pyproject.toml::tool.mypy`, `Makefile::typecheck` | 2026-11-04 |
+| Package, scripts, tests, and the verify helper typecheck | `pyproject.toml::tool.basedpyright`, `Makefile::typecheck` | 2026-11-04 |
 | No `typing.Any`: name the real type | `pyproject.toml::tool.ruff.lint.flake8-tidy-imports.banned-api`, `Makefile::lint` | 2026-11-06 |
 | Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` | 2026-11-04 |
 | A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` | 2026-11-04 |
@@ -51,6 +53,7 @@ run `make architecture-check` and `make check`.
 | Trace replay rejects malformed events | `visualizer/trace_loader.js::validateEvent`, `Makefile::visualizer-test`, `tests/serving/test_tracing.py::test_trace_recorder_captures_real_engine_events` | 2026-11-04 |
 | Modal entrypoints and GPU functions refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1` | `scripts/modal_approval.py::require_spend_approval`, `tests/test_modal_approval.py::test_local_entrypoints_gate_before_any_modal_call`, `tests/test_modal_approval.py::test_gpu_functions_refuse_direct_calls_without_approval`, `tests/test_modal_approval.py::test_server_apps_refuse_to_start_without_approval` | 2026-11-06 |
 | Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` | 2026-11-06 |
+| `make verify` reports a pass only when its control observes FAIL | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` | 2026-11-06 |
 | Every row cites names its file defines | `tests/test_agents_rules_table.py::test_enforced_rules_cite_defined_names` | 2026-11-06 |
 
 The scheduler views restrict typed callers but do not enforce runtime immutability. Change

@@ -367,7 +367,7 @@ def test_rejects_manifest_model_config_mismatch(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(
-        PretrainBundleError, match="manifest.json model_config does not match config.json"
+        PretrainBundleError, match=r"manifest\.json model_config does not match config\.json"
     ):
         PretrainBundleModel.load(bundle)
 
@@ -381,7 +381,7 @@ def test_rejects_weights_model_config_mismatch(tmp_path: Path) -> None:
     _write_weights(bundle, weights)
 
     with pytest.raises(
-        PretrainBundleError, match="weights.pt model_config does not match config.json"
+        PretrainBundleError, match=r"weights\.pt model_config does not match config\.json"
     ):
         PretrainBundleModel.load(bundle)
 
@@ -405,7 +405,7 @@ def test_rejects_malformed_weight_shapes(tmp_path: Path) -> None:
     weights["state_dict"] = state_dict
     _write_weights(bundle, weights)
 
-    with pytest.raises(PretrainBundleError, match="attention.wq"):
+    with pytest.raises(PretrainBundleError, match=r"attention\.wq"):
         PretrainBundleModel.load(bundle)
 
 

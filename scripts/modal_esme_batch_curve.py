@@ -102,7 +102,7 @@ class _PeakBlocks:
     def __init__(self) -> None:
         self.peak = 0
 
-    def __call__(self, event) -> None:  # noqa: ANN001 - BlockPoolEvent, imported remotely
+    def __call__(self, event) -> None:
         self.peak = max(self.peak, event.num_used)
 
 

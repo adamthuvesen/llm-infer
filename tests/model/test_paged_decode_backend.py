@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -78,7 +79,7 @@ class PageTableReferenceAttention:
         lengths: list[int] = []
         indptr = self.page_plan.indptr.cpu().tolist()
         last_page_len = self.page_plan.last_page_len.cpu().tolist()
-        for row, (start, end) in enumerate(zip(indptr[:-1], indptr[1:], strict=True)):
+        for row, (start, end) in enumerate(pairwise(indptr)):
             page_count = end - start
             length = (page_count - 1) * self.page_plan.page_size + last_page_len[row]
             pages = self.page_plan.indices[start:end].to(torch.long)

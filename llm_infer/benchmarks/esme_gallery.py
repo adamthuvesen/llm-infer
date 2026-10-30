@@ -27,6 +27,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
+from itertools import pairwise
 from typing import TypedDict
 
 import torch
@@ -275,7 +276,7 @@ def run_chunked_prefill_latency(
         post_arrival_gaps: list[float] = []
         for req in active_requests:
             times = token_times.get(req.request_id, [])
-            for left, right in zip(times, times[1:], strict=False):
+            for left, right in pairwise(times):
                 gap = right - left
                 (post_arrival_gaps if right > arrival_s else pre_arrival_gaps).append(gap)
         if not pre_arrival_gaps or not post_arrival_gaps:

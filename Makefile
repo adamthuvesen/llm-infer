@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := check
-.PHONY: help install fmt lint typecheck architecture-check test visualizer-test evidence-check test-slow check
+.PHONY: help install fmt lint typecheck architecture-check test visualizer-test evidence-check test-slow check verify
 
 help:  ## List commands and their purpose
 	@awk 'BEGIN {FS = ":.*## "; print "Usage: make <target>\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -18,8 +18,8 @@ lint:  ## Lint and format-check (no changes)
 architecture-check:  ## Check dependency direction and policy isolation
 	uv run lint-imports --no-logo
 
-typecheck:  ## Check package and evidence CLI types
-	uv run mypy
+typecheck:  ## Check package, scripts, tests, and the verify helper with basedpyright strict
+	uv run basedpyright
 
 test:  ## Run unit tests
 	uv run python -m pytest
@@ -29,6 +29,9 @@ test-slow:  ## Run the opt-in 3B Qwen reference checks (CPU, minutes)
 
 evidence-check:  ## Check committed records, public tables, figure regen, and A/B verdicts
 	uv run scripts/check_benchmark_evidence.py
+
+verify:  ## Drive the real server, loadgen, and Modal launch paths on CPU (ARGS=all|list|control|<drive>)
+	@uv run python .agents/skills/verify-llm-infer/verify $(ARGS)
 
 visualizer-test:  ## Test trace loading in Node
 	node --test visualizer/trace_loader.test.mjs

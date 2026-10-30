@@ -2241,7 +2241,6 @@ def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
     compared with the uninstrumented roofline walls.
     """
     require_spend_approval(approved, __file__)
-    import glob
     import subprocess
     import tempfile
 
@@ -2249,12 +2248,14 @@ def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
 
     stall_guard.arm()
     esme_bundles.reload()
-    nsys = next(iter(sorted(glob.glob("/opt/nvidia/nsight-systems/*/bin/nsys"))), None) or next(
-        iter(sorted(glob.glob("/usr/local/cuda*/bin/nsys"))), None
+    nsys = next(iter(sorted(Path("/opt/nvidia/nsight-systems").glob("*/bin/nsys"))), None) or next(
+        iter(sorted(Path("/usr/local").glob("cuda*/bin/nsys"))), None
     )
     if nsys is None:
         raise RuntimeError("nsys is not installed in the timeline image")
-    version = subprocess.run([nsys, "--version"], capture_output=True, text=True).stdout.strip()
+    version = subprocess.run(
+        [str(nsys), "--version"], capture_output=True, text=True
+    ).stdout.strip()
     token_steps = TIMELINE_NEW_TOKENS - 1
     rows: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="esme-timeline-") as tmp:
@@ -2263,7 +2264,7 @@ def timeline_trace(batch_sizes: list[int], approved: bool = False) -> str:
             for arm in ("eager", "compiled"):
                 output = Path(tmp) / f"{arm}-b{size}"
                 command = [
-                    nsys, "profile", "--trace=cuda,nvtx", "--cuda-graph-trace=node",
+                    str(nsys), "profile", "--trace=cuda,nvtx", "--cuda-graph-trace=node",
                     "--sample=none", "--cpuctxsw=none", "--capture-range=cudaProfilerApi",
                     "--capture-range-end=stop", "--export=sqlite", "--force-overwrite=true",
                     "-o", str(output), "python", "scripts/nsys_decode_step.py",

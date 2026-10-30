@@ -77,7 +77,7 @@ def test_blocks_return_to_pool_after_clear(tmp_path: Path) -> None:
     total = engine.cache.allocator.num_blocks
 
     output_a = _run_one(engine, "A", [4, 5, 6, 7, 8], steps=5)
-    _run_one(engine, "B", [4, 5, 6, 7, 8] + output_a + [9], steps=5)
+    _run_one(engine, "B", [4, 5, 6, 7, 8, *output_a, 9], steps=5)
 
     # Finished tables freed, but donated blocks are still held by the store — so the pool is not
     # yet whole. Clearing the store returns every cached block.

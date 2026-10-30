@@ -38,7 +38,7 @@ from plotly.subplots import make_subplots
 # PEP 723 runs in an isolated environment, without installing the inference package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llm_infer.benchmarks.reference_policy import (  # noqa: E402
+from llm_infer.benchmarks.reference_policy import (
     benchmark_rows,
     headline_tokens_per_second,
 )

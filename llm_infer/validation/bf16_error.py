@@ -26,6 +26,7 @@ For each position, with ``a`` the fp32 top token and ``err = candidate - referen
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 
 import torch
 
@@ -103,7 +104,7 @@ def summarize(errors: PositionErrors, *, tolerance: float) -> dict[str, object]:
     if positions == 0:
         raise ValueError("no positions to summarize")
     bins = []
-    for low, high in zip(MARGIN_BIN_EDGES, MARGIN_BIN_EDGES[1:], strict=False):
+    for low, high in pairwise(MARGIN_BIN_EDGES):
         in_bin = (errors.fp32_margin >= low) & (errors.fp32_margin < high)
         bins.append(
             {

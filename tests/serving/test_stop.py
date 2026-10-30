@@ -142,7 +142,7 @@ class ScriptedAsyncEngine:
         self._counter = 0
         self.aborted = False
 
-    def start(self) -> None:  # noqa: D401 - lifecycle no-op
+    def start(self) -> None:
         return None
 
     def stop(self) -> None:

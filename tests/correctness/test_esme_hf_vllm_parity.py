@@ -216,7 +216,7 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
     # NON-tie -> not agreement, so the system would report no tok/s. This proves the gate still
     # rejects real divergences; it is not a blanket pass.
     gold = reference["r0"]
-    wrong = [(gold[0] + 1) % runtime.model.config.vocab_size] + list(gold[1:])
+    wrong = [(gold[0] + 1) % runtime.model.config.vocab_size, *gold[1:]]
     bad = tie_tolerant_agreement(runtime.model, requests, {"r0": wrong}, reference, eos)
     assert bad.nontie == 1
     assert not bad.all_ties_or_exact

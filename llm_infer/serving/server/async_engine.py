@@ -252,7 +252,7 @@ class AsyncInferenceEngine:
                 step_started_s = time.perf_counter()
                 result = self._engine.step()
                 self._dispatch(result, admitted_s=step_started_s)
-        except BaseException as exc:  # noqa: BLE001 — contain a dead loop, never hang clients
+        except BaseException as exc:
             self._fail_all(exc)
 
     def _fail_all(self, exc: BaseException) -> None:
@@ -283,7 +283,7 @@ class AsyncInferenceEngine:
         for request, stream in pending:
             try:
                 self._engine.add_request(request)
-            except Exception as exc:  # noqa: BLE001 — a bad submission must not kill the loop
+            except Exception as exc:
                 # Preflight (assert_admissible) already rejects the common oversized case with a
                 # clean 4xx, so reaching here means an unexpected engine rejection. Fail just this
                 # stream — the consumer re-raises ``error`` — and keep serving every other client.

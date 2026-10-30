@@ -41,9 +41,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Make the prompt builder importable when run as a script from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llm_infer.model.config import MODEL_ID, MODEL_REVISION  # noqa: E402
-from tests.correctness.cases import GOLDEN_CASES  # noqa: E402
-from tests.correctness.prompt import build_cot_messages  # noqa: E402
+from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+from tests.correctness.cases import GOLDEN_CASES
+from tests.correctness.prompt import build_cot_messages
 
 # Decoding config — pinned into the fixture so the reference check decodes identically.
 DTYPE = "float32"  # fp32: greedy tie-breaks near-vanish (see docs/fixture-format.md)

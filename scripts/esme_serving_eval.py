@@ -619,7 +619,7 @@ async def run_engine_workload(
                 token_times_s=token_times_s,
                 finish_reason=finish_reason,
             )
-        except Exception as exc:  # noqa: BLE001 - one bad request is an eval record, not a crash.
+        except Exception as exc:
             return ClientRequestResult(
                 request_id=spec.request_id,
                 status="error",

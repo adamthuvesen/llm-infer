@@ -304,7 +304,7 @@ def record_object(value: object, context: str) -> dict[str, object]:
     """Validate a JSON object before reading persisted evidence fields."""
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError(f"{context} must be a JSON object with string keys")
-    return {key: item for key, item in value.items()}
+    return dict(value.items())
 
 
 def benchmark_rows(value: object) -> list[dict[str, object]]:
@@ -416,17 +416,17 @@ def build_system_evidence_record(
 
 
 __all__ = [
+    "BF16_AGREEMENT_TOLERANCE",
     "POLICY_VERSION",
     "QUALIFIED_REFERENCE_STATUSES",
-    "ReferenceStatus",
     "EsmeAgreement",
     "ReferenceEvidence",
+    "ReferenceStatus",
     "SystemEvidence",
-    "BF16_AGREEMENT_TOLERANCE",
-    "headline_tokens_per_second",
     "benchmark_rows",
     "build_reference_only_record",
     "build_system_evidence_record",
+    "headline_tokens_per_second",
     "normalized_outputs_match",
     "reference_status",
 ]
