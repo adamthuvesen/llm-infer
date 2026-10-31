@@ -36,12 +36,10 @@ Run `make install` once first.
 ## Limits
 
 - The tiny bundle has random weights. The drives prove transport, batching, and determinism.
-  They do not prove model quality or speed. `make test-slow` checks the 3B Qwen reference on CPU.
+  They do not prove model quality or speed. `make slow` checks the 3B Qwen reference on CPU.
 - No drive runs FlashInfer, CUDA graphs, or a benchmark. Those are paid Modal runs. When one
   refuses, quote the printed command to Adam and wait. Never add `--approved` or
   `LLM_INFER_SERVE_APPROVED=1` yourself.
-- CPU-only Modal functions (for example `convert_bundle_to_hf`) are listed in the plan but not
-  called. They are not behind the spend gate.
 
 ## Gotchas
 

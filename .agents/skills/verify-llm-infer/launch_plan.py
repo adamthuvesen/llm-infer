@@ -1,8 +1,8 @@
 """Import every Modal script with the real modal package and try each paid path unapproved.
 
 Run by `verify launch-plan` from the repo root. Prints one JSON object. Nothing dispatches:
-local entrypoints and GPU functions must refuse, and the deployable server must refuse to import.
-CPU-only Modal functions are listed but not called.
+local entrypoints and Modal functions, CPU-only ones included, must refuse, and the deployable
+server must refuse to import.
 """
 
 from __future__ import annotations
@@ -56,10 +56,7 @@ for path in sorted(Path("scripts").glob("modal_*.py")):
         if isinstance(obj, modal.app.LocalEntrypoint):
             entry[name] = ["entrypoint", None, outcome(obj)]
         elif isinstance(obj, modal.Function):
-            gpu = obj.spec.gpus
-            result = (
-                outcome(lambda obj=obj: obj.local(**placeholders(obj))) if gpu else "not called"
-            )
-            entry[name] = ["function", gpu, result]
+            result = outcome(lambda obj=obj: obj.local(**placeholders(obj)))
+            entry[name] = ["function", obj.spec.gpus, result]
     plan[path.stem] = entry
 print(json.dumps(plan))

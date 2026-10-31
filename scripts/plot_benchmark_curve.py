@@ -32,8 +32,8 @@ import math
 import sys
 from pathlib import Path
 
-import plotly.graph_objects as go  # pyright: ignore[reportMissingImports]
-from plotly.subplots import make_subplots  # pyright: ignore[reportMissingImports]
+import plotly.graph_objects as go  # pyright: ignore[reportMissingImports] -- a PEP 723 script dependency, not in the dev env
+from plotly.subplots import make_subplots  # pyright: ignore[reportMissingImports] -- a PEP 723 script dependency
 
 # PEP 723 runs in an isolated environment, without installing the inference package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

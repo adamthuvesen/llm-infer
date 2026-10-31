@@ -16,10 +16,11 @@ def decorator_name(decorator: ast.expr) -> str:
     return target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
 
 
-def modal_functions(tree: ast.Module, kind: str) -> list[ast.FunctionDef]:
+def modal_functions(tree: ast.Module, kind: str) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Top-level Modal functions of one kind: `gpu`, `paid` (any non-server), `server`, `entrypoint`."""
     found = []
     for node in tree.body:
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         names = {decorator_name(d) for d in node.decorator_list}
         gpu = any(
@@ -29,6 +30,7 @@ def modal_functions(tree: ast.Module, kind: str) -> list[ast.FunctionDef]:
         server = bool(names & SERVER_DECORATORS)
         if (
             (kind == "gpu" and gpu and not server)
+            or (kind == "paid" and "function" in names and not server)
             or (kind == "server" and gpu and server)
             or (kind == "entrypoint" and "local_entrypoint" in names)
         ):
@@ -62,5 +64,5 @@ def modal_calls(node: ast.AST) -> list[ast.Call]:
     ]
 
 
-def first_statement(function: ast.FunctionDef) -> ast.stmt:
+def first_statement(function: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt:
     return function.body[1] if ast.get_docstring(function) else function.body[0]

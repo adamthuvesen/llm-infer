@@ -87,12 +87,13 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 @app.function(image=FLASH_IMAGE, volumes={ESME_BUNDLE_MOUNT: esme_bundles}, timeout=30 * 60)
-def convert_bundle_to_hf() -> str:
+def convert_bundle_to_hf(approved: bool = False) -> str:
     """Convert the staged bundle to the HF Qwen3 checkpoint on the volume (remote, has torch).
 
     Mirrors the three-way harness's conversion step; each app owns its copy because Modal
     functions bind to their app. CPU-only key remap; ``commit()`` publishes the files.
     """
+    require_spend_approval(approved, __file__)
     from scripts.convert_esme_to_hf import convert
 
     config = convert(Path(REMOTE_BUNDLE_PATH), Path(REMOTE_HF_PATH), max_position_embeddings=1024)
@@ -1313,7 +1314,7 @@ def main(
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-curve")
     if command.startswith("ladder"):
-        print(f"[esme-curve] {convert_bundle_to_hf.remote()}")
+        print(f"[esme-curve] {convert_bundle_to_hf.remote(approved=True)}")
         print(f"[esme-curve] ablation ladder: batches {llm_infer_batches}, HF floor {hf_specs[0]}")
         sweep_res = json.loads(
             sweep_ladder.remote(
@@ -1469,7 +1470,7 @@ def main(
         return
 
     print("[esme-curve] converting bundle -> HF Qwen3 checkpoint (remote) ...")
-    print(f"[esme-curve] {convert_bundle_to_hf.remote()}")
+    print(f"[esme-curve] {convert_bundle_to_hf.remote(approved=True)}")
 
     vllm_res: dict[str, object]
     if skip_vllm:

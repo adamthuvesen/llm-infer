@@ -1,7 +1,7 @@
 """Refuse a paid Modal run unless Adam approved it.
 
-Every ``local_entrypoint`` and every GPU function takes ``approved: bool = False`` and calls
-``require_spend_approval`` first. Entrypoints forward ``approved=True`` to the GPU functions, so
+Every ``local_entrypoint`` and every Modal function takes ``approved: bool = False`` and calls
+``require_spend_approval`` first. Entrypoints forward ``approved=True`` to the Modal functions, so
 ``modal run <script>::<function>`` still refuses inside the container. The deployable server has
 no entrypoint, so ``require_serve_approval`` gates it on an environment variable at import time.
 """

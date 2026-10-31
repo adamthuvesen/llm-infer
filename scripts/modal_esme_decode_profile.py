@@ -427,10 +427,10 @@ def _python_profile(
     profiler.disable()
 
     stats = pstats.Stats(profiler)
-    total_s = stats.total_tt  # pyright: ignore[reportAttributeAccessIssue]
+    total_s = stats.total_tt  # pyright: ignore[reportAttributeAccessIssue] -- typeshed's pstats omits total_tt
     rows = []
     for (filename, lineno, name), (_cc, ncalls, tottime, cumtime, _callers) in sorted(
-        stats.stats.items(),  # pyright: ignore[reportAttributeAccessIssue]
+        stats.stats.items(),  # pyright: ignore[reportAttributeAccessIssue] -- typeshed's pstats omits stats
         key=lambda item: item[1][2],
         reverse=True,
     )[:25]:
@@ -803,7 +803,7 @@ def sync_report(batch_sizes: list[int], approved: bool = False) -> str:
 def flashinfer_graph_probe(approved: bool = False) -> str:
     """Capture only FlashInfer ``run`` and re-plan fixed buffers across page boundaries."""
     require_spend_approval(approved, __file__)
-    import flashinfer  # pyright: ignore[reportMissingImports]
+    import flashinfer  # pyright: ignore[reportMissingImports] -- installed only in the GPU image
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -2488,7 +2488,7 @@ def _host_timeline_row(runtime: ModelRuntime, size: int) -> _HostTimelineRow:
         "backend": runtime.model.backend,
         "model": runtime.model,
     }
-    torch.cuda.Event.synchronize = timed_synchronize  # pyright: ignore[reportAttributeAccessIssue]
+    torch.cuda.Event.synchronize = timed_synchronize  # pyright: ignore[reportAttributeAccessIssue] -- the profile patches the method to time each sync
     try:
         timed(engine, "step", "engine_step")
         passes.append(summarize("issue", decode_runs()))

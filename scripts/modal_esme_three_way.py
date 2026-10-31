@@ -72,7 +72,7 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 @app.function(image=esme_image, volumes={ESME_BUNDLE_MOUNT: esme_bundles}, timeout=30 * 60)
-def convert_bundle_to_hf() -> str:
+def convert_bundle_to_hf(approved: bool = False) -> str:
     """Convert the staged raw bundle to an HF Qwen3 checkpoint on the volume (remote, has torch).
 
     Runs on ``FLASH_IMAGE`` (torch present), reads the raw bundle the local entrypoint staged, and
@@ -80,6 +80,7 @@ def convert_bundle_to_hf() -> str:
     conversion is a key remap, no GPU. ``commit()`` makes the written files visible to later
     functions reading the same volume.
     """
+    require_spend_approval(approved, __file__)
     from scripts.convert_esme_to_hf import convert
 
     config = convert(Path(REMOTE_BUNDLE_PATH), Path(REMOTE_HF_PATH), max_position_embeddings=1024)
@@ -351,7 +352,7 @@ def main(command: str = "bench", bundle_path: str = "", approved: bool = False) 
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-3way")
     print("[esme-3way] converting bundle -> HF Qwen3 checkpoint (remote, FLASH_IMAGE) ...")
-    print(f"[esme-3way] {convert_bundle_to_hf.remote()}")
+    print(f"[esme-3way] {convert_bundle_to_hf.remote(approved=True)}")
 
     print(
         f"[esme-3way] {command}: Esme-214M-Chat naive HF vs llm_infer vs vLLM, "
