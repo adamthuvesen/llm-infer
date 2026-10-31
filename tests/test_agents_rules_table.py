@@ -46,9 +46,9 @@ def _defines(path: Path, name: str) -> bool:
     return False
 
 
-def test_enforced_rules_cite_defined_names() -> None:
+def citation_problems(agents: str) -> list[str]:
     problems = []
-    for row in _rows((ROOT / "AGENTS.md").read_text(encoding="utf-8")):
+    for row in _rows(agents):
         rule, enforced_by = row.split("|")[1:3]
         citations = re.findall(r"`([^`]+)`", enforced_by)
         if not citations:
@@ -57,6 +57,26 @@ def test_enforced_rules_cite_defined_names() -> None:
             path, _, name = citation.partition("::")
             if not name or not (ROOT / path).is_file() or not _defines(ROOT / path, name):
                 problems.append(f"{rule.strip()}: `{citation}`")
+    return problems
+
+
+def test_enforced_rules_cite_defined_names() -> None:
+    problems = citation_problems((ROOT / "AGENTS.md").read_text(encoding="utf-8"))
     assert not problems, f"AGENTS.md Enforced Rules citations fail. {FIX}:\n  " + "\n  ".join(
         problems
     )
+
+
+def test_the_check_refuses_each_rotten_citation() -> None:
+    table = (
+        "## Enforced Rules\n\n| Rule | Enforced by |\n| --- | --- |\n"
+        "| ok | `Makefile::check`, `pyproject.toml::tool.basedpyright` |\n"
+        "| bare | none |\n| target | `Makefile::check-foo` |\n"
+        "| def | `tests/test_strict_mode.py::no_such_test` |\n| key | `pyproject.toml::tool.nope` |\n"
+    )
+    assert citation_problems(table) == [
+        "bare: cites nothing",
+        "target: `Makefile::check-foo`",
+        "def: `tests/test_strict_mode.py::no_such_test`",
+        "key: `pyproject.toml::tool.nope`",
+    ]

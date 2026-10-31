@@ -23,9 +23,12 @@ GATE_FIX = (
 )
 
 
-def test_gpu_functions_refuse_direct_calls_without_approval() -> None:
+Modules = list[tuple[str, ast.Module]]
+
+
+def ungated_gpu_functions(mods: Modules) -> list[str]:
     ungated = []
-    for name, tree in modules():
+    for name, tree in mods:
         for fn in modal_functions(tree, "gpu"):
             first = first_statement(fn)
             gated = [arg.arg for arg in fn.args.args][-1:] == ["approved"] and calls(
@@ -33,34 +36,42 @@ def test_gpu_functions_refuse_direct_calls_without_approval() -> None:
             )
             if not gated:
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
-    assert not ungated, f"GPU functions callable without approval. {GATE_FIX}:\n  " + "\n  ".join(
-        ungated
-    )
+    return ungated
 
 
-def test_local_entrypoints_gate_before_any_modal_call() -> None:
+def calls_outside_raise(statement: ast.stmt) -> bool:
+    """Whether a statement calls anything other than an exception it raises."""
+    raised = {
+        id(node) for r in ast.walk(statement) if isinstance(r, ast.Raise) for node in ast.walk(r)
+    }
+    return any(isinstance(n, ast.Call) and id(n) not in raised for n in ast.walk(statement))
+
+
+def ungated_entrypoints(mods: Modules) -> list[str]:
     ungated = []
-    for name, tree in modules():
+    for name, tree in mods:
         for fn in modal_functions(tree, "entrypoint"):
             params = [arg.arg for arg in fn.args.args]
-            gates = [
-                call
-                for call in calls(fn, "require_spend_approval")
-                if {kw.arg for kw in call.keywords} == set(params[:-1])
-            ]
-            late = [call for call in modal_calls(fn) if gates and call.lineno < gates[0].lineno]
-            if params[-1:] != ["approved"] or not gates or late:
+            gate_at = next(
+                (
+                    index
+                    for index, statement in enumerate(fn.body)
+                    if any(
+                        {kw.arg for kw in call.keywords} == set(params[:-1])
+                        for call in calls(statement, "require_spend_approval")
+                    )
+                ),
+                None,
+            )
+            early = gate_at is not None and any(map(calls_outside_raise, fn.body[:gate_at]))
+            if params[-1:] != ["approved"] or gate_at is None or early:
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
-    assert not ungated, (
-        "Modal entrypoints must call `require_spend_approval(approved, __file__, <every other arg "
-        "as name=name>)` before any `.remote`/`.spawn`/`.map`, with `approved: bool = False` "
-        "last:\n  " + "\n  ".join(ungated)
-    )
+    return ungated
 
 
-def test_gpu_function_calls_forward_approval() -> None:
+def unforwarded_gpu_calls(mods: Modules) -> list[str]:
     missing = []
-    for name, tree in modules():
+    for name, tree in mods:
         gpu_names = {fn.name for fn in modal_functions(tree, "gpu")}
         for call in modal_calls(tree):
             assert isinstance(call.func, ast.Attribute)
@@ -70,22 +81,80 @@ def test_gpu_function_calls_forward_approval() -> None:
             )
             if target in gpu_names and not forwarded:
                 missing.append(f"{name}:{call.lineno} {target}")
-    assert not missing, f"GPU calls without `approved=True`. {GATE_FIX}:\n  " + "\n  ".join(missing)
+    return missing
 
 
-def test_server_apps_refuse_to_start_without_approval() -> None:
+def ungated_servers(mods: Modules) -> list[str]:
     ungated = []
-    for name, tree in modules():
+    for name, tree in mods:
         if not modal_functions(tree, "server"):
             continue
         apps = [n.lineno for n in tree.body if "modal.App(" in ast.unparse(n)]
         gates = [n.lineno for n in tree.body if calls(n, "require_serve_approval")]
         if not gates or not apps or gates[0] > apps[0]:
             ungated.append(name)
+    return ungated
+
+
+def test_gpu_functions_refuse_direct_calls_without_approval() -> None:
+    ungated = ungated_gpu_functions(modules())
+    assert not ungated, f"GPU functions callable without approval. {GATE_FIX}:\n  " + "\n  ".join(
+        ungated
+    )
+
+
+def test_local_entrypoints_gate_before_any_modal_call() -> None:
+    ungated = ungated_entrypoints(modules())
+    assert not ungated, (
+        "Modal entrypoints must call `require_spend_approval(approved, __file__, <every other arg "
+        "as name=name>)` before any other call (only argument checks that raise may come first), "
+        "with `approved: bool = False` last:\n  " + "\n  ".join(ungated)
+    )
+
+
+def test_gpu_function_calls_forward_approval() -> None:
+    missing = unforwarded_gpu_calls(modules())
+    assert not missing, f"GPU calls without `approved=True`. {GATE_FIX}:\n  " + "\n  ".join(missing)
+
+
+def test_server_apps_refuse_to_start_without_approval() -> None:
+    ungated = ungated_servers(modules())
     assert not ungated, (
         "Deployable Modal servers must call `require_serve_approval(...)` under "
         "`if modal.is_local():` before `modal.App(...)`: " + ", ".join(ungated)
     )
+
+
+BAD_SCRIPT = """
+import modal
+app = modal.App("x")
+require_serve_approval("modal serve x.py")
+
+@app.function(gpu="A100-80GB")
+def measure(n: int, approved: bool = False) -> None:
+    Path("rows.jsonl").write_text("")
+    require_spend_approval(approved, __file__, n=n)
+
+@app.function(gpu="A100-80GB")
+@modal.asgi_app()
+def web() -> None: ...
+
+@app.local_entrypoint()
+def main(n: int = 1, approved: bool = False) -> None:
+    if n < 0:
+        raise ValueError(f"n must be >= 0, got {n}")
+    Path("attempts.jsonl").write_text("")
+    require_spend_approval(approved, __file__, n=n)
+    measure.remote(n)
+"""
+
+
+def test_each_scan_finds_its_known_violation() -> None:
+    bad = [("scripts/bad.py", ast.parse(BAD_SCRIPT))]
+    assert ungated_gpu_functions(bad) == ["scripts/bad.py:7 measure"]
+    assert ungated_entrypoints(bad) == ["scripts/bad.py:16 main"]
+    assert unforwarded_gpu_calls(bad) == ["scripts/bad.py:21 measure"]
+    assert ungated_servers(bad) == ["scripts/bad.py"]
 
 
 def test_spend_gate_refuses_with_the_exact_approved_command() -> None:
