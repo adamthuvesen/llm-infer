@@ -1,4 +1,8 @@
 .DEFAULT_GOAL := check
+SHELL := bash
+.SHELLFLAGS := -euo pipefail -c
+# uv run and uv sync fail on a lockfile that no longer matches pyproject.toml instead of relocking.
+export UV_LOCKED := 1
 .PHONY: help install fix lint typecheck architecture-check test visualizer-test evidence-check visualizer-lint slow check verify
 
 help:  ## List commands and their purpose
@@ -47,7 +51,7 @@ visualizer-lint:  ## Type-check, lint, and format-check the visualizer
 # parallel. Type, evidence, and visualizer output is buffered and printed after the tests finish.
 check: architecture-check lint  ## Run all CPU verification checks
 	@log=$$(mktemp); \
-	$(MAKE) --no-print-directory typecheck evidence-check visualizer-test visualizer-lint >$$log 2>&1 & side=$$!; \
-	$(MAKE) --no-print-directory test; test_status=$$?; \
-	wait $$side; side_status=$$?; cat $$log; rm -f $$log; \
+	$(MAKE) --no-print-directory -k typecheck evidence-check visualizer-test visualizer-lint >$$log 2>&1 & side=$$!; \
+	test_status=0; $(MAKE) --no-print-directory test || test_status=$$?; \
+	side_status=0; wait $$side || side_status=$$?; cat $$log; rm -f $$log; \
 	exit $$((test_status || side_status))

@@ -135,7 +135,7 @@ forbidden_modules = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow' --strict-markers"
 markers = [
     "slow: loads the 3B model and runs a forward pass (CPU-runnable but heavy)",
 ]

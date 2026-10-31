@@ -41,6 +41,9 @@ run `make architecture-check` and `make check`.
 
 ## Enforced Rules
 
+The scheduler views restrict typed callers but do not enforce runtime immutability. Change
+membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
+
 | Rule | Enforced by | Added |
 | --- | --- | --- |
 | Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` | 2026-11-04 |
@@ -59,9 +62,6 @@ run `make architecture-check` and `make check`.
 | `make verify` reports a pass only when its control observes FAIL | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` | 2026-11-06 |
 | Every row cites names its file defines | `tests/test_agents_rules_table.py::test_enforced_rules_cite_defined_names` | 2026-11-06 |
 | No comment turns checks off: no file-level `# pyright:` comment, `noqa` on a ban, blanket `noqa`, rule-less ignore, or `@ts-nocheck` | `tests/test_strict_mode.py::test_no_file_downgrades_type_checking_mode`, `pyproject.toml::tool.basedpyright.reportIgnoreCommentWithoutRule`, `pyproject.toml::tool.ruff.lint.select` | 2026-11-07 |
-
-The scheduler views restrict typed callers but do not enforce runtime immutability. Change
-membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
 
 ## Change Navigation
 
