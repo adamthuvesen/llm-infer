@@ -45,10 +45,8 @@ from scripts.modal_esme_bundle import (
 )
 from scripts.modal_flash_image import (
     FLASH_IMAGE,
-    IGNORE,
-    LOCAL_PYTHON,
-    REMOTE_ROOT,
     REPO_ROOT,
+    VLLM_IMAGE,
 )
 
 if TYPE_CHECKING:
@@ -70,21 +68,7 @@ CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 
 app = modal.App("llm-infer-esme-batch-curve")
 
-# Same vLLM image recipe as scripts/modal_esme_three_way.py: vLLM pulls its own torch/CUDA
-# stack, so it cannot share the flash image (and therefore cannot share its container).
-vllm_image = (
-    modal.Image.debian_slim(python_version=LOCAL_PYTHON)
-    .pip_install("vllm")
-    .env(
-        {
-            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-            "VLLM_USE_FLASHINFER_SAMPLER": "0",
-        }
-    )
-    .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=IGNORE)
-    .workdir(REMOTE_ROOT)
-    .run_commands("pip install --no-deps -e .")
-)
+vllm_image = VLLM_IMAGE
 
 
 class _HfGenerator(Protocol):

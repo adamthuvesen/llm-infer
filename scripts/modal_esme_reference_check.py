@@ -29,6 +29,7 @@ from scripts.modal_esme_bundle import (
     local_bundle_path,
     stage_bundle,
 )
+from scripts.modal_image_pins import UV_VERSION, locked
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
@@ -50,11 +51,13 @@ _IGNORE = [
 
 image = (
     modal.Image.from_registry(CUDA_IMAGE, add_python=LOCAL_PYTHON)
-    # Same torch as pyproject.toml and the flash image; --no-deps below cannot correct it later.
-    .pip_install("torch==2.8.0", "transformers>=4.43", "numpy>=1.26")
+    # The locked torch, as in pyproject.toml and the flash image; --no-deps below cannot correct it.
+    .uv_pip_install(
+        f"uv=={UV_VERSION}", *locked("torch", "transformers", "numpy"), uv_version=UV_VERSION
+    )
     .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
     .workdir(REMOTE_ROOT)
-    .run_commands("pip install --no-deps -e .")
+    .run_commands("uv pip install --system --no-deps -e .")
 )
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)

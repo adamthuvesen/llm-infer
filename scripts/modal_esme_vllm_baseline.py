@@ -57,6 +57,7 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REMOTE_ROOT, REPO_ROOT
+from scripts.modal_image_pins import VLLM_VERSION, locked
 
 ESME_HF_DIR = "esme-214m-chat-hf-phase0"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
@@ -68,8 +69,6 @@ MAX_NEW_TOKENS = 128
 WARMUPS = 2
 MEASURED_ITERS = 10
 VLLM_PYTHON = "/opt/vllm/bin/python"
-# The version in the committed assets/esme-vllm-same-host*.json records, so reruns stay comparable.
-VLLM_VERSION = "0.24.0"
 ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused", "vllm")
 LLM_INFER_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused")
 
@@ -154,8 +153,8 @@ app = modal.App("llm-infer-esme-vllm-baseline")
 # interpreter, so neither engine rewrites the other's dependencies or retains CUDA memory.
 comparison_image = FLASH_IMAGE.run_commands(
     f"python -m venv {VLLM_PYTHON.rsplit('/', 2)[0]}",
-    f"{VLLM_PYTHON} -m pip install vllm=={VLLM_VERSION} modal==1.5.0",
-    f"{VLLM_PYTHON} -m pip install --no-deps -e {REMOTE_ROOT}",
+    f"uv pip install --python {VLLM_PYTHON} vllm=={VLLM_VERSION} {' '.join(locked('modal'))}",
+    f"uv pip install --python {VLLM_PYTHON} --no-deps -e {REMOTE_ROOT}",
 ).env(
     {
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",

@@ -9,13 +9,13 @@ install:  ## Sync the dev environment
 	npm ci --prefix visualizer
 
 fix:  ## Auto-format and apply safe lint fixes
-	uv run ruff check --fix .
-	uv run ruff format .
+	uv run ruff check --fix . .agents/skills/verify-llm-infer/verify
+	uv run ruff format . .agents/skills/verify-llm-infer/verify
 	cd visualizer && npx oxlint --fix --type-aware && npx oxfmt
 
 lint:  ## Lint and format-check (no changes)
-	uv run ruff check .
-	uv run ruff format --check .
+	uv run ruff check . .agents/skills/verify-llm-infer/verify
+	uv run ruff format --check . .agents/skills/verify-llm-infer/verify
 
 architecture-check:  ## Check dependency direction and policy isolation
 	uv run lint-imports --no-logo

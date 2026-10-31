@@ -25,10 +25,12 @@ Run `make install` once first.
 ## Reading results
 
 - Each drive prints `PASS|FAIL <drive> <seconds>s <what it proved or why it failed>`.
-- A FAIL names the expected value and the observed value.
+- A FAIL names the expected value and the observed value. A drive that crashes is a FAIL.
+- The run fails when it changes the checkout: a tracked, untracked, or ignored file, the index,
+  HEAD, or `.git/config`. Only `.verify/` and `__pycache__/` may change.
 - Evidence is in `.verify/runs/<utc>-<sha7>[-dirty]/`: per drive, the argv, redacted env,
   exit code, stdout, and stderr, plus `server.log`, the chat and stream bodies, `/metrics`, the
-  loadgen summary, `launch-plan.json`, and `summary.json`.
+  loadgen summary, `launch-plan.json`, and `summary.json` (overall `result` and `checkout_changed`).
 - The helper does not retry, so it never reports `FLAKY`. Run a failed drive again by name.
 
 ## Limits

@@ -7,6 +7,7 @@ The drive table, the control, and the repo's paths live in drives.py beside this
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import shutil
@@ -58,6 +59,61 @@ def git(*args: str) -> str:
     return result.stdout.strip()
 
 
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
+
+
+def checkout_state() -> dict[str, str]:
+    """HEAD, branch, git config and hooks, and every changed, untracked, or ignored path.
+
+    Changed and untracked files compare by content; ignored files by size and mtime, because
+    .venv holds too many files to hash. `.verify/` and `__pycache__/` are the only allowed writes.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    status = ["git", "status", "--porcelain=v2", "--branch", "-z", "-uall", "--ignored"]
+    listing = subprocess.run(status, cwd=ROOT, env=env, capture_output=True, check=True).stdout
+    git_dir = (ROOT / git("rev-parse", "--git-common-dir")).resolve()
+    state = {".git/config": digest(git_dir / "config")}
+    state |= {f".git/hooks/{hook.name}": digest(hook) for hook in (git_dir / "hooks").glob("*")}
+    entries = iter(os.fsdecode(listing).split("\0"))
+    for entry in entries:
+        if entry.startswith("# branch.oid ") or entry.startswith("# branch.head "):
+            key, _, value = entry[2:].partition(" ")
+            state[key] = value
+            continue
+        if not entry or entry.startswith("#"):
+            continue
+        kind = entry[0]
+        fields = {"1": 8, "2": 9, "u": 10}.get(kind)
+        path = entry[2:] if fields is None else entry.split(" ", fields)[fields]
+        if kind == "2":
+            next(entries)
+        if path.startswith(".verify/") or "__pycache__" in path.split("/"):
+            continue
+        target = ROOT / path
+        if kind == "!":
+            if target.exists():
+                info = target.stat()
+                state[path] = f"ignored:{info.st_size}:{info.st_mtime_ns}"
+        else:
+            status_code = entry.split(" ", 2)[1] if fields else kind
+            state[path] = f"{status_code}:{digest(target)}"
+    return state
+
+
+def unique_run_dir(stem: str) -> Path:
+    runs = ROOT / ".verify" / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, 1000):
+        candidate = runs / (stem if attempt == 1 else f"{stem}-{attempt}")
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise OSError(f"no free run directory for {stem} under {runs}")
+
+
 def changed_drives() -> list[str]:
     base = git("merge-base", "HEAD", "main") or git("merge-base", "HEAD", "origin/main")
     files = set(git("diff", "--name-only", base).splitlines())
@@ -101,8 +157,10 @@ def run_drives(names: list[str], run_dir: Path, control: bool) -> list[dict[str,
             drive = drives.CONTROL[1] if control else DRIVES[name].run
             try:
                 note, status = drive(evidence, env), "PASS"
-            except (DriveError, KeyError, ValueError, OSError) as exc:
+            except DriveError as exc:
                 status, note = "FAIL", str(exc)
+            except Exception as exc:
+                status, note = "FAIL", f"drive crashed: {type(exc).__name__}: {exc}"
             log = scratch / "tripwire.log"
             if log.exists() and log.read_text():
                 status, note = "FAIL", f"tripwire fired: {log.read_text().strip()}"
@@ -131,22 +189,43 @@ def main(argv: list[str]) -> int:
         print(f"unknown drive(s): {', '.join(unknown)}; see `verify list`", file=sys.stderr)
         return 2
     sha, dirty = git("rev-parse", "HEAD"), bool(git("status", "--porcelain"))
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     suffix = ("-dirty" if dirty else "") + ("-control" if control else "")
-    run_dir = ROOT / ".verify" / "runs" / f"{stamp}-{sha[:7]}{suffix}"
-    run_dir.mkdir(parents=True)
+    run_dir = unique_run_dir(f"{stamp}-{sha[:7]}{suffix}")
+    before = checkout_state()
     results: list[dict[str, object]] = []
+    changed: list[str] = []
     try:
         results = run_drives(names, run_dir, control)
     finally:
-        summary = {"sha": sha, "dirty": dirty, "control": control, "drives": results}
+        after = checkout_state()
+        changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+        if changed:
+            print(f"FAIL checkout changed during the run: {', '.join(changed)}", flush=True)
+        failed = bool(changed) or not results or any(r["result"] == "FAIL" for r in results)
+        summary = {
+            "sha": sha,
+            "dirty": dirty,
+            "control": control,
+            "result": "FAIL" if failed else "PASS",
+            "checkout_changed": changed,
+            "drives": results,
+        }
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
         print(f"evidence: {run_dir}")
-    failed = any(r["result"] == "FAIL" for r in results)
     if control:
-        verdict = "control: FAIL observed" if failed else "control: expected FAIL, drive passed"
-        print(verdict, file=sys.stderr)
-        return 0 if failed else 1
+        failures = [str(r["note"]) for r in results if r["result"] == "FAIL"]
+        if not changed and len(failures) == 1 and failures[0].startswith(drives.CONTROL_FAILURE):
+            print("control: FAIL observed", file=sys.stderr)
+            return 0
+        if failures:
+            print(
+                f"control: failed for another reason; expected {drives.CONTROL_FAILURE!r}",
+                file=sys.stderr,
+            )
+        else:
+            print("control: expected FAIL, drive passed", file=sys.stderr)
+        return 1
     return 1 if failed else 0
 
 
