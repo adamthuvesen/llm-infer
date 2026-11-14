@@ -802,7 +802,7 @@ async def run_network_http_workload(
         )
     )
     # Uvicorn runs inside this event loop and must not install its own signal handlers.
-    server.install_signal_handlers = lambda: None  # pyright: ignore[reportAttributeAccessIssue]
+    server.install_signal_handlers = lambda: None  # pyright: ignore[reportAttributeAccessIssue]  # uvicorn types the method as a def
     server_started_s = time.perf_counter()
     server_task = asyncio.create_task(server.serve())
     try:

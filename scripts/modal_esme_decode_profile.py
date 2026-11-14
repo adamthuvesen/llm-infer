@@ -1212,7 +1212,7 @@ def grouped_layer_ab(
                 candidate_runner.total_capture_seconds = time.perf_counter() - candidate_start
                 # The probe swaps the grouped runner into the piecewise slot; it serves the
                 # same decode-window interface.
-                _bundle_model(runtime).decode_graphs = candidate_runner  # pyright: ignore[reportAttributeAccessIssue]
+                _bundle_model(runtime).decode_graphs = candidate_runner  # pyright: ignore[reportAttributeAccessIssue]  # same decode-window interface
             torch.cuda.synchronize()
             decode_tokens = 0
             start = time.perf_counter()

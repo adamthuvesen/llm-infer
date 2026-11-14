@@ -3,7 +3,7 @@ SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 # uv run and uv sync fail on a lockfile that no longer matches pyproject.toml instead of relocking.
 export UV_LOCKED := 1
-.PHONY: help install fix lint typecheck architecture-check test visualizer-test evidence-check visualizer-lint slow check verify
+.PHONY: help install fix lint typecheck architecture-check test visualizer-deps visualizer-test evidence-check visualizer-lint slow check verify
 
 help:  ## List commands and their purpose
 	@awk 'BEGIN {FS = ":.*## "; print "Usage: make <target>\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -12,10 +12,10 @@ install:  ## Sync the dev environment
 	uv sync --extra dev --extra serving
 	npm ci --prefix visualizer
 
-fix:  ## Auto-format and apply safe lint fixes
+fix: visualizer-deps  ## Auto-format and apply safe lint fixes
 	uv run ruff check --fix . .agents/skills/verify-llm-infer/verify
 	uv run ruff format . .agents/skills/verify-llm-infer/verify
-	cd visualizer && npx oxlint --fix --type-aware && npx oxfmt
+	cd visualizer && ./node_modules/.bin/oxlint --fix --type-aware && ./node_modules/.bin/oxfmt
 
 lint:  ## Lint and format-check (no changes)
 	uv run ruff check . .agents/skills/verify-llm-infer/verify
@@ -43,13 +43,16 @@ verify:  ## Drive the real server, loadgen, and Modal launch paths on CPU (ARGS=
 visualizer-test:  ## Test trace loading in Node
 	node --test visualizer/trace_loader.test.mjs
 
-visualizer-lint:  ## Type-check, lint, and format-check the visualizer
-	cd visualizer && npx oxlint --type-aware --type-check --deny-warnings && npx oxfmt --check
+visualizer-deps:
+	@test -x visualizer/node_modules/.bin/oxlint && test -x visualizer/node_modules/.bin/oxfmt || { printf '%s\n' 'Visualizer tools are missing. Run make install.' >&2; exit 1; }
+
+visualizer-lint: visualizer-deps  ## Type-check, lint, and format-check the visualizer
+	cd visualizer && ./node_modules/.bin/oxlint --type-aware --type-check --deny-warnings && ./node_modules/.bin/oxfmt --check
 
 
 # Types, tests, and the evidence check are the slow parts and share no files, so they run in
 # parallel. Type, evidence, and visualizer output is buffered and printed after the tests finish.
-check: architecture-check lint  ## Run all CPU verification checks
+check: visualizer-deps architecture-check lint  ## Run all CPU verification checks
 	@log=$$(mktemp); \
 	$(MAKE) --no-print-directory -k typecheck evidence-check visualizer-test visualizer-lint >$$log 2>&1 & side=$$!; \
 	test_status=0; $(MAKE) --no-print-directory test || test_status=$$?; \

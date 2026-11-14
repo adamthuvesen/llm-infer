@@ -26,7 +26,7 @@ and the reference contract. [`docs/benchmark.md`](docs/benchmark.md) holds the b
 Use Python 3.13, [`uv`](https://docs.astral.sh/uv/), and Node 24. CI runs the same `make check`.
 
 ```bash
-uv sync --extra dev --extra serving
+make install
 make check        # import contracts, lint, format, types, CPU tests, evidence, visualizer
 make fix         # ruff fixes and format
 make help         # every target with its purpose
@@ -62,7 +62,7 @@ membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
 | Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` | 2026-11-06 |
 | `make verify ARGS=control` passes only on its exact expected FAIL; CI runs it after `verify all` | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` | 2026-11-06 |
 | Every row cites names its file defines | `tests/test_agents_rules_table.py::test_enforced_rules_cite_defined_names` | 2026-11-06 |
-| No comment turns checks off: no file-level `# pyright:` comment, `noqa` on a ban, blanket `noqa`, rule-less ignore, `@ts-nocheck`, or a rule-less JS lint disable | `tests/test_strict_mode.py::test_no_file_downgrades_type_checking_mode`, `pyproject.toml::tool.basedpyright.reportIgnoreCommentWithoutRule`, `pyproject.toml::tool.ruff.lint.select` | 2026-11-07 |
+| No comment turns checks off: no file-level `# pyright:` comment, `noqa` on a ban, blanket `noqa`, rule-less or reason-less pyright ignore, `@ts-nocheck`, or a rule-less JS lint disable | `tests/test_strict_mode.py::test_no_file_downgrades_type_checking_mode`, `pyproject.toml::tool.basedpyright.reportIgnoreCommentWithoutRule`, `pyproject.toml::tool.ruff.lint.select` | 2026-11-07 |
 
 ## Change Navigation
 

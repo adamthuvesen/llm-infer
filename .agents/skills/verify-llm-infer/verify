@@ -159,7 +159,7 @@ def run_drives(names: list[str], run_dir: Path, control: bool) -> list[dict[str,
                 note, status = drive(evidence, env), "PASS"
             except DriveError as exc:
                 status, note = "FAIL", str(exc)
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 status, note = "FAIL", f"drive crashed: {type(exc).__name__}: {exc}"
             log = scratch / "tripwire.log"
             if log.exists() and log.read_text():
@@ -215,7 +215,7 @@ def main(argv: list[str]) -> int:
         print(f"evidence: {run_dir}")
     if control:
         failures = [str(r["note"]) for r in results if r["result"] == "FAIL"]
-        if not changed and len(failures) == 1 and failures[0].startswith(drives.CONTROL_FAILURE):
+        if not changed and len(failures) == 1 and failures[0] == drives.CONTROL_FAILURE:
             print("control: FAIL observed", file=sys.stderr)
             return 0
         if failures:

@@ -64,14 +64,14 @@ def run_hf_sequential_esme(
             str(hf_checkpoint), dtype=_hf_dtype(device), local_files_only=True
         )
         .eval()
-        .to(device)  # pyright: ignore[reportArgumentType]
+        .to(device)  # pyright: ignore[reportArgumentType]  # from_pretrained protocol lacks Module.to
     )
 
     def decode_once() -> dict[str, list[int]]:
         outputs: dict[str, list[int]] = {}
         for req in requests:
             input_ids = torch.tensor([req.prompt_ids], device=device)
-            generated = model.generate(  # pyright: ignore[reportAttributeAccessIssue]
+            generated = model.generate(  # pyright: ignore[reportAttributeAccessIssue]  # protocol lacks generate
                 input_ids,
                 attention_mask=torch.ones_like(input_ids),
                 max_new_tokens=max_new_tokens,

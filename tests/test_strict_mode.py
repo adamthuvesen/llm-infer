@@ -15,6 +15,9 @@ PYTHON_SUPPRESSIONS = {
     "file-level `# pyright:` comment changes type checking for the file": re.compile(
         r"^\s*#\s*pyright:"
     ),
+    "`# pyright: ignore[rule]` has no reason after it": re.compile(
+        r"#\s*pyright:\s*ignore\[[^\]]*\]\s*$"
+    ),
     "`noqa` silences a banned API": re.compile(
         rf"#\s*(?:ruff:\s*)?noqa:[^#\n]*\b(?:{'|'.join(BANNED_RULES)})\b", re.IGNORECASE
     ),
@@ -60,6 +63,7 @@ def test_the_scan_finds_each_suppression_and_spares_rule_ignores() -> None:
         "# pyright: basic",
         "#pyright: strict=false",
         "# pyright: reportAssignmentType=false",
+        "x = 1  # pyright: ignore[reportAssignmentType]",
         f"from typing import Any  # noqa: {BANNED_RULES[0]}",
         f"# ruff: noqa: E402, {BANNED_RULES[0]}",
     ):

@@ -281,5 +281,5 @@ DRIVES = {
 }
 SMOKE = "serve-http"
 # The control passes only when its drive fails on exactly this planted expectation.
-CONTROL_FAILURE = "expected greedy reply 'tok_1 tok_2 tok_3 tok_4', got "
+CONTROL_FAILURE = f"expected greedy reply 'tok_1 tok_2 tok_3 tok_4', got {GREEDY_REPLY!r}"
 CONTROL = ("serve-http", control_serve_http)
