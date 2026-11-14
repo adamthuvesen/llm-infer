@@ -149,13 +149,14 @@ def ungated_servers(mods: Modules) -> list[str]:
 
 
 def modal_classes(mods: Modules) -> list[str]:
-    """Modal classes and sandboxes, which the gate, stall-guard, and launch-plan checks miss."""
+    """Modal classes, sandboxes, and image build functions, which the gate, stall-guard, and
+    launch-plan checks miss."""
     return [
         f"{name}:{node.lineno}"
         for name, tree in mods
         for node in ast.walk(tree)
         if (isinstance(node, ast.ClassDef) and "cls" in map(decorator_name, node.decorator_list))
-        or (isinstance(node, ast.Attribute) and node.attr in {"Cls", "Sandbox"})
+        or (isinstance(node, ast.Attribute) and node.attr in {"Cls", "Sandbox", "run_function"})
     ]
 
 
@@ -170,7 +171,8 @@ def test_modal_functions_refuse_direct_calls_without_approval() -> None:
 def test_paid_work_uses_modal_functions_not_classes() -> None:
     found = modal_classes(modules())
     assert not found, (
-        "Use `@app.function`, not `@app.cls`, `modal.Cls`, or `modal.Sandbox`: the spend gate, "
+        "Use `@app.function`, not `@app.cls`, `modal.Cls`, `modal.Sandbox`, or "
+        "`Image.run_function`: the spend gate, "
         "stall guard, and launch-plan checks cover functions only:\n  " + "\n  ".join(found)
     )
 
@@ -313,6 +315,7 @@ if __name__ == "__main__":
     with app.run():
         branch.remote(1, approved=True)
     modal.Sandbox.create("python", app=app)
+    image.run_function(warm, gpu="A100-80GB")
 """
 
 
@@ -327,4 +330,4 @@ def test_each_scan_refuses_a_gate_that_cannot_refuse() -> None:
     assert ungated_entrypoints(bad) == ["scripts/open.py:11 main", "scripts/open.py:29 reset"]
     assert ungated_servers(bad) == ["scripts/open.py"]
     assert approvals_outside_entrypoints(bad) == ["scripts/open.py:39"]
-    assert modal_classes(bad) == ["scripts/open.py:40"]
+    assert sorted(modal_classes(bad)) == ["scripts/open.py:40", "scripts/open.py:41"]

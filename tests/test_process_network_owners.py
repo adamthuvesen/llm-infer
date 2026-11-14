@@ -22,6 +22,8 @@ BANNED_MODULES = (
     "aiohttp",
     "urllib3",
     "modal",
+    "openai",
+    "anthropic",
 )
 OS_PROCESS_CALLS = {
     *(f"exec{suffix}" for suffix in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")),

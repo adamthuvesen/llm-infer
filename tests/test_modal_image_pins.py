@@ -17,6 +17,10 @@ from scripts import modal_image_pins
 ROOT = Path(__file__).resolve().parents[1]
 EXACT = re.compile(r"^[A-Za-z0-9_.\-\[\]]+==[^=<>~!*\s]+$")
 PIP = re.compile(r"(?<!uv )\bpip3?(?:\.\d+)? install\b")
+OTHER_INSTALLERS = re.compile(
+    r"\b(?:(?:uv tool|pipx|conda|mamba|micromamba|poetry) install|uv pip sync|uv add|uv run --with)\b"
+)
+ALLOWED_INSTALL_METHODS = {"uv_pip_install", "apt_install"}
 # `uv pip install` flags whose next token is a path or an interpreter, not a package.
 UV_FLAGS_WITH_VALUE = {"-e", "--editable", "--python", "-p", "-r", "--requirement", "-c"}
 
@@ -47,11 +51,20 @@ def package_args(call: ast.Call) -> list[ast.expr]:
     return args
 
 
-def unpinned_uv_packages(command: str) -> list[str]:
-    """Packages a literal `uv pip install` command names without an exact pin."""
+def unpinned_uv_installs(command: str) -> list[str]:
+    """What a literal `uv pip install` command installs without an exact pin."""
     found: list[str] = []
     for install in re.split(r"\buv pip install\b", command)[1:]:
         tokens = re.split(r"\s+", install.split("&&")[0].strip())
+        if {"-r", "--requirement"} & set(tokens) or any(
+            t.startswith("--requirement=") for t in tokens
+        ):
+            found.append("a requirements file")
+        editable = {"-e", "--editable", "."} & set(tokens) or any(
+            t.startswith("--editable=") for t in tokens
+        )
+        if editable and "--no-deps" not in tokens:
+            found.append("a project without --no-deps, whose dependencies float")
         skip_next = False
         for token in tokens:
             if skip_next or not token:
@@ -74,10 +87,15 @@ def install_problems(source: str, label: str) -> list[str]:
         if isinstance(node, ast.JoinedStr)
         for part in node.values
     }
+    # Docstrings tell a person what to run locally; they build no image.
+    docs = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr.startswith("pip_install"):
-                problems.append(f"{label}:{node.lineno} uses pip; use uv_pip_install")
+            method = node.func.attr
+            if method.startswith("pip_install") or (
+                "install" in method and method not in ALLOWED_INSTALL_METHODS
+            ):
+                problems.append(f"{label}:{node.lineno} uses {method}; use uv_pip_install")
             if node.func.attr == "uv_pip_install":
                 if any(kw.arg == "requirements" for kw in node.keywords):
                     problems.append(f"{label}:{node.lineno} requirements= floats; pin inline")
@@ -87,12 +105,16 @@ def install_problems(source: str, label: str) -> list[str]:
                     if unpinned(arg)
                 ]
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if PIP.search(node.value):
-                problems.append(f"{label}:{node.lineno} runs pip; run `uv pip install` instead")
+            if id(node) in docs:
+                continue
+            if PIP.search(node.value) or OTHER_INSTALLERS.search(node.value):
+                problems.append(
+                    f"{label}:{node.lineno} runs pip or another installer; run `uv pip install` instead"
+                )
             if id(node) not in fragments:
                 problems += [
-                    f"{label}:{node.lineno} `uv pip install {package}` is not pinned with =="
-                    for package in unpinned_uv_packages(node.value)
+                    f"{label}:{node.lineno} `uv pip install` installs {what} without an exact pin"
+                    for what in unpinned_uv_installs(node.value)
                 ]
     return problems
 
@@ -121,6 +143,15 @@ def test_no_modal_image_installs_a_floating_version_or_uses_pip() -> None:
         'image.pip_install_from_requirements("requirements.txt")',
         'image.pip_install_from_pyproject("pyproject.toml")',
         'image.uv_pip_install(requirements=["requirements.txt"])',
+        'image.run_commands("uv pip install --system -r requirements.txt")',
+        'image.run_commands("uv pip install --system -e .")',
+        'image.run_commands("uv tool install vllm")',
+        'image.run_commands("pipx install vllm")',
+        'image.micromamba_install("vllm")',
+        'image.poetry_install_from_file("pyproject.toml")',
+        'image.run_commands("uv pip sync --system requirements.txt")',
+        'image.run_commands("poetry install")',
+        'image.run_commands("uv pip install --system --editable=.")',
     ],
 )
 def test_the_scan_refuses_each_floating_or_pip_form(source: str) -> None:
