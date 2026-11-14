@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from llm_infer.request.request import Request
 from llm_infer.scheduler import Scheduler, blocks_for_footprint, max_blocks_for
-from llm_infer.serving.request import Request
 
 
 def _request(request_id: str, prompt_len: int = 2, max_new_tokens: int = 2) -> Request:

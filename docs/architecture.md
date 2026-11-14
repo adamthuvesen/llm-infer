@@ -75,6 +75,7 @@ flowchart TB
 | [`kernels/`](../llm_infer/kernels/) | causal attention implementations behind `AttentionBackend` | RoPE, GQA expansion, paging |
 | [`kv_cache/`](../llm_infer/kv_cache/) | physical K/V tensor pool, block ids, scatter/gather | attention math, admission policy |
 | [`scheduler/`](../llm_infer/scheduler/) | waiting queue, running set, block budget reservation | physical block allocation |
+| [`request/`](../llm_infer/request/) | the `Request` state machine and its `SamplingParams` | scheduling, sampling math |
 | [`serving/`](../llm_infer/serving/) | request lifecycle, decode windows, engine step loop, sampler, server integration | model weights, backend choice |
 | [`tracing.py`](../llm_infer/tracing.py) | schema-versioned engine events for JSONL replay | visualizer rendering state |
 | [`benchmarks/`](../llm_infer/benchmarks/) | workloads, timing, reference qualification, record validation, A/B verdicts | model execution inside the policy module |
@@ -82,13 +83,14 @@ flowchart TB
 Dependency direction stays simple:
 
 ```text
-scripts/tests/server -> serving -> scheduler + model -> kv_cache + kernels
+scripts/tests/server -> serving -> scheduler + model -> request + kv_cache + kernels
 ```
 
-`make architecture-check` enforces four dependency contracts, including indirect imports.
+`make architecture-check` enforces the dependency contracts in `pyproject.toml`, including indirect imports.
+Requests import only KV block tables, never serving, scheduling, models, or benchmarks.
 KV cache and kernels cannot import models, scheduling, serving, or benchmarks.
 Models cannot import scheduling, serving, or benchmarks.
-The scheduler can import request values, but cannot import engine, HTTP, model, or benchmark code.
+The scheduler can import `request/`, but cannot import serving, model, or benchmark code.
 Policy readers cannot import inference execution.
 
 The main swap point is [`AttentionBackend`](../llm_infer/kernels/base.py). Model backends
@@ -98,7 +100,7 @@ prepare tensors, paging, RoPE positions, and GQA layout; attention backends comp
 KV release, and trace emission. Its methods keep admission, prefill, decode, preemption, and
 completion in one lifecycle owner.
 
-[`Request`](../llm_infer/serving/request.py) keeps one private state with four frozen phase types:
+[`Request`](../llm_infer/request/request.py) keeps one private state with four frozen phase types:
 
 | Phase | State |
 | --- | --- |

@@ -27,7 +27,7 @@ from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from llm_infer.serving.request import Request
+    from llm_infer.request.request import Request
 
 
 def blocks_for_length(positions: int, block_size: int) -> int:

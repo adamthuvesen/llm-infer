@@ -17,8 +17,8 @@ import pytest
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.runtime import load_model_runtime
+from llm_infer.request.sampling import SamplingParams
 from llm_infer.serving import InferenceEngine, Request
-from llm_infer.serving.sampler import SamplingParams
 
 _PROMPTS = ([1, 4, 7], [2, 5], [3, 6, 9, 10], [8, 1])
 

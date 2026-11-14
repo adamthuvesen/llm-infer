@@ -7,8 +7,8 @@ import torch
 
 from llm_infer.kv_cache.block_allocator import BlockAllocator
 from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.request.request import DecodeReady, Pending, Prefilling, Terminal
 from llm_infer.serving import InferenceEngine, Request, SamplingParams
-from llm_infer.serving.request import DecodeReady, Pending, Prefilling, Terminal
 from tests.support.tiny_qwen import tiny_qwen
 
 

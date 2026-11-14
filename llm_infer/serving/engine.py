@@ -25,11 +25,12 @@ from llm_infer.model.interface import (
 )
 from llm_infer.model.runtime import prepare_engine_grouped_decode, resolve_backend_capabilities
 from llm_infer.profiling import TimingProfiler
+from llm_infer.request.request import DecodeReady, Pending, Prefilling, Request
+from llm_infer.request.sampling import GREEDY, SamplingParams
 from llm_infer.scheduler.scheduler import Scheduler, blocks_for_footprint, max_blocks_for
 from llm_infer.serving.decode_window import DecodeWindow, DecodeWindows, PendingWindowFlush
 from llm_infer.serving.engine_trace import EngineTrace
-from llm_infer.serving.request import DecodeReady, Pending, Prefilling, Request
-from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row, sample_rows
+from llm_infer.serving.sampler import sample_row, sample_rows
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
 from llm_infer.tracing import TraceRecorder
 
@@ -773,20 +774,14 @@ class InferenceEngine:
         """
         previous = self._decode_windows.flush()
         if previous is not None:
-            if self.profiler is None:
+            with self._record_host_time("window_flushing"):
                 self._consume_window_flush(previous, result)
-            else:
-                with self.profiler.host("window_flushing"):
-                    self._consume_window_flush(previous, result)
 
     def _drain_decode_window(self, result: StepResult) -> None:
         """Consume every staged copy before changing batch composition or aborting."""
         for pending in self._decode_windows.drain():
-            if self.profiler is None:
+            with self._record_host_time("window_flushing"):
                 self._consume_window_flush(pending, result)
-            else:
-                with self.profiler.host("window_flushing"):
-                    self._consume_window_flush(pending, result)
 
     def _consume_window_flush(self, pending: PendingWindowFlush, result: StepResult) -> None:
         """Record a staged window into request state and release its finishers."""

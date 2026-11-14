@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 
 from llm_infer.model.interface import BackendCapabilities
-from llm_infer.serve import (
+from llm_infer.serving.server.runtime_app import (
     EngineDefaults,
     RuntimeDefaults,
     describe_run_config,

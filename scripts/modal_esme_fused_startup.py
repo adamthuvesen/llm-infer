@@ -50,7 +50,7 @@ def _child(arm: str) -> dict[str, object]:
     from fastapi.testclient import TestClient
 
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serve import build_app_from_runtime
+    from llm_infer.serving.server.runtime_app import build_app_from_runtime
 
     load_start = time.perf_counter()
     runtime = load_model_runtime(

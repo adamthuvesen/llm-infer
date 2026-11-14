@@ -16,9 +16,9 @@ import pytest
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serve import build_app_from_runtime
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
+from llm_infer.serving.server.runtime_app import build_app_from_runtime
 from scripts.loadgen import _percentile, format_summary, run_load, summarize
 from tests.serving.test_api import EOS_ID, TinyTokenizer
 from tests.support.json_result import dig_number

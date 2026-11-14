@@ -52,7 +52,7 @@ membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
 | Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` |
 | A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` |
 | Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py::DecodeWindows`, `tests/serving/test_decode_window.py::test_abort_flush_lands_in_next_step_result` |
-| Decode-ready requests always have a KV table | `llm_infer/serving/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` |
+| Decode-ready requests always have a KV table | `llm_infer/request/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` |
 | Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py::Scheduler`, `tests/scheduler/test_scheduler.py::test_cancel_releases_only_the_cancelled_requests_reservation` |
 | Trace replay rejects malformed events | `visualizer/trace_loader.js::validateEvent`, `Makefile::visualizer-test`, `tests/serving/test_tracing.py::test_trace_recorder_captures_real_engine_events` |
 | Modal entrypoints and every Modal function, CPU-only included, refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1`; paid work uses `@app.function`, never `@app.cls` | `scripts/modal_approval.py::require_spend_approval`, `tests/test_modal_approval.py::test_local_entrypoints_gate_before_any_modal_call`, `tests/test_modal_approval.py::test_modal_functions_refuse_direct_calls_without_approval`, `tests/test_modal_approval.py::test_paid_work_uses_modal_functions_not_classes`, `tests/test_modal_approval.py::test_only_a_gated_entrypoint_forwards_approval`, `tests/test_modal_approval.py::test_server_apps_refuse_to_start_without_approval` |
@@ -67,7 +67,7 @@ Paths start inside `llm_infer/`, except `tests/` and `visualizer/`.
 | Change | Start here | Check |
 | --- | --- | --- |
 | Backend support or grouped graph construction | `model/interface.py`, `model/runtime.py` | `tests/model/test_runtime.py`, `tests/serving/test_engine_grouped_decode.py` |
-| Request lifecycle or KV release | `serving/request.py`, `serving/engine.py`, `scheduler/scheduler.py` | `tests/correctness/test_request_lifecycle.py`, `tests/correctness/test_preemption.py` |
+| Request lifecycle or KV release | `request/request.py`, `serving/engine.py`, `scheduler/scheduler.py` | `tests/correctness/test_request_lifecycle.py`, `tests/correctness/test_preemption.py` |
 | Deferred decode windows | `serving/decode_window.py`, `serving/engine.py` | `tests/serving/test_decode_window.py` |
 | Benchmark timing or oracle caching | `benchmarks/esme_paged.py`, `benchmarks/esme_measurement.py` | `tests/benchmarks/test_esme_measurement.py` |
 | Benchmark qualification or A/B verdicts | `benchmarks/reference_policy.py`, `benchmarks/paired_ab.py` | `tests/benchmarks/`, `make evidence-check` |

@@ -9,7 +9,7 @@ import torch
 
 from llm_infer.kv_cache.block_allocator import BlockPoolEvent
 from llm_infer.profiling import TimingProfiler
-from llm_infer.serving.request import Request
+from llm_infer.request.request import Request
 from llm_infer.tracing import (
     FinishReason,
     PreemptReason,

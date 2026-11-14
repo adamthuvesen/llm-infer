@@ -86,15 +86,6 @@ class PrefixCacheStore:
         # hold refs outside the free list.
         allocator.eviction_source = self._evict_for_shortfall
 
-    @property
-    def entry_count(self) -> int:
-        """Number of cached prefixes currently held."""
-        return len(self._entries)
-
-    def cached_prefixes(self) -> list[tuple[int, ...]]:
-        """Token ids of the current entries, least- to most-recently-used (introspection)."""
-        return [entry.token_ids for entry in self._entries]
-
     def lookup(self, prompt_ids: list[int]) -> PrefixCacheHit | None:
         """Longest block-aligned prefix of ``prompt_ids`` held in the store, or ``None``.
 

@@ -123,12 +123,22 @@ source_modules = ["llm_infer.model"]
 forbidden_modules = ["llm_infer.scheduler", "llm_infer.serving", "llm_infer.benchmarks"]
 
 [[tool.importlinter.contracts]]
-name = "Scheduler uses request values without engine, HTTP, model, or benchmark imports"
+name = "Scheduler uses request values without serving, model, or benchmark imports"
 type = "forbidden"
 source_modules = ["llm_infer.scheduler"]
 forbidden_modules = [
-    "llm_infer.serving.engine",
-    "llm_infer.serving.server",
+    "llm_infer.serving",
+    "llm_infer.model",
+    "llm_infer.benchmarks",
+]
+
+[[tool.importlinter.contracts]]
+name = "Requests depend only on KV block tables"
+type = "forbidden"
+source_modules = ["llm_infer.request"]
+forbidden_modules = [
+    "llm_infer.serving",
+    "llm_infer.scheduler",
     "llm_infer.model",
     "llm_infer.benchmarks",
 ]

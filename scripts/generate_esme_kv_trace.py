@@ -18,8 +18,8 @@ from itertools import count
 from pathlib import Path
 
 from llm_infer.model.runtime import load_model_runtime
+from llm_infer.request.request import Request
 from llm_infer.serving.engine import InferenceEngine
-from llm_infer.serving.request import Request
 from llm_infer.tracing import TraceRecorder
 
 # The visualizer's committed sample is recorded from the real engine.

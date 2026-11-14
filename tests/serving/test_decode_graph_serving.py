@@ -23,7 +23,7 @@ import httpx
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import ModelRuntime, load_model_runtime
-from llm_infer.serve import build_app_from_runtime
+from llm_infer.serving.server.runtime_app import build_app_from_runtime
 
 # Three prompts stream concurrently so decode batches of 3 pad up to the bucket of 4.
 _PROMPTS = ("tok_4 tok_7 tok_10", "tok_5 tok_8 tok_6 tok_9", "tok_10 tok_4")

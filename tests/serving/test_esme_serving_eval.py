@@ -194,7 +194,7 @@ def test_phase0_http_workloads_pair_identical_greedy_and_sampled_shapes() -> Non
 
 
 def _sampled_record(runtime, request_id: str, token_ids: list[int]):
-    from llm_infer.serving.sampler import SamplingParams
+    from llm_infer.request.sampling import SamplingParams
     from scripts.esme_serving_eval import ObservedEngineRequest, RequestSignature
 
     sampling = SamplingParams(temperature=0.8, top_p=0.95, seed=17)

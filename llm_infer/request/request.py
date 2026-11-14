@@ -20,7 +20,7 @@ from typing import Literal
 import torch
 
 from llm_infer.kv_cache.block_table import BlockTable
-from llm_infer.serving.sampler import GREEDY, SamplingParams
+from llm_infer.request.sampling import GREEDY, SamplingParams
 
 PrefillMode = Literal["initial", "recompute"]
 
@@ -89,10 +89,6 @@ class Request:
             return state.cached_tokens
         table = self.block_table
         return table.length if table is not None else 0
-
-    @property
-    def prefilled(self) -> bool:
-        return isinstance(self._state, DecodeReady)
 
     @property
     def finished(self) -> bool:

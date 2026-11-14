@@ -62,7 +62,7 @@ def serve():
     import torch
 
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serve import build_app_from_runtime
+    from llm_infer.serving.server.runtime_app import build_app_from_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     runtime = load_model_runtime(

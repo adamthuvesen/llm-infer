@@ -8,7 +8,7 @@ import torch
 
 from llm_infer.model.decode_plan import DecodeWindowPlan
 from llm_infer.profiling import TimingProfiler
-from llm_infer.serving.request import Request
+from llm_infer.request.request import Request
 
 
 @dataclass

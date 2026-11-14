@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from llm_infer.serving.request import Request
+from llm_infer.request.request import Request
 
 
 def test_request_records_tensor_tokens_and_materializes_generated_ids() -> None:

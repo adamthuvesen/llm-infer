@@ -246,6 +246,7 @@ DRIVES = {
         [
             "llm_infer/serve.py",
             "llm_infer/serving/**",
+            "llm_infer/request/**",
             "llm_infer/model/**",
             "llm_infer/scheduler/**",
             "llm_infer/kv_cache/**",

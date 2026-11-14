@@ -1037,8 +1037,8 @@ intervals; negative is faster.)
   much grouped graphs pay, so the gain on another host may differ.
 
 **Decision.** By the registered rule, full-depth grouping becomes the HTTP-server default.
-`build_app_from_runtime` in `llm_infer/serve.py` now groups every layer. The raw engine keeps four
-layers, so benchmark records stay comparable.
+`build_app_from_runtime` (now in `llm_infer/serving/server/runtime_app.py`) groups every layer.
+The raw engine keeps four layers, so benchmark records stay comparable.
 
 Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json),
 [`assets/esme-full-step-ab-2.json`](../assets/esme-full-step-ab-2.json).

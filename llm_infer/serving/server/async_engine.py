@@ -12,10 +12,10 @@ from typing import Protocol
 
 import torch
 
+from llm_infer.request.request import Request
+from llm_infer.request.sampling import GREEDY, SamplingParams
 from llm_infer.scheduler.scheduler import blocks_for_length
 from llm_infer.serving.engine import InferenceEngine, StepResult
-from llm_infer.serving.request import Request
-from llm_infer.serving.sampler import GREEDY, SamplingParams
 from llm_infer.serving.server.metrics import ServerMetrics
 
 

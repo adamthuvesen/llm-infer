@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import ast
 import asyncio
 import hashlib
@@ -28,7 +27,11 @@ from llm_infer.model.runtime import (
     available_backends,
     load_model_runtime,
 )
-from llm_infer.serve import DEFAULT_BACKEND, _bundle_path_for_backend, build_app_from_runtime
+from llm_infer.serving.server.runtime_app import (
+    DEFAULT_BACKEND,
+    build_app_from_runtime,
+    bundle_path_for_backend,
+)
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -181,7 +184,7 @@ def test_serve_defaults_to_esme_backend() -> None:
 
 
 def test_serve_bundle_backend_uses_env_bundle() -> None:
-    bundle = _bundle_path_for_backend(
+    bundle = bundle_path_for_backend(
         "esme",
         explicit_bundle=None,
         env_bundle="/tmp/esme-214m-chat",
@@ -191,12 +194,12 @@ def test_serve_bundle_backend_uses_env_bundle() -> None:
 
 
 def test_serve_bundle_backend_requires_bundle() -> None:
-    with pytest.raises(argparse.ArgumentTypeError, match="requires --bundle"):
-        _bundle_path_for_backend("esme", explicit_bundle=None, env_bundle=None)
+    with pytest.raises(ValueError, match="requires --bundle"):
+        bundle_path_for_backend("esme", explicit_bundle=None, env_bundle=None)
 
 
 def test_serve_qwen_reproduction_ignores_env_bundle() -> None:
-    bundle = _bundle_path_for_backend(
+    bundle = bundle_path_for_backend(
         "qwen",
         explicit_bundle=None,
         env_bundle="/tmp/esme-214m-chat",
@@ -206,8 +209,8 @@ def test_serve_qwen_reproduction_ignores_env_bundle() -> None:
 
 
 def test_serve_qwen_rejects_explicit_bundle() -> None:
-    with pytest.raises(argparse.ArgumentTypeError, match="does not accept --bundle"):
-        _bundle_path_for_backend(
+    with pytest.raises(ValueError, match="does not accept --bundle"):
+        bundle_path_for_backend(
             "qwen",
             explicit_bundle=Path("/tmp/esme-214m-chat"),
             env_bundle=None,
@@ -424,6 +427,7 @@ def test_generic_modules_do_not_import_qwen_directly() -> None:
         root / "llm_infer" / "model" / "decode.py",
         root / "llm_infer" / "serving" / "engine.py",
         root / "llm_infer" / "serve.py",
+        root / "llm_infer" / "serving" / "server" / "runtime_app.py",
     ]
     for path in generic_paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))

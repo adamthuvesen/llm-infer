@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from llm_infer.model.interface import TokenizerLike
-from llm_infer.serving.sampler import SamplingParams
+from llm_infer.request.sampling import SamplingParams
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.metrics import ServerMetrics
 from llm_infer.serving.server.protocol import (
