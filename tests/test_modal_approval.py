@@ -11,7 +11,9 @@ from tests.support.modal_source import (
     SCRIPTS,
     calls,
     decorator_name,
+    defaults_to_false,
     first_statement,
+    gate_calls,
     modal_calls,
     modal_functions,
     modules,
@@ -32,9 +34,7 @@ def ungated_modal_functions(mods: Modules) -> list[str]:
     for name, tree in mods:
         for fn in modal_functions(tree, "paid"):
             first = first_statement(fn)
-            gated = [arg.arg for arg in fn.args.args][-1:] == ["approved"] and calls(
-                first, "require_spend_approval"
-            )
+            gated = defaults_to_false(fn) and gate_calls(first)
             if not gated:
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
     return ungated
@@ -59,13 +59,13 @@ def ungated_entrypoints(mods: Modules) -> list[str]:
                     for index, statement in enumerate(fn.body)
                     if any(
                         {kw.arg for kw in call.keywords} == set(params[:-1])
-                        for call in calls(statement, "require_spend_approval")
+                        for call in gate_calls(statement)
                     )
                 ),
                 None,
             )
             early = gate_at is not None and any(map(calls_outside_raise, fn.body[:gate_at]))
-            if params[-1:] != ["approved"] or gate_at is None or early:
+            if not defaults_to_false(fn) or gate_at is None or early:
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
     return ungated
 
@@ -212,3 +212,29 @@ def test_serve_gate_needs_the_approval_variable(monkeypatch: pytest.MonkeyPatch)
         require_serve_approval(command)
     monkeypatch.setenv("LLM_INFER_SERVE_APPROVED", "1")
     require_serve_approval(command)
+
+
+OPEN_GATES = """
+@app.function(gpu="A100-80GB")
+def opened(approved: bool = True) -> None:
+    require_spend_approval(approved, __file__)
+
+@app.function()
+def forced(approved: bool = False) -> None:
+    require_spend_approval(True, __file__)
+
+@app.local_entrypoint()
+def main(approved: bool = True) -> None:
+    require_spend_approval(approved, __file__)
+
+@app.function(timeout=60)
+@modal.asgi_app()
+def web() -> None: ...
+"""
+
+
+def test_each_scan_refuses_a_gate_that_cannot_refuse() -> None:
+    bad = [("scripts/open.py", ast.parse(OPEN_GATES))]
+    assert ungated_modal_functions(bad) == ["scripts/open.py:3 opened", "scripts/open.py:7 forced"]
+    assert ungated_entrypoints(bad) == ["scripts/open.py:11 main"]
+    assert ungated_servers(bad) == ["scripts/open.py"]

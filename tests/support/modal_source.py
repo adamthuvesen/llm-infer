@@ -31,7 +31,7 @@ def modal_functions(tree: ast.Module, kind: str) -> list[ast.FunctionDef | ast.A
         if (
             (kind == "gpu" and gpu and not server)
             or (kind == "paid" and "function" in names and not server)
-            or (kind == "server" and gpu and server)
+            or (kind == "server" and "function" in names and server)
             or (kind == "entrypoint" and "local_entrypoint" in names)
         ):
             found.append(node)
@@ -66,3 +66,23 @@ def modal_calls(node: ast.AST) -> list[ast.Call]:
 
 def first_statement(function: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt:
     return function.body[1] if ast.get_docstring(function) else function.body[0]
+
+
+def defaults_to_false(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether the last parameter is `approved` with the default `False`."""
+    args, defaults = function.args.args, function.args.defaults
+    return (
+        [arg.arg for arg in args][-1:] == ["approved"]
+        and bool(defaults)
+        and isinstance(defaults[-1], ast.Constant)
+        and defaults[-1].value is False
+    )
+
+
+def gate_calls(node: ast.AST) -> list[ast.Call]:
+    """`require_spend_approval` calls that pass the `approved` parameter itself first."""
+    return [
+        call
+        for call in calls(node, "require_spend_approval")
+        if call.args and isinstance(call.args[0], ast.Name) and call.args[0].id == "approved"
+    ]
