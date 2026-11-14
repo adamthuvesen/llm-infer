@@ -24,6 +24,13 @@ BANNED_MODULES = (
     "modal",
     "openai",
     "anthropic",
+    "litellm",
+    "google.genai",
+    "google.generativeai",
+    "mistralai",
+    "cohere",
+    "boto3",
+    "snowflake.connector",
 )
 OS_PROCESS_CALLS = {
     *(f"exec{suffix}" for suffix in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")),
@@ -145,7 +152,7 @@ def test_the_scan_finds_each_form() -> None:
         "import httpx as h\nfrom os import system\nimport asyncio\nimport os\n"
         "asyncio.create_subprocess_exec('x')\nos.execvp('x', [])\nfrom . import socket\n"
         "import os as o\no.system('x')\nloop.subprocess_exec(f)\nasyncio.open_connection(h, p)\n"
-        "import modal\n"
+        "import modal\nfrom google import genai\n"
     )
     assert process_and_network_uses(ast.parse(source)) == {
         "subprocess",
@@ -157,6 +164,7 @@ def test_the_scan_finds_each_form() -> None:
         "asyncio.subprocess",
         "asyncio.connection",
         "modal",
+        "google.genai",
     }
 
 

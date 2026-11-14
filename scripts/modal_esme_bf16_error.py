@@ -262,7 +262,7 @@ def main(command: str = "run", bundle_path: str = "", approved: bool = False) ->
     """``run`` measures on the A100; ``smoke`` runs a tiny CPU version locally."""
     if command not in ("run", "smoke"):
         raise ValueError(f"command must be 'run' or 'smoke', got {command!r}")
-    if command == "run":
+    if command != "smoke":
         require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     local_bundle = local_bundle_path(bundle_path)
     count = PROMPT_COUNT if command == "run" else 4
