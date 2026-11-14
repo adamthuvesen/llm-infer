@@ -18,7 +18,8 @@ DOC_SUFFIXES = {".md", ".txt", ".yml", ".yaml", ".sh"}
 
 
 def approved_commands(path: Path, text: str) -> list[str]:
-    if path.suffix not in DOC_SUFFIXES and path.name != "Makefile":
+    is_script_docstring = path.suffix == ".py" and path.parent.name == "scripts"
+    if path.suffix not in DOC_SUFFIXES and path.name != "Makefile" and not is_script_docstring:
         return []
     return [
         f"{path.name}:{number}"
@@ -45,3 +46,4 @@ def test_the_scan_finds_each_approved_form_and_spares_the_warning() -> None:
     assert approved_commands(doc, "LLM_INFER_SERVE_APPROVED=1 modal deploy scripts/x.py")
     assert not approved_commands(doc, "Never add `--approved` or `LLM_INFER_SERVE_APPROVED=1`.")
     assert not approved_commands(doc, "modal run scripts/modal_x.py --command run")
+    assert approved_commands(Path("scripts/x.py"), "# modal run scripts/modal_x.py --approved")

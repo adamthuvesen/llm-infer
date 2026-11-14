@@ -820,6 +820,7 @@ async def run_network_http_workload(
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}",
             timeout=timeout,
+            trust_env=False,
             limits=httpx.Limits(
                 max_connections=connection_limit,
                 max_keepalive_connections=connection_limit,

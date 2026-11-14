@@ -22,7 +22,20 @@ OTHER_INSTALLERS = re.compile(
 )
 ALLOWED_INSTALL_METHODS = {"uv_pip_install", "apt_install"}
 # `uv pip install` flags whose next token is a path or an interpreter, not a package.
-UV_FLAGS_WITH_VALUE = {"-e", "--editable", "--python", "-p", "-r", "--requirement", "-c"}
+UV_FLAGS_WITH_VALUE = {
+    "-e",
+    "--editable",
+    "--python",
+    "-p",
+    "-r",
+    "--requirement",
+    "-c",
+    "--index-url",
+    "--extra-index-url",
+    "-f",
+    "--find-links",
+    "--target",
+}
 
 
 def unpinned(arg: ast.expr) -> bool:
@@ -160,6 +173,13 @@ def test_the_scan_refuses_each_floating_or_pip_form(source: str) -> None:
 
 def test_the_scan_accepts_exact_uv_installs() -> None:
     source = 'image.uv_pip_install("uv==0.13.5", f"vllm=={V}", *locked("torch"))\nimage.run_commands("uv pip install --system --no-deps -e .")'
+    assert install_problems(source, "x.py") == []
+
+
+def test_the_scan_accepts_a_pinned_install_from_an_index() -> None:
+    source = (
+        'image.run_commands("uv pip install --system torch==2.9.0 --index-url https://x.test/whl")'
+    )
     assert install_problems(source, "x.py") == []
 
 

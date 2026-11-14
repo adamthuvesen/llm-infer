@@ -48,6 +48,14 @@ def calls_outside_raise(statement: ast.stmt) -> bool:
     return any(isinstance(n, ast.Call) and id(n) not in raised for n in ast.walk(statement))
 
 
+def forwards_approval(statement: ast.stmt) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and any(kw.arg == "approved" and ast.unparse(kw.value) == "True" for kw in node.keywords)
+        for node in ast.walk(statement)
+    )
+
+
 def ungated_entrypoints(mods: Modules) -> list[str]:
     ungated = []
     for name, tree in mods:
@@ -66,7 +74,15 @@ def ungated_entrypoints(mods: Modules) -> list[str]:
                 ),
                 None,
             )
-            early = gate_at is not None and any(map(calls_outside_raise, fn.body[:gate_at]))
+            conditional = gate_at is not None and gate_call(fn.body[gate_at]) is None
+            forwards_past_gate = conditional and any(
+                forwards_approval(statement)
+                for statement in fn.body
+                if not isinstance(statement, ast.If | ast.For | ast.While | ast.With | ast.Try)
+            )
+            early = forwards_past_gate or (
+                gate_at is not None and any(map(calls_outside_raise, fn.body[:gate_at]))
+            )
             if not defaults_to_false(fn) or gate_at is None or early or assigns_approved(fn):
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
     return ungated
@@ -250,6 +266,20 @@ def test_each_scan_finds_its_known_violation() -> None:
     assert unforwarded_modal_calls(bad) == ["scripts/bad.py:30 measure"]
     assert ungated_servers(bad) == ["scripts/bad.py"]
     assert modal_classes(bad) == ["scripts/bad.py:20"]
+
+
+BRANCH_GATED_SCRIPT = """
+@app.local_entrypoint()
+def main(mode: str = "dry", approved: bool = False) -> None:
+    if mode == "run":
+        require_spend_approval(approved, __file__, mode=mode)
+    measure.remote(approved=True)
+"""
+
+
+def test_a_gate_in_one_branch_does_not_cover_an_unconditional_forward() -> None:
+    bad = [("scripts/branch.py", ast.parse(BRANCH_GATED_SCRIPT))]
+    assert ungated_entrypoints(bad) == ["scripts/branch.py:3 main"]
 
 
 def test_spend_gate_refuses_with_the_exact_approved_command() -> None:
