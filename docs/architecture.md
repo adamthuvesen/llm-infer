@@ -224,7 +224,7 @@ Policy evaluation does not import model execution.
 [`paired_ab.py`](../llm_infer/benchmarks/paired_ab.py) validates paired records and applies their
 registered decision rule. The CLI in [`judge_paired_ab.py`](../scripts/judge_paired_ab.py) supplies
 file input and exit status. [`check_benchmark_evidence.py`](../scripts/check_benchmark_evidence.py)
-checks committed records, public tables, regenerated figures, and registered verdicts.
+checks committed records, public tables, and registered verdicts (`make slow` also regenerates the figures).
 
 ## Serving Surface
 

@@ -121,9 +121,6 @@ def test_has_work_tracks_queue_and_running() -> None:
     assert not sched.has_work()
 
 
-# --- preemption policy ------------------------------------------------------------------
-
-
 def test_footprint_counts_prompt_plus_generated() -> None:
     request = _request("r", prompt_len=3, max_new_tokens=6)
     # Fresh: just the prompt -> ceil(3/4) = 1 block.

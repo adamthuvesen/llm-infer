@@ -152,7 +152,7 @@ is not the headline, for the reasons above.
 ## Local Checks
 
 These commands do not rerun GPU benchmarks. They check the local code, the committed records, the
-public tables against those records, and figure regeneration:
+public tables against those records:
 
 ```bash
 make check

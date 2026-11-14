@@ -30,7 +30,7 @@ make install
 make check        # import contracts, lint, format, types, CPU tests, evidence, visualizer
 make fix         # ruff fixes and format
 make help         # every target with its purpose
-make slow         # opt-in 3B Qwen reference check (minutes on CPU)
+make slow         # opt-in 3B Qwen reference check and figure regeneration
 ```
 
 Prove changes with `make verify` (`verify-llm-infer` skill at `.agents/skills/verify-llm-infer/`).
@@ -44,25 +44,21 @@ run `make architecture-check` and `make check`.
 The scheduler views restrict typed callers but do not enforce runtime immutability. Change
 membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
 
-| Rule | Enforced by | Added |
-| --- | --- | --- |
-| Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` | 2026-11-04 |
-| Package, scripts, tests, and the verify helper typecheck; basedpyright reports zero errors with no baseline | `pyproject.toml::tool.basedpyright.typeCheckingMode`, `Makefile::typecheck` | 2026-11-04 |
-| Modal images install exact versions through uv: lock versions from `uv.lock`, vLLM from one pin | `tests/test_modal_image_pins.py::test_no_modal_image_installs_a_floating_version_or_uses_pip`, `scripts/modal_image_pins.py::locked` | 2026-11-07 |
-| Process, network, and Modal modules stay in their owner files; Modal only in `scripts/modal_*.py`, where the spend checks look | `tests/test_process_network_owners.py::test_process_and_network_modules_stay_in_their_owners` | 2026-11-07 |
-| No `typing.Any`: name the real type | `pyproject.toml::tool.ruff.lint.flake8-tidy-imports.banned-api`, `Makefile::lint` | 2026-11-06 |
-| Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` | 2026-11-04 |
-| A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` | 2026-11-04 |
-| Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py::DecodeWindows`, `tests/serving/test_decode_window.py::test_abort_flush_lands_in_next_step_result` | 2026-11-04 |
-| Decode-ready requests always have a KV table | `llm_infer/serving/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` | 2026-11-04 |
-| Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py::Scheduler`, `tests/scheduler/test_scheduler.py::test_cancel_releases_only_the_cancelled_requests_reservation` | 2026-11-04 |
-| Trace replay rejects malformed events | `visualizer/trace_loader.js::validateEvent`, `Makefile::visualizer-test`, `tests/serving/test_tracing.py::test_trace_recorder_captures_real_engine_events` | 2026-11-04 |
-| Modal entrypoints and every Modal function, CPU-only included, refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1`; paid work uses `@app.function`, never `@app.cls` | `scripts/modal_approval.py::require_spend_approval`, `tests/test_modal_approval.py::test_local_entrypoints_gate_before_any_modal_call`, `tests/test_modal_approval.py::test_modal_functions_refuse_direct_calls_without_approval`, `tests/test_modal_approval.py::test_paid_work_uses_modal_functions_not_classes`, `tests/test_modal_approval.py::test_only_a_gated_entrypoint_forwards_approval`, `tests/test_modal_approval.py::test_server_apps_refuse_to_start_without_approval` | 2026-11-06 |
-| No doc shows a runnable Modal command with `--approved` or `LLM_INFER_SERVE_APPROVED=1` | `tests/test_docs_approval_commands.py::test_docs_show_no_approved_command` | 2026-11-07 |
-| Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` | 2026-11-06 |
-| `make verify ARGS=control` passes only on its exact expected FAIL; CI runs it after `verify all` | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` | 2026-11-06 |
-| Every row cites names its file defines | `tests/test_agents_rules_table.py::test_enforced_rules_cite_defined_names` | 2026-11-06 |
-| No comment turns checks off: no file-level `# pyright:` comment, `noqa` on a ban, blanket `noqa`, rule-less or reason-less pyright ignore, `@ts-nocheck`, or a rule-less JS lint disable | `tests/test_strict_mode.py::test_no_file_downgrades_type_checking_mode`, `pyproject.toml::tool.basedpyright.reportIgnoreCommentWithoutRule`, `pyproject.toml::tool.ruff.lint.select` | 2026-11-07 |
+| Rule | Enforced by |
+| --- | --- |
+| Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
+| Modal images install exact versions through uv: lock versions from `uv.lock`, vLLM from one pin | `tests/test_modal_image_pins.py::test_no_modal_image_installs_a_floating_version_or_uses_pip`, `scripts/modal_image_pins.py::locked` |
+| Process, network, and Modal modules stay in their owner files; Modal only in `scripts/modal_*.py`, where the spend checks look | `tests/test_process_network_owners.py::test_process_and_network_modules_stay_in_their_owners` |
+| Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` |
+| A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` |
+| Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py::DecodeWindows`, `tests/serving/test_decode_window.py::test_abort_flush_lands_in_next_step_result` |
+| Decode-ready requests always have a KV table | `llm_infer/serving/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` |
+| Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py::Scheduler`, `tests/scheduler/test_scheduler.py::test_cancel_releases_only_the_cancelled_requests_reservation` |
+| Trace replay rejects malformed events | `visualizer/trace_loader.js::validateEvent`, `Makefile::visualizer-test`, `tests/serving/test_tracing.py::test_trace_recorder_captures_real_engine_events` |
+| Modal entrypoints and every Modal function, CPU-only included, refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1`; paid work uses `@app.function`, never `@app.cls` | `scripts/modal_approval.py::require_spend_approval`, `tests/test_modal_approval.py::test_local_entrypoints_gate_before_any_modal_call`, `tests/test_modal_approval.py::test_modal_functions_refuse_direct_calls_without_approval`, `tests/test_modal_approval.py::test_paid_work_uses_modal_functions_not_classes`, `tests/test_modal_approval.py::test_only_a_gated_entrypoint_forwards_approval`, `tests/test_modal_approval.py::test_server_apps_refuse_to_start_without_approval` |
+| No doc shows a runnable Modal command with `--approved` or `LLM_INFER_SERVE_APPROVED=1` | `tests/test_docs_approval_commands.py::test_docs_show_no_approved_command` |
+| Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` |
+| `make verify ARGS=control` passes only on its exact expected FAIL; CI runs it after `verify all` | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` |
 
 ## Change Navigation
 

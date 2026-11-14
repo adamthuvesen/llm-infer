@@ -31,10 +31,11 @@ typecheck:  ## Check package, scripts, tests, and the verify helper with basedpy
 test:  ## Run unit tests
 	uv run python -m pytest
 
-slow:  ## Run the opt-in 3B Qwen reference checks (CPU, minutes)
+slow:  ## Run the opt-in 3B Qwen reference checks and figure regeneration (needs network for plotly)
 	uv run python -m pytest tests/correctness -q -m slow
+	uv run scripts/check_benchmark_evidence.py --figures
 
-evidence-check:  ## Check committed records, public tables, figure regen, and A/B verdicts
+evidence-check:  ## Check committed records, public tables, and A/B verdicts
 	uv run scripts/check_benchmark_evidence.py
 
 verify:  ## Drive the real server, loadgen, and Modal launch paths on CPU (ARGS=all|list|control|<drive>)

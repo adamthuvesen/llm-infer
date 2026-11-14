@@ -147,9 +147,6 @@ class ModelList(BaseModel):
     data: list[ModelCard]
 
 
-# --- Responses API (stateless, text-generation subset) -----------------------------------
-
-
 class ResponseInputItem(BaseModel):
     """One structured input item: a role + text content, mirroring a chat message."""
 

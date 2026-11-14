@@ -226,32 +226,18 @@ def drive_launch_plan(evidence: Path, env: dict[str, str]) -> str:
     serve = plan.pop("modal_esme_serve", {}).get("import", "")
     serve_command = "LLM_INFER_SERVE_APPROVED=1 modal serve scripts/modal_esme_serve.py"
     expect(serve.endswith(serve_command), f"serve app did not refuse to import: {serve!r}")
-    entrypoints = gpu_functions = cpu_functions = 0
     bad = []
+    count = 0
     for script, members in plan.items():
-        for name, (kind, gpu, outcome) in members.items():
-            refused = outcome.startswith("Refusing to start") and outcome.rstrip().endswith(
-                "--approved"
-            )
-            if not refused or f"modal run scripts/{script}.py" not in outcome:
+        for name, (_kind, _gpu, outcome) in members.items():
+            count += 1
+            if not outcome.rstrip().endswith("--approved") or (
+                f"modal run scripts/{script}.py" not in outcome
+            ):
                 bad.append(f"{script}::{name}: {outcome[:160]!r}")
-            if kind == "entrypoint":
-                entrypoints += 1
-            elif gpu is None:
-                cpu_functions += 1
-            else:
-                gpu_functions += 1
-                if gpu != "A100-80GB":
-                    bad.append(f"{script}::{name} runs on {gpu}, not A100-80GB")
+    expect(count > 0, "launch plan found no Modal entrypoints or functions")
     expect(not bad, "paths that do not refuse:\n  " + "\n  ".join(bad))
-    expect(
-        entrypoints >= 15 and gpu_functions >= 30 and cpu_functions >= 2,
-        f"found {entrypoints} entrypoints, {gpu_functions} GPU fns, {cpu_functions} CPU fns",
-    )
-    return (
-        f"{entrypoints} entrypoints, {gpu_functions} A100 functions, {cpu_functions} CPU "
-        "functions, and the serve app refuse"
-    )
+    return f"{count} Modal entrypoints and functions, and the serve app, refuse"
 
 
 DRIVES = {

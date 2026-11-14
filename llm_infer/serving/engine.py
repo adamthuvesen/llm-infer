@@ -1129,7 +1129,6 @@ class InferenceEngine:
         self.preemption_count += 1
         freed_blocks = len(victim.block_table.blocks) if victim.block_table is not None else 0
         if victim.block_table is not None:
-            # Fires clear block_freed at the allocator boundary.
             self._free_block_table(victim.block_table)
         victim.reset_for_recompute()
         self.scheduler.requeue(victim)

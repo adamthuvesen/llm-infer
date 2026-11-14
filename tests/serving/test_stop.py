@@ -54,9 +54,6 @@ def _ids(text: str) -> list[int]:
     return [ord(c) for c in text]
 
 
-# --- unit: the hold-back buffer, in isolation ---------------------------------------------
-
-
 def test_stop_split_across_two_tokens_is_never_leaked() -> None:
     """A stop string whose chars arrive on separate feeds must never appear in any delta."""
     detok = StopSequenceDetokenizer(CharTokenizer(), ["END"])
@@ -128,9 +125,6 @@ def test_feeds_reassemble_to_truncated_text_across_a_straddle() -> None:
             break
     assert "".join(emitted) == "hello "
     assert "<stop>" not in "".join(emitted)
-
-
-# --- HTTP surface: scripted engine, real handlers -----------------------------------------
 
 
 class ScriptedAsyncEngine:

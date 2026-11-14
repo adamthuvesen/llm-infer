@@ -100,7 +100,7 @@ requests by default. Pass `--decode-graph-buckets` to serve larger batches from 
 - **Predictions before the run.** Recent experiments commit their predictions and decision rule
   first. `scripts/judge_paired_ab.py` applies the rule to records from two containers.
 - **Reproducible without a GPU.** `make evidence-check` checks the committed records against these
-  tables, regenerates the figures, and requires each registered A/B to give its documented
+  tables, and requires each registered A/B to give its documented
   verdict.
 
 The [research log](docs/findings.md) has every experiment's question, method, result, and

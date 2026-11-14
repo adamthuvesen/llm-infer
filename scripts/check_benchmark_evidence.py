@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Checks committed benchmark records, public tables, figure regeneration, and A/B verdicts."""
+"""Checks committed benchmark records, public tables, and A/B verdicts.
+
+``--figures`` also regenerates the figures. That step is a PEP 723 script that fetches plotly
+and kaleido, so only ``make slow`` runs it.
+"""
 
 from __future__ import annotations
 
@@ -77,7 +81,7 @@ EXPECTED_BATCHES = (8, 16, 32, 64, 128, 256)
 PLOTTED_SYSTEMS = ("llm_infer", "hf_sequential")
 
 
-def _failures() -> list[str]:
+def _failures(*, figures: bool = False) -> list[str]:
     rows = benchmark_rows(json.loads(CURVE_RECORD.read_text(encoding="utf-8")))
 
     errors: list[str] = []
@@ -119,7 +123,8 @@ def _failures() -> list[str]:
         return errors
     errors.extend(_doc_table_errors(by_system))
     errors.extend(_headline_table_errors())
-    errors.extend(_figure_regeneration_errors())
+    if figures:
+        errors.extend(_figure_regeneration_errors())
     errors.extend(_ab_verdict_errors())
     errors.extend(_timeline_config_errors())
     return errors
@@ -310,7 +315,7 @@ def _ab_verdict_errors() -> list[str]:
 
 def main() -> int:
     try:
-        errors = _failures()
+        errors = _failures(figures="--figures" in sys.argv[1:])
     except (OSError, ValueError, KeyError, TypeError) as failure:
         print(f"error: {failure}", file=sys.stderr)
         return 1
@@ -318,10 +323,7 @@ def main() -> int:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
         return 1
-    print(
-        "benchmark evidence: committed records, public tables, figure regen, and A/B verdicts "
-        "are consistent"
-    )
+    print("benchmark evidence: committed records, public tables, and A/B verdicts are consistent")
     return 0
 
 
