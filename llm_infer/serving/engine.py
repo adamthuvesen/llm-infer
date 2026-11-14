@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 
 import torch
 
-from llm_infer.kv_cache.block_allocator import BlockPoolEvent, OutOfBlocksError
+from llm_infer.kv_cache.block_allocator import OutOfBlocksError
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.kv_cache.prefix_cache import PrefixCacheStore
@@ -28,17 +27,11 @@ from llm_infer.model.runtime import prepare_engine_grouped_decode, resolve_backe
 from llm_infer.profiling import TimingProfiler
 from llm_infer.scheduler.scheduler import Scheduler, blocks_for_footprint, max_blocks_for
 from llm_infer.serving.decode_window import DecodeWindow, DecodeWindows, PendingWindowFlush
+from llm_infer.serving.engine_trace import EngineTrace
 from llm_infer.serving.request import DecodeReady, Pending, Prefilling, Request
 from llm_infer.serving.sampler import GREEDY, SamplingParams, sample_row, sample_rows
 from llm_infer.serving.speculative import PromptLookupDraft, SpeculativeDecodingConfig
-from llm_infer.tracing import (
-    FinishReason,
-    PreemptReason,
-    TokenSource,
-    TraceEvent,
-    TraceEventName,
-    TraceRecorder,
-)
+from llm_infer.tracing import TraceRecorder
 
 
 @dataclass
@@ -137,18 +130,12 @@ class InferenceEngine:
         self.batched_prefill = batched_prefill
         self.speculative = PromptLookupDraft(speculative) if speculative is not None else None
         self.trace = trace
+        self._tracer = EngineTrace(trace, clock=trace_clock, profiler=profiler)
         if trace is not None:
             # Emit block_allocated/block_freed from the real physical boundary: the allocator
             # is the single owner of the free pool, so its events are clear for refcounted
             # prefix sharing and copy-on-write. Nothing is faked from request state.
-            self.cache.allocator.observer = self._trace_pool_event
-        self._trace_clock = trace_clock or time.perf_counter
-        self._step_index = 0
-        self._trace_sequence = 0
-        self._trace_step: int | None = None
-        self._trace_start_time = self._trace_clock()
-        self._trace_total_tokens = 0
-        self._last_traced_batch_size = 0
+            self.cache.allocator.observer = self._tracer.pool_event
         self._requests: dict[str, Request] = {}
         # Deferred-decode window state: how many one-token decode steps may run between EOS/stop
         # host boundaries (1 = classic per-step sync), the currently open window, and the
@@ -254,13 +241,12 @@ class InferenceEngine:
         """
         result = self._stashed_flush or StepResult()
         self._stashed_flush = None
-        self._trace_step = self._step_index
-        self._step_index += 1
+        self._tracer.begin_step()
         try:
             admit_kwargs = {"free_blocks": self.cache.allocator.num_free} if self.preemption else {}
             for request in self.scheduler.admit(**admit_kwargs):
                 result.admitted.append(request.request_id)
-                self._emit_trace(
+                self._tracer.emit(
                     "request_admitted",
                     request_id=request.request_id,
                     prompt_tokens=len(request.prompt_ids),
@@ -268,7 +254,9 @@ class InferenceEngine:
                     prefix_group_id=request.prefix_group_id,
                     reserved_blocks=self._reserved_blocks(request),
                 )
-            self._trace_batch_size_changed()
+            self._tracer.batch_size_changed(
+                len(self.scheduler.running), len(self.scheduler.waiting)
+            )
 
             to_decode: list[Request] = []
             to_prefill: list[Request] = []
@@ -298,12 +286,14 @@ class InferenceEngine:
 
             # Finishers are freed inside each prefill/decode op (see _release_finished_in), so by
             # here the running set already excludes them; nothing left to sweep.
-            self._trace_batch_size_changed()
-            self._trace_throughput_sample(result)
+            self._tracer.batch_size_changed(
+                len(self.scheduler.running), len(self.scheduler.waiting)
+            )
+            self._tracer.throughput_sample(result.tokens)
 
             return result
         finally:
-            self._trace_step = None
+            self._tracer.end_step()
 
     def run(self) -> dict[str, list[int]]:
         """Step until the queue and running set drain; return each request's generated ids."""
@@ -400,7 +390,7 @@ class InferenceEngine:
                 )
             end_pos = len(request.prompt_ids)
             result.prefill_chunks[request.request_id] = (0, end_pos)
-            self._trace_prefill_chunk_started(
+            self._tracer.prefill_chunk_started(
                 request_id=request.request_id,
                 start_pos=0,
                 end_pos=end_pos,
@@ -416,7 +406,7 @@ class InferenceEngine:
         for request in requests:
             end_pos = len(request.prompt_ids)
             request.advance_prefill(end_pos)
-            self._trace_prefill_chunk_progress(
+            self._tracer.prefill_chunk_progress(
                 request_id=request.request_id,
                 start_pos=0,
                 end_pos=end_pos,
@@ -433,7 +423,7 @@ class InferenceEngine:
             requests, token_rows, eos_flags, host_ids, strict=True
         ):
             self._record(request, token, is_eos, result, host_token=host_id)
-        self._trace_decode_step(requests, token_rows, token_source="prefill")
+        self._tracer.decode_step(requests, token_rows, token_source="prefill")
         self._release_finished_in(requests, result)
 
     def _prefill_one(self, request: Request, result: StepResult) -> None:
@@ -444,7 +434,7 @@ class InferenceEngine:
             token = self._sample_one(logits, request)
         eos_flags, host_ids = self._eos_flags_and_ids(token.reshape(1), [request])
         self._record(request, token, eos_flags[0], result, host_token=host_ids[0])
-        self._trace_decode_step([request], [token], token_source="prefill")
+        self._tracer.decode_step([request], [token], token_source="prefill")
         self._release_finished_in([request], result)
 
     def _prefill_shared_group(self, requests: list[Request], result: StepResult) -> None:
@@ -488,7 +478,7 @@ class InferenceEngine:
             members, tokens, eos_flags, host_ids, strict=True
         ):
             self._record(request, token, is_eos, result, host_token=host_id)
-        self._trace_decode_step(members, tokens, token_source="prefill")
+        self._tracer.decode_step(members, tokens, token_source="prefill")
         self._release_finished_in(members, result)
 
     def _cache_prompt_chunk(self, request: Request, result: StepResult) -> torch.Tensor | None:
@@ -512,7 +502,7 @@ class InferenceEngine:
             # chunk's blocks are available before the model touches the cache.
             self._ensure_pool_room(request, new_tokens=chunk_size)
         result.prefill_chunks[request.request_id] = (start_pos, end_pos)
-        self._trace_prefill_chunk_started(
+        self._tracer.prefill_chunk_started(
             request_id=request.request_id,
             start_pos=start_pos,
             end_pos=end_pos,
@@ -531,7 +521,7 @@ class InferenceEngine:
                     chunk_size=chunk_size,
                 )
         request.advance_prefill(end_pos)
-        self._trace_prefill_chunk_progress(
+        self._tracer.prefill_chunk_progress(
             request_id=request.request_id,
             start_pos=start_pos,
             end_pos=end_pos,
@@ -612,7 +602,7 @@ class InferenceEngine:
             requests, tokens, eos_flags, host_ids, strict=True
         ):
             self._record(request, token, is_eos, result, host_token=host_id)
-        self._trace_decode_step(requests, list(tokens), token_source="decode")
+        self._tracer.decode_step(requests, list(tokens), token_source="decode")
         self._release_finished_in(requests, result)
 
     def _window_eligible(self, requests: list[Request]) -> bool:
@@ -956,7 +946,7 @@ class InferenceEngine:
             if request.finished:
                 break
             self._record(request, token, self._is_eos(token, request), result)
-        self._trace_decode_step([request], emitted, token_source="speculative")
+        self._tracer.decode_step([request], emitted, token_source="speculative")
         # Verification reserved blocks for the whole draft; a partly-rejected draft rolled the
         # length back, so return the unused trailing blocks to the pool (a finisher's table is
         # freed wholesale by _release_finished_in, so only trim a still-running request).
@@ -1012,7 +1002,7 @@ class InferenceEngine:
         """
         for request in requests:
             if request.finished and self._is_running(request):
-                self._trace_request_finished(request)
+                self._tracer.request_finished(request)
                 result.finished_outputs[request.request_id] = request.generated
                 if request.block_table is not None:
                     # Donate the block-aligned prompt-plus-output prefix to the cross-turn cache
@@ -1132,7 +1122,7 @@ class InferenceEngine:
             self._free_block_table(victim.block_table)
         victim.reset_for_recompute()
         self.scheduler.requeue(victim)
-        self._emit_trace(
+        self._tracer.emit(
             "request_preempted",
             request_id=victim.request_id,
             preempt_reason="kv_pressure",
@@ -1174,7 +1164,7 @@ class InferenceEngine:
         """
         for request in self._live_running(requests):
             self._recompute_prefill(request)
-            self._emit_trace(
+            self._tracer.emit(
                 "request_resumed",
                 request_id=request.request_id,
                 prompt_tokens=len(request.prompt_ids),
@@ -1205,7 +1195,7 @@ class InferenceEngine:
             start = state.cached_tokens
             step = min(chunk_size, total - start)
             self._ensure_pool_room(request, step)
-            self._trace_prefill_chunk_started(
+            self._tracer.prefill_chunk_started(
                 request_id=request.request_id,
                 start_pos=start,
                 end_pos=start + step,
@@ -1215,7 +1205,7 @@ class InferenceEngine:
                 self._write_recompute_chunk(state.table, sequence, start, step)
             request.advance_prefill(start + step)
             state = self._prefilling(request)
-            self._trace_prefill_chunk_progress(
+            self._tracer.prefill_chunk_progress(
                 request_id=request.request_id,
                 start_pos=start,
                 end_pos=start + step,
@@ -1239,201 +1229,6 @@ class InferenceEngine:
             start_pos=start,
             chunk_size=count,
         )
-
-    def _trace_decode_step(
-        self,
-        requests: list[Request],
-        tokens: Sequence[int | torch.Tensor],
-        *,
-        token_source: TokenSource,
-    ) -> None:
-        if self.trace is None:
-            return
-        self._emit_trace(
-            "decode_step",
-            request_ids=tuple(request.request_id for request in requests),
-            batch_size=len(requests),
-            token_ids=tuple(self._trace_token_id(token) for token in tokens),
-            tokens_emitted=len(tokens),
-            token_source=token_source,
-        )
-
-    def _trace_prefill_chunk_started(
-        self, request_id: str, *, start_pos: int, end_pos: int, total_prompt_tokens: int
-    ) -> None:
-        self._emit_trace(
-            "prefill_chunk_started",
-            request_id=request_id,
-            start_pos=start_pos,
-            end_pos=end_pos,
-            total_prompt_tokens=total_prompt_tokens,
-        )
-
-    def _trace_prefill_chunk_progress(
-        self,
-        request_id: str,
-        *,
-        start_pos: int,
-        end_pos: int,
-        cached_tokens: int,
-        total_prompt_tokens: int,
-        completed: bool,
-    ) -> None:
-        self._emit_trace(
-            "prefill_chunk_progress",
-            request_id=request_id,
-            start_pos=start_pos,
-            end_pos=end_pos,
-            cached_tokens=cached_tokens,
-            total_prompt_tokens=total_prompt_tokens,
-            completed=completed,
-        )
-
-    def _trace_pool_event(self, event: BlockPoolEvent) -> None:
-        """Emit block lifecycle from the allocator's physical free-pool boundary.
-
-        Each :class:`BlockPoolEvent` is purely an allocation or a real free (refcount-0):
-        ``allocate`` reports no frees, ``free`` reports only the blocks that returned to the
-        pool, and ``retain`` (prefix sharing) reports nothing at all.
-        """
-        if event.allocated:
-            self._emit_trace(
-                "block_allocated",
-                request_id=event.owner,
-                block_count=len(event.allocated),
-                block_ids=event.allocated,
-                pool_used=event.num_used,
-                pool_free=event.num_free,
-            )
-        if event.freed:
-            self._emit_trace(
-                "block_freed",
-                request_id=event.owner,
-                block_count=len(event.freed),
-                block_ids=event.freed,
-                pool_used=event.num_used,
-                pool_free=event.num_free,
-            )
-
-    def _trace_request_finished(self, request: Request) -> None:
-        if self.trace is None:
-            return
-        reason: FinishReason = "eos" if request.last_token in request.eos_token_ids else "length"
-        self._emit_trace(
-            "request_finished",
-            request_id=request.request_id,
-            token_ids=tuple(request.generated),
-            generated_tokens=request.generated_count,
-            reason=reason,
-        )
-
-    def _trace_batch_size_changed(self) -> None:
-        if self.trace is None:
-            return
-        batch_size = len(self.scheduler.running)
-        if batch_size == self._last_traced_batch_size:
-            return
-        self._emit_trace(
-            "batch_size_changed",
-            previous_batch_size=self._last_traced_batch_size,
-            batch_size=batch_size,
-            waiting=len(self.scheduler.waiting),
-        )
-        self._last_traced_batch_size = batch_size
-
-    def _trace_throughput_sample(self, result: StepResult) -> None:
-        if self.trace is None:
-            return
-        tokens_this_step = sum(len(tokens) for tokens in result.tokens.values())
-        if tokens_this_step == 0:
-            return
-        self._trace_total_tokens += tokens_this_step
-        elapsed = max(self._trace_clock() - self._trace_start_time, 1e-12)
-        self._emit_trace(
-            "tokens_per_second_sampled",
-            tokens_emitted=tokens_this_step,
-            total_generated_tokens=self._trace_total_tokens,
-            elapsed_seconds=elapsed,
-            tokens_per_second=self._trace_total_tokens / elapsed,
-        )
-
-    def _emit_trace(
-        self,
-        event: TraceEventName,
-        *,
-        request_id: str | None = None,
-        request_ids: tuple[str, ...] = (),
-        prompt_tokens: int | None = None,
-        max_new_tokens: int | None = None,
-        prefix_group_id: str | None = None,
-        reserved_blocks: int | None = None,
-        start_pos: int | None = None,
-        end_pos: int | None = None,
-        cached_tokens: int | None = None,
-        total_prompt_tokens: int | None = None,
-        completed: bool | None = None,
-        block_count: int | None = None,
-        block_ids: tuple[int, ...] = (),
-        pool_used: int | None = None,
-        pool_free: int | None = None,
-        batch_size: int | None = None,
-        previous_batch_size: int | None = None,
-        waiting: int | None = None,
-        token_ids: tuple[int, ...] = (),
-        tokens_emitted: int | None = None,
-        token_source: TokenSource | None = None,
-        generated_tokens: int | None = None,
-        reason: FinishReason | None = None,
-        preempt_reason: PreemptReason | None = None,
-        total_generated_tokens: int | None = None,
-        elapsed_seconds: float | None = None,
-        tokens_per_second: float | None = None,
-    ) -> None:
-        if self.trace is None:
-            return
-        if self._trace_step is None:
-            raise RuntimeError("trace events can only be emitted during engine.step()")
-        self._trace_sequence += 1
-        self.trace.record(
-            TraceEvent(
-                event=event,
-                sequence=self._trace_sequence,
-                step=self._trace_step,
-                request_id=request_id,
-                request_ids=request_ids,
-                prompt_tokens=prompt_tokens,
-                max_new_tokens=max_new_tokens,
-                prefix_group_id=prefix_group_id,
-                reserved_blocks=reserved_blocks,
-                start_pos=start_pos,
-                end_pos=end_pos,
-                cached_tokens=cached_tokens,
-                total_prompt_tokens=total_prompt_tokens,
-                completed=completed,
-                block_count=block_count,
-                block_ids=block_ids,
-                pool_used=pool_used,
-                pool_free=pool_free,
-                batch_size=batch_size,
-                previous_batch_size=previous_batch_size,
-                waiting=waiting,
-                token_ids=token_ids,
-                tokens_emitted=tokens_emitted,
-                token_source=token_source,
-                generated_tokens=generated_tokens,
-                reason=reason,
-                preempt_reason=preempt_reason,
-                total_generated_tokens=total_generated_tokens,
-                elapsed_seconds=elapsed_seconds,
-                tokens_per_second=tokens_per_second,
-            )
-        )
-
-    def _trace_token_id(self, token: int | torch.Tensor) -> int:
-        if isinstance(token, torch.Tensor):
-            with self._record_host_time("cpu_gpu_sync"):
-                return int(token.cpu().item())
-        return token
 
     def _record_time(self, name: str) -> AbstractContextManager[None]:
         if self.profiler is None:

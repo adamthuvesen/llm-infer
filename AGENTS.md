@@ -71,4 +71,4 @@ Paths start inside `llm_infer/`, except `tests/` and `visualizer/`.
 | Deferred decode windows | `serving/decode_window.py`, `serving/engine.py` | `tests/serving/test_decode_window.py` |
 | Benchmark timing or oracle caching | `benchmarks/esme_paged.py`, `benchmarks/esme_measurement.py` | `tests/benchmarks/test_esme_measurement.py` |
 | Benchmark qualification or A/B verdicts | `benchmarks/reference_policy.py`, `benchmarks/paired_ab.py` | `tests/benchmarks/`, `make evidence-check` |
-| Trace events or replay | `tracing.py`, `visualizer/trace_loader.js` | `tests/serving/test_tracing.py`, `make visualizer-test` |
+| Trace events or replay | `tracing.py`, `serving/engine_trace.py`, `visualizer/trace_loader.js` | `tests/serving/test_tracing.py`, `make visualizer-test` |

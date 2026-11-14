@@ -152,55 +152,6 @@ def test_hf_greedy_chat_matches_bundle_oracle(hf_checkpoint: Path) -> None:
         assert _normalize_at_eos(hf_generated, eos) == _normalize_at_eos(reference, eos)
 
 
-def test_three_way_routes_distinct_llm_infer_runtime(hf_checkpoint: Path) -> None:
-    """The three-way seam keeps ``runtime`` as the oracle and routes llm_infer to its own runtime.
-
-    Structural guard for the flash wiring (flash itself is GPU-only, so the GPU harness runs it on
-    ``FlashAttnPagedAttention`` while CPU uses ``torch_naive``): a *distinct* llm_infer runtime must
-    drive the llm_infer row, the oracle/reference stays ``runtime``, every system stays
-    reference-gated, and the llm_infer mode label surfaces the engine runtime's backend class.
-    """
-    import math
-
-    from llm_infer.benchmarks.esme_paged import build_requests
-    from llm_infer.benchmarks.esme_three_way import run_three_way
-
-    oracle_runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
-    engine_runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
-    assert engine_runtime is not oracle_runtime
-
-    requests = build_requests(oracle_runtime.tokenizer, 2)
-    max_new = 8
-    block_size = 128
-    num_blocks = (
-        sum(math.ceil((len(req.prompt_ids) + max_new) / block_size) for req in requests) + 8
-    )
-    timings, agreements = run_three_way(
-        oracle_runtime,
-        hf_checkpoint,
-        requests,
-        max_new_tokens=max_new,
-        block_size=block_size,
-        num_blocks=num_blocks,
-        warmup=0,
-        iters=1,
-        device="cpu",
-        include_vllm=False,
-        llm_infer_runtime=engine_runtime,
-    )
-    by_system = {t.system: t for t in timings}
-    assert set(by_system) == {"hf_sequential", "llm_infer"}
-    assert set(agreements) == {"hf_sequential", "llm_infer"}
-    # CPU bundle is torch_naive; on GPU this label is FlashAttnPagedAttention. The point is the
-    # label reflects the engine runtime's actual backend, so a flash row can never be mislabeled.
-    backend_name = type(engine_runtime.model.backend).__name__
-    assert backend_name in by_system["llm_infer"].mode
-    # Both systems agree with the fp32 oracle (else no tok/s) — match-before-measuring holds. On CPU
-    # (fp32 model) the agreement is exact; matches_reference is driven by the tie-tolerant profile.
-    assert all(t.matches_reference for t in timings)
-    assert all(agreements[s].all_ties_or_exact for s in agreements)
-
-
 def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: Path) -> None:
     """The bench agreement reuses Qwen's tie rule: exact / genuine-tie / non-tie classified."""
     from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, reference_outputs

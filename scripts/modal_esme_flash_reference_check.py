@@ -23,7 +23,6 @@ definition every flash harness imports, so flash-attn installs from a prebuilt w
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import modal
 
@@ -33,15 +32,13 @@ from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
     VOLUME_NAME,
+    check_requests,
+    check_size,
+    engine_outputs,
     local_bundle_path,
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE
-
-if TYPE_CHECKING:
-    from llm_infer.model.interface import ModelRuntime
-
-BLOCK_SIZE = 128
 
 app = modal.App("llm-infer-esme-flash-reference-check")
 
@@ -74,7 +71,6 @@ def check_esme_flash(num_requests: int, max_new_tokens: int, approved: bool = Fa
     from llm_infer.benchmarks import normalize_at_eos
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     stall_guard.arm()
@@ -96,39 +92,11 @@ def check_esme_flash(num_requests: int, max_new_tokens: int, approved: bool = Fa
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
 
-    prompts = (
-        "Write a tiny Python function that doubles an integer.",
-        "Explain KV caching in one short sentence.",
-        "Give one SQL query that counts rows in a table named events.",
-        "Name two practical checks before trusting a benchmark.",
-    )
     eos = flash_runtime.eos_token_ids
-    requests: list[tuple[str, list[int]]] = []
-    for index in range(num_requests):
-        tokenized = flash_runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompts[index % len(prompts)]}],
-            add_generation_prompt=True,
-            tokenize=True,
-        )
-        if not isinstance(tokenized, list) or not tokenized:
-            raise ValueError(f"Esme tokenizer returned invalid prompt ids for request {index}")
-        requests.append((f"esme-{index:03d}", [int(token_id) for token_id in tokenized]))
-
-    def decode_all(runtime: ModelRuntime) -> dict[str, list[int]]:
-        engine = InferenceEngine(
-            runtime.model,
-            block_size=BLOCK_SIZE,
-            num_blocks=len(requests) + 8,
-            device="cuda",
-            capabilities=runtime.capabilities,
-        )
-        for request_id, prompt_ids in requests:
-            engine.add_request(Request(request_id, list(prompt_ids), max_new_tokens, eos))
-        return engine.run()
-
-    flash_outputs = decode_all(flash_runtime)
+    requests = check_requests(flash_runtime, num_requests)
+    flash_outputs = engine_outputs(flash_runtime, requests, max_new_tokens)
     stall_guard.progress()
-    naive_outputs = decode_all(naive_runtime)
+    naive_outputs = engine_outputs(naive_runtime, requests, max_new_tokens)
     stall_guard.progress()
 
     exact = 0
@@ -164,11 +132,6 @@ def main(command: str = "smoke", bundle_path: str = "", approved: bool = False) 
     check:   modal run scripts/modal_esme_flash_reference_check.py --command check
     """
     require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
-    if command == "smoke":
-        num_requests, max_new_tokens = 2, 8
-    elif command == "check":
-        num_requests, max_new_tokens = 8, 64
-    else:
-        raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")
+    num_requests, max_new_tokens = check_size(command)
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="esme-flash")
     print(check_esme_flash.remote(num_requests, max_new_tokens, approved=True))

@@ -10,8 +10,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import modal
+
+if TYPE_CHECKING:
+    from llm_infer.model.interface import ModelRuntime
 
 VOLUME_NAME = "llm-infer-esme-bundles"
 ESME_BUNDLE_DIR = "esme-214m-chat"
@@ -19,6 +23,13 @@ ESME_BUNDLE_MOUNT = "/esme-bundles"
 REMOTE_BUNDLE_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_BUNDLE_DIR}"
 REQUIRED_BUNDLE_FILES = ("manifest.json", "config.json", "tokenizer.json", "weights.pt")
 ESME_BUNDLE_ENV = "ESME_BUNDLE_PATH"
+CHECK_PROMPTS = (
+    "Write a tiny Python function that doubles an integer.",
+    "Explain KV caching in one short sentence.",
+    "Give one SQL query that counts rows in a table named events.",
+    "Name two practical checks before trusting a benchmark.",
+)
+CHECK_SIZES = {"smoke": (2, 8), "check": (8, 64)}
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SIBLING_LOCAL_BUNDLE = REPO_ROOT.parent / "esme-posttrain" / "exports" / ESME_BUNDLE_DIR
@@ -56,3 +67,45 @@ def stage_bundle(volume: modal.Volume, bundle_path: Path, *, label: str) -> dict
             batch.put_file(bundle_path / name, f"/{ESME_BUNDLE_DIR}/{name}")
     print(f"[{label}] staged {len(REQUIRED_BUNDLE_FILES)} bundle files")
     return manifest
+
+
+def check_size(command: str) -> tuple[int, int]:
+    """(num_requests, max_new_tokens) for a reference check's ``smoke`` or ``check`` command."""
+    if command not in CHECK_SIZES:
+        raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")
+    return CHECK_SIZES[command]
+
+
+def check_requests(runtime: ModelRuntime, num_requests: int) -> list[tuple[str, list[int]]]:
+    """Chat-templated reference-check prompts, cycling ``CHECK_PROMPTS``."""
+    requests: list[tuple[str, list[int]]] = []
+    for index in range(num_requests):
+        tokenized = runtime.tokenizer.apply_chat_template(
+            [{"role": "user", "content": CHECK_PROMPTS[index % len(CHECK_PROMPTS)]}],
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        if not isinstance(tokenized, list) or not tokenized:
+            raise ValueError(f"Esme tokenizer returned invalid prompt ids for request {index}")
+        requests.append((f"esme-{index:03d}", [int(token_id) for token_id in tokenized]))
+    return requests
+
+
+def engine_outputs(
+    runtime: ModelRuntime, requests: list[tuple[str, list[int]]], max_new_tokens: int
+) -> dict[str, list[int]]:
+    """Run every request through one CUDA engine with 128-token blocks."""
+    from llm_infer.serving import InferenceEngine, Request
+
+    engine = InferenceEngine(
+        runtime.model,
+        block_size=128,
+        num_blocks=len(requests) + 8,
+        device="cuda",
+        capabilities=runtime.capabilities,
+    )
+    for request_id, prompt_ids in requests:
+        engine.add_request(
+            Request(request_id, list(prompt_ids), max_new_tokens, runtime.eos_token_ids)
+        )
+    return engine.run()

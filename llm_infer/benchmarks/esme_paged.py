@@ -20,32 +20,6 @@ class EsmeBenchRequest:
     prompt_ids: tuple[int, ...]
 
 
-@dataclass(frozen=True)
-class SystemTiming:
-    """One system's measured result: tokens, wall-clock, and whether it matched the reference."""
-
-    system: str
-    mode: str
-    matches_reference: bool
-    median_seconds: float
-    total_output_tokens: int
-    outputs: dict[str, list[int]]
-
-    @property
-    def tokens_per_second(self) -> float | None:
-        """tok/s only when the system matched the reference and produced positive wall-clock."""
-        if not self.matches_reference or self.median_seconds <= 0:
-            return None
-        return self.total_output_tokens / self.median_seconds
-
-    @property
-    def raw_tokens_per_second(self) -> float | None:
-        """Measured tok/s regardless of whether the row is fit for a public claim."""
-        if self.median_seconds <= 0:
-            return None
-        return self.total_output_tokens / self.median_seconds
-
-
 DEFAULT_PROMPTS = (
     "Write a tiny Python function that doubles an integer.",
     "Explain KV caching in one short sentence.",
@@ -113,22 +87,6 @@ def requests_at_context_length(
             )
         )
     return resized
-
-
-def single_request_prompt_coverage(
-    tokenizer: TokenizerLike,
-    context_lengths: tuple[int, ...],
-    prompts: tuple[str, ...] = HEADLINE_PROMPTS,
-) -> list[tuple[int, EsmeBenchRequest]]:
-    """Build every prompt as its own request at every synthetic context length."""
-    if not context_lengths:
-        raise ValueError("context_lengths must not be empty")
-    base_requests = build_requests(tokenizer, len(prompts), prompts)
-    return [
-        (context_length, request)
-        for context_length in context_lengths
-        for request in requests_at_context_length(base_requests, context_length)
-    ]
 
 
 class ReferenceOutputCache:

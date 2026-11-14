@@ -16,6 +16,8 @@ Exports two static SVG cards into ``assets/``:
 - fig-esme-ablation-ladder.svg: what each engine technique adds over HF batched generate(),
   one panel per batch size, from ``scripts/modal_esme_batch_curve.py --command ladder``.
 
+That script is archived at tag ``archive/llm-infer-experiments-2026-11-11``.
+
 The committed inputs live at ``assets/esme-batch-curve.json`` and
 ``assets/esme-ablation-ladder.json`` (curated copies of bench-results records), so the
 figures regenerate from repo state alone:

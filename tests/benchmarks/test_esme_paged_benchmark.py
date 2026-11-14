@@ -9,11 +9,9 @@ from llm_infer.benchmarks.esme_measurement import qualified_system_row
 from llm_infer.benchmarks.esme_paged import (
     EsmeBenchRequest,
     requests_at_context_length,
-    single_request_prompt_coverage,
 )
 from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from tests.support.fake_causal_lm import as_backend
-from tests.support.fake_tokenizer import as_tokenizer
 
 
 def _requests() -> list[EsmeBenchRequest]:
@@ -35,34 +33,6 @@ def test_requests_at_context_length_repeats_valid_prompts_to_exact_size() -> Non
 def test_requests_at_context_length_rejects_zero() -> None:
     with pytest.raises(ValueError, match="context_length must be >= 1"):
         requests_at_context_length(_requests(), 0)
-
-
-def test_single_request_coverage_includes_every_prompt_at_every_context() -> None:
-    class Tokenizer:
-        def apply_chat_template(
-            self,
-            messages: list[dict[str, str]],
-            *,
-            add_generation_prompt: bool,
-            tokenize: bool,
-        ) -> list[int]:
-            assert add_generation_prompt and tokenize
-            return [len(messages[0]["content"]), 7]
-
-    coverage = single_request_prompt_coverage(
-        as_tokenizer(Tokenizer()), (32, 768), ("one", "two", "three")
-    )
-
-    assert len(coverage) == 6
-    assert {(context, request.request_id) for context, request in coverage} == {
-        (32, "esme-000"),
-        (32, "esme-001"),
-        (32, "esme-002"),
-        (768, "esme-000"),
-        (768, "esme-001"),
-        (768, "esme-002"),
-    }
-    assert all(len(request.prompt_ids) == context for context, request in coverage)
 
 
 class _OracleMustNotBeUsed:

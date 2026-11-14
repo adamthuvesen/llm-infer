@@ -1,7 +1,8 @@
 """Same-host A100 comparison: llm_infer and vLLM on the converted Esme checkpoint.
 
-``scripts/modal_esme_three_way.py`` starts two Modal GPU functions, so its vLLM and ``llm_infer``
-rows can land on different A100 hosts. This harness reserves one A100 and launches each
+The archived ``scripts/modal_esme_three_way.py`` (tag ``archive/llm-infer-experiments-2026-11-11``)
+started two Modal GPU functions, so its vLLM and ``llm_infer`` rows could land on different A100
+hosts. This harness reserves one A100 and launches each
 system as a fresh child process inside that function. Process exit releases vLLM's CUDA memory,
 while the parent keeps the host reservation. Hostname and GPU UUID are recorded for the parent,
 the fp32 oracle, and both engine children and must match before a result is accepted.
