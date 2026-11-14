@@ -21,6 +21,7 @@ BANNED_MODULES = (
     "httpx",
     "aiohttp",
     "urllib3",
+    "modal",
 )
 OS_PROCESS_CALLS = {
     *(f"exec{suffix}" for suffix in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")),
@@ -32,7 +33,24 @@ OS_PROCESS_CALLS = {
     "fork",
     "forkpty",
 }
-ASYNCIO_PROCESS_CALLS = {"create_subprocess_exec", "create_subprocess_shell"}
+# Event-loop and asyncio methods that start a process or open a connection, on any receiver.
+ASYNC_CALLS = {
+    **dict.fromkeys(
+        (
+            "create_subprocess_exec",
+            "create_subprocess_shell",
+            "subprocess_exec",
+            "subprocess_shell",
+        ),
+        "asyncio.subprocess",
+    ),
+    **dict.fromkeys(
+        ("open_connection", "open_unix_connection", "create_connection", "create_unix_connection"),
+        "asyncio.connection",
+    ),
+}
+# Modal bills. The spend-gate scans and the launch-plan drive read only these files.
+MODAL_OWNERS = ("scripts/modal_*.py", ".agents/skills/verify-llm-infer/launch_plan.py")
 VERIFY = ".agents/skills/verify-llm-infer"
 OWNERS = {
     f"{VERIFY}/drives.py": {"socket", "subprocess", "urllib.request"},
@@ -71,6 +89,13 @@ def _banned(module: str) -> str | None:
 
 def process_and_network_uses(tree: ast.Module) -> set[str]:
     uses: set[str] = set()
+    os_names = {"os"} | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "os" and alias.asname
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             uses |= {b for alias in node.names if (b := _banned(alias.name))}
@@ -80,13 +105,17 @@ def process_and_network_uses(tree: ast.Module) -> set[str]:
                     uses.add(banned)
                 elif node.module == "os" and alias.name in OS_PROCESS_CALLS:
                     uses.add(f"os.{alias.name}")
-                elif node.module == "asyncio" and alias.name in ASYNCIO_PROCESS_CALLS:
-                    uses.add("asyncio.subprocess")
-        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id == "os" and node.attr in OS_PROCESS_CALLS:
+                elif node.module == "asyncio" and alias.name in ASYNC_CALLS:
+                    uses.add(ASYNC_CALLS[alias.name])
+        elif isinstance(node, ast.Attribute):
+            if node.attr in ASYNC_CALLS:
+                uses.add(ASYNC_CALLS[node.attr])
+            elif (
+                isinstance(node.value, ast.Name)
+                and node.value.id in os_names
+                and node.attr in OS_PROCESS_CALLS
+            ):
                 uses.add(f"os.{node.attr}")
-            elif node.value.id == "asyncio" and node.attr in ASYNCIO_PROCESS_CALLS:
-                uses.add("asyncio.subprocess")
     return uses
 
 
@@ -97,6 +126,8 @@ def test_process_and_network_modules_stay_in_their_owners() -> None:
             continue
         name = path.relative_to(ROOT).as_posix()
         uses = process_and_network_uses(ast.parse(path.read_text(encoding="utf-8")))
+        if any(path.relative_to(ROOT).full_match(pattern) for pattern in MODAL_OWNERS):
+            uses.discard("modal")
         if extra := uses - OWNERS.get(name, set()):
             strays.append(f"{name}: {', '.join(sorted(extra))}")
     assert not strays, (
@@ -111,6 +142,8 @@ def test_the_scan_finds_each_form() -> None:
         "import subprocess\nfrom http import client\nfrom urllib.request import urlopen\n"
         "import httpx as h\nfrom os import system\nimport asyncio\nimport os\n"
         "asyncio.create_subprocess_exec('x')\nos.execvp('x', [])\nfrom . import socket\n"
+        "import os as o\no.system('x')\nloop.subprocess_exec(f)\nasyncio.open_connection(h, p)\n"
+        "import modal\n"
     )
     assert process_and_network_uses(ast.parse(source)) == {
         "subprocess",
@@ -120,6 +153,8 @@ def test_the_scan_finds_each_form() -> None:
         "os.system",
         "os.execvp",
         "asyncio.subprocess",
+        "asyncio.connection",
+        "modal",
     }
 
 

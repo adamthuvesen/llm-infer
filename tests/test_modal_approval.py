@@ -9,11 +9,11 @@ import pytest
 from scripts.modal_approval import require_serve_approval, require_spend_approval
 from tests.support.modal_source import (
     SCRIPTS,
-    calls,
+    assigns_approved,
     decorator_name,
     defaults_to_false,
     first_statement,
-    gate_calls,
+    gate_call,
     modal_calls,
     modal_functions,
     modules,
@@ -34,7 +34,7 @@ def ungated_modal_functions(mods: Modules) -> list[str]:
     for name, tree in mods:
         for fn in modal_functions(tree, "paid"):
             first = first_statement(fn)
-            gated = defaults_to_false(fn) and gate_calls(first)
+            gated = defaults_to_false(fn) and gate_call(first) and not assigns_approved(fn)
             if not gated:
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
     return ungated
@@ -57,15 +57,17 @@ def ungated_entrypoints(mods: Modules) -> list[str]:
                 (
                     index
                     for index, statement in enumerate(fn.body)
+                    # An entrypoint may gate only its paid branch, so the gate may sit in a block.
                     if any(
                         {kw.arg for kw in call.keywords} == set(params[:-1])
-                        for call in gate_calls(statement)
+                        for node in ast.walk(statement)
+                        if isinstance(node, ast.stmt) and (call := gate_call(node))
                     )
                 ),
                 None,
             )
             early = gate_at is not None and any(map(calls_outside_raise, fn.body[:gate_at]))
-            if not defaults_to_false(fn) or gate_at is None or early:
+            if not defaults_to_false(fn) or gate_at is None or early or assigns_approved(fn):
                 ungated.append(f"{name}:{fn.lineno} {fn.name}")
     return ungated
 
@@ -85,26 +87,75 @@ def unforwarded_modal_calls(mods: Modules) -> list[str]:
     return missing
 
 
+def approvals_outside_entrypoints(mods: Modules) -> list[str]:
+    """`approved=True` anywhere but a local entrypoint, or a module function only it calls."""
+    stray = []
+    for name, tree in mods:
+        entrypoints = modal_functions(tree, "entrypoint")
+        called = {
+            c.func.id
+            for fn in entrypoints
+            for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        }
+        helpers = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in called
+            and not node.decorator_list
+            and not any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == node.name
+                for other in tree.body
+                if other not in entrypoints and other is not node
+                for c in ast.walk(other)
+            )
+        ]
+        inside = {id(node) for fn in [*entrypoints, *helpers] for node in ast.walk(fn)}
+        stray += [
+            f"{name}:{call.lineno}"
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and id(call) not in inside
+            and any(
+                kw.arg == "approved" and ast.unparse(kw.value) != "False" for kw in call.keywords
+            )
+        ]
+    return stray
+
+
+def serve_gate(statement: ast.stmt) -> bool:
+    """A bare `require_serve_approval(...)` at module level or directly under `if modal.is_local():`."""
+    if isinstance(statement, ast.If) and ast.unparse(statement.test) == "modal.is_local()":
+        return any(serve_gate(inner) for inner in statement.body)
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == "require_serve_approval"
+    )
+
+
 def ungated_servers(mods: Modules) -> list[str]:
     ungated = []
     for name, tree in mods:
         if not modal_functions(tree, "server"):
             continue
         apps = [n.lineno for n in tree.body if "modal.App(" in ast.unparse(n)]
-        gates = [n.lineno for n in tree.body if calls(n, "require_serve_approval")]
+        gates = [n.lineno for n in tree.body if serve_gate(n)]
         if not gates or not apps or gates[0] > apps[0]:
             ungated.append(name)
     return ungated
 
 
 def modal_classes(mods: Modules) -> list[str]:
-    """Modal classes, which the gate, stall-guard, and launch-plan checks do not cover."""
+    """Modal classes and sandboxes, which the gate, stall-guard, and launch-plan checks miss."""
     return [
         f"{name}:{node.lineno}"
         for name, tree in mods
         for node in ast.walk(tree)
         if (isinstance(node, ast.ClassDef) and "cls" in map(decorator_name, node.decorator_list))
-        or (isinstance(node, ast.Attribute) and node.attr == "Cls")
+        or (isinstance(node, ast.Attribute) and node.attr in {"Cls", "Sandbox"})
     ]
 
 
@@ -119,8 +170,16 @@ def test_modal_functions_refuse_direct_calls_without_approval() -> None:
 def test_paid_work_uses_modal_functions_not_classes() -> None:
     found = modal_classes(modules())
     assert not found, (
-        "Use `@app.function`, not `@app.cls` or `modal.Cls`: the spend gate, stall guard, and "
-        "launch-plan checks cover functions only:\n  " + "\n  ".join(found)
+        "Use `@app.function`, not `@app.cls`, `modal.Cls`, or `modal.Sandbox`: the spend gate, "
+        "stall guard, and launch-plan checks cover functions only:\n  " + "\n  ".join(found)
+    )
+
+
+def test_only_a_gated_entrypoint_forwards_approval() -> None:
+    stray = approvals_outside_entrypoints(modules())
+    assert not stray, (
+        "Pass `approved=True` only from a `@app.local_entrypoint()` after its gate, never from "
+        "`__main__`, `app.run()`, a helper, or another script:\n  " + "\n  ".join(stray)
     )
 
 
@@ -230,11 +289,42 @@ def main(approved: bool = True) -> None:
 @app.function(timeout=60)
 @modal.asgi_app()
 def web() -> None: ...
+
+def _gate() -> None:
+    require_serve_approval("modal serve x.py")
+
+app = modal.App("x")
+
+@app.function()
+def branch(n: int, approved: bool = False) -> None:
+    if n > 100:
+        require_spend_approval(approved, __file__)
+
+@app.local_entrypoint()
+def reset(n: int = 1, approved: bool = False) -> None:
+    approved = True
+    require_spend_approval(approved, __file__, n=n)
+
+with image.imports():
+    @app.function()
+    def nested(n: int) -> None: ...
+
+if __name__ == "__main__":
+    with app.run():
+        branch.remote(1, approved=True)
+    modal.Sandbox.create("python", app=app)
 """
 
 
 def test_each_scan_refuses_a_gate_that_cannot_refuse() -> None:
     bad = [("scripts/open.py", ast.parse(OPEN_GATES))]
-    assert ungated_modal_functions(bad) == ["scripts/open.py:3 opened", "scripts/open.py:7 forced"]
-    assert ungated_entrypoints(bad) == ["scripts/open.py:11 main"]
+    assert ungated_modal_functions(bad) == [
+        "scripts/open.py:3 opened",
+        "scripts/open.py:7 forced",
+        "scripts/open.py:24 branch",
+        "scripts/open.py:35 nested",
+    ]
+    assert ungated_entrypoints(bad) == ["scripts/open.py:11 main", "scripts/open.py:29 reset"]
     assert ungated_servers(bad) == ["scripts/open.py"]
+    assert approvals_outside_entrypoints(bad) == ["scripts/open.py:39"]
+    assert modal_classes(bad) == ["scripts/open.py:40"]

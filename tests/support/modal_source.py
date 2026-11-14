@@ -17,9 +17,10 @@ def decorator_name(decorator: ast.expr) -> str:
 
 
 def modal_functions(tree: ast.Module, kind: str) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    """Top-level Modal functions of one kind: `gpu`, `paid` (any non-server), `server`, `entrypoint`."""
+    """Modal functions of one kind, at any depth: `gpu`, `paid` (any non-server), `server`,
+    `entrypoint`."""
     found = []
-    for node in tree.body:
+    for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         names = {decorator_name(d) for d in node.decorator_list}
@@ -79,10 +80,26 @@ def defaults_to_false(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     )
 
 
-def gate_calls(node: ast.AST) -> list[ast.Call]:
-    """`require_spend_approval` calls that pass the `approved` parameter itself first."""
-    return [
-        call
-        for call in calls(node, "require_spend_approval")
-        if call.args and isinstance(call.args[0], ast.Name) and call.args[0].id == "approved"
-    ]
+def gate_call(statement: ast.stmt) -> ast.Call | None:
+    """The statement as a bare `require_spend_approval(approved, ...)` call, or None.
+
+    A gate nested in an `if`, `try`, or other block may not run, so only a bare call counts.
+    """
+    call = statement.value if isinstance(statement, ast.Expr) else None
+    if (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "require_spend_approval"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "approved"
+    ):
+        return call
+    return None
+
+
+def assigns_approved(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(
+        isinstance(node, ast.Name) and node.id == "approved" and isinstance(node.ctx, ast.Store)
+        for node in ast.walk(function)
+    )

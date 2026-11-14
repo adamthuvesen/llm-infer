@@ -21,6 +21,9 @@ PYTHON_SUPPRESSIONS = {
 }
 SCRIPT_SUPPRESSIONS = {
     "`@ts-nocheck` turns the visualizer type check off": re.compile(r"@ts-nocheck\b"),
+    "a lint disable with no rule turns every lint off": re.compile(
+        r"(?://|/\*)\s*(?:eslint|oxlint)-disable(?:-next-line|-line)?\s*(?:--.*|\*/.*)?$"
+    ),
 }
 
 
@@ -61,7 +64,16 @@ def test_the_scan_finds_each_suppression_and_spares_rule_ignores() -> None:
         f"# ruff: noqa: E402, {BANNED_RULES[0]}",
     ):
         assert suppressions(python, line), line
-    assert suppressions(Path("x.js"), "// @ts-nocheck")
+    for line in (
+        "// @ts-nocheck",
+        "/* eslint-disable */",
+        "// oxlint-disable",
+        "x; // eslint-disable-line",
+        "// eslint-disable -- why",
+        "/* oxlint-disable -- why */",
+    ):
+        assert suppressions(Path("x.js"), line), line
+    assert not suppressions(Path("x.js"), "// oxlint-disable-next-line no-debugger -- reason")
     assert not suppressions(python, "x = 1  # pyright: ignore[reportUnknownMemberType] -- reason")
     assert not suppressions(python, "import os  # noqa: E402")
     assert not suppressions(Path("x.md"), "# pyright: basic")
