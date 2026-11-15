@@ -22,9 +22,10 @@ from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.qwen import QwenModel
+from tests.support.golden_fixture import GoldenCase, GoldenFixture
 
 
-def _load_fixture() -> dict:
+def _load_fixture() -> GoldenFixture:
     if not QWEN_COT_GOLDEN.is_file():
         pytest.fail(
             f"golden fixture missing at {QWEN_COT_GOLDEN}; "
@@ -56,7 +57,7 @@ def test_fixture_pins_the_model() -> None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("case", FIXTURE["cases"], ids=lambda c: c["case_id"])
-def test_greedy_matches_huggingface(engine: QwenModel, case: dict) -> None:
+def test_greedy_matches_huggingface(engine: QwenModel, case: GoldenCase) -> None:
     """llm-infer greedy decode == HF greedy continuation, token for token."""
     eos = set(FIXTURE["decoding"]["eos_token_ids"])
     ours = greedy_decode(

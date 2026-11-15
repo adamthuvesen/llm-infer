@@ -51,10 +51,15 @@ model-weights/
 
 # OS
 .DS_Store
-.claude/
+.claude/*
+!.claude/skills
 
 # maintainer-local engineering notes (roadmap, phase journals, lab evidence)
 docs/internal/
 
 # One-off maintainer harnesses kept on disk, not published
 scripts/modal_esme_serving_phase5_ab.py
+
+# verify-llm-infer evidence
+/.verify/
+visualizer/node_modules/

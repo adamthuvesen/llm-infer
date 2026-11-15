@@ -1,3 +1,18 @@
 {
-  "type": "module"
+  "name": "llm-infer-visualizer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test trace_loader.test.mjs",
+    "lint": "oxlint --type-aware --type-check",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "oxfmt": "0.77.0",
+    "oxlint": "1.92.0",
+    "oxlint-tsgolint": "7.0.2006",
+    "typescript": "7.0.2"
+  }
 }

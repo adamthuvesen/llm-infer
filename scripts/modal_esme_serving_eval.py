@@ -14,9 +14,12 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import cast
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -52,6 +55,7 @@ def measure_serving(
     measured_runs: int,
     grouped: bool = False,
     grouped_ab: bool = False,
+    approved: bool = False,
 ) -> str:
     """Run greedy and sampled HTTP rows in one A100 process.
 
@@ -60,6 +64,7 @@ def measure_serving(
     comparison is like-for-like on one GPU. The arm that runs first alternates from cell to
     cell. Each row carries a ``grouped`` field naming its arm and a ``run_order`` (0 first).
     """
+    require_spend_approval(approved, __file__)
     import asyncio
 
     import torch
@@ -70,6 +75,7 @@ def measure_serving(
     from scripts.esme_serving_eval import phase0_http_workloads, run_network_http_workload
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     esme_bundles.reload()
     oracle_runtime = load_model_runtime(
         "esme",
@@ -131,8 +137,8 @@ def measure_serving(
                 result["run_order"] = order.index(arm_grouped)
                 rows.append(result)
                 cell_rows.append(result)
-                metrics = result["metrics"]
-                reference = result["reference"]
+                metrics = cast("dict[str, object]", result["metrics"])
+                reference = cast("dict[str, object]", result["reference"])
                 print(
                     f"[serving] {workload.name} grouped={arm_grouped}: "
                     f"ref={reference['status']} "
@@ -140,10 +146,13 @@ def measure_serving(
                     f"TTFT p50/p95={metrics['ttft_p50_s']}/{metrics['ttft_p95_s']} "
                     f"ITL p50/p95={metrics['itl_p50_s']}/{metrics['itl_p95_s']}"
                 )
+                stall_guard.progress()
             if len(cell_rows) == 2:
                 # Direct parity: a throughput delta is an A/B result only when both arms
                 # emitted the same token streams, not merely each passed its own gate.
-                baseline, candidate = (row["output_digests"] for row in cell_rows)
+                baseline, candidate = (
+                    cast("dict[str, str]", row["output_digests"]) for row in cell_rows
+                )
                 parity = (
                     "failed"
                     if set(baseline) != set(candidate)
@@ -180,7 +189,19 @@ def main(
     bundle_path: str = "",
     grouped: bool = False,
     grouped_ab: bool = False,
+    approved: bool = False,
 ) -> None:
+    require_spend_approval(
+        approved,
+        __file__,
+        batch_sizes=batch_sizes,
+        max_new_tokens=max_new_tokens,
+        warmup_runs=warmup_runs,
+        measured_runs=measured_runs,
+        bundle_path=bundle_path,
+        grouped=grouped,
+        grouped_ab=grouped_ab,
+    )
     sizes = _parse_batch_sizes(batch_sizes)
     if max_new_tokens < 2:
         raise ValueError(f"max_new_tokens must be >= 2 to measure ITL; got {max_new_tokens}")
@@ -195,7 +216,7 @@ def main(
     )
     record = json.loads(
         measure_serving.remote(
-            sizes, max_new_tokens, warmup_runs, measured_runs, grouped, grouped_ab
+            sizes, max_new_tokens, warmup_runs, measured_runs, grouped, grouped_ab, approved=True
         )
     )
     record["config"] = {

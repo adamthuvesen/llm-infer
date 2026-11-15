@@ -18,7 +18,7 @@ import torch
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kernels.torch_sdpa import TorchSdpaAttention
-from llm_infer.model.runtime import load_model_runtime
+from llm_infer.model.runtime import AttentionBackendChoice, load_model_runtime
 from llm_infer.serving import InferenceEngine, Request
 
 RTOL = 1e-5
@@ -193,7 +193,7 @@ def test_prefill_batch_packed_gqa_uneven_matches_reference() -> None:
 
 def _greedy(
     bundle: Path,
-    backend_name: str,
+    backend_name: AttentionBackendChoice,
     requests: list[Request],
     *,
     prefill_chunk_size: int | None = None,

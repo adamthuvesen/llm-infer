@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 import torch
 
@@ -14,10 +14,18 @@ from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
 from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.kernels.torch_sdpa import TorchSdpaAttention
+from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+from llm_infer.model.grouped_decode_graph import (
+    EngineOwnedGroupedDecodeGraphRunner,
+    build_engine_grouped_runners,
+)
 from llm_infer.model.interface import (
     DENSE_CAPABILITIES,
+    QWEN_CAPABILITIES,
     BackendCapabilities,
+    CausalLMBackend,
+    DeclaredCapabilitiesBackend,
     ModelRuntime,
     TokenizerLike,
 )
@@ -27,7 +35,7 @@ from llm_infer.model.qwen import QwenModel
 
 RuntimeLoader = Callable[..., ModelRuntime]
 BundleBackendId = Literal["dense", "esme"]
-BUNDLE_BACKENDS = frozenset({"dense", "esme"})
+BUNDLE_BACKENDS: frozenset[str] = frozenset(get_args(BundleBackendId))
 AttentionBackendChoice = Literal["auto", "torch_naive", "torch_sdpa", "flash_attn", "flashinfer"]
 ATTENTION_BACKEND_CHOICES: tuple[AttentionBackendChoice, ...] = (
     "auto",
@@ -58,7 +66,7 @@ class TokenizersJsonTokenizer:
         default_add_special_tokens: bool = True,
         chat_template: Mapping[str, object] | None = None,
     ) -> None:
-        from tokenizers import Tokenizer  # type: ignore[import-untyped]
+        from tokenizers import Tokenizer
 
         self.path = tokenizer_path
         self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
@@ -73,6 +81,9 @@ class TokenizersJsonTokenizer:
 
     def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
         return self._tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+
+    def token_to_id(self, token: str) -> int | None:
+        return self._tokenizer.token_to_id(token)
 
     def apply_chat_template(
         self,
@@ -100,6 +111,56 @@ class TokenizersJsonTokenizer:
 def available_backends() -> tuple[str, ...]:
     """Return registered backend ids."""
     return tuple(sorted(_LOADERS))
+
+
+def resolve_backend_capabilities(model: CausalLMBackend) -> BackendCapabilities:
+    """Resolve known models or require an injected backend's explicit declaration."""
+    if isinstance(model, PretrainBundleModel):
+        return replace(
+            DENSE_CAPABILITIES,
+            flash_attention=isinstance(
+                model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
+            ),
+            batched_prefill=isinstance(model.backend, PackedPrefillAttentionBackend),
+        )
+    if isinstance(model, QwenModel):
+        return replace(
+            QWEN_CAPABILITIES,
+            flash_attention=isinstance(
+                model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
+            ),
+        )
+    if isinstance(model, DeclaredCapabilitiesBackend):
+        return model.capabilities
+    raise ValueError(
+        f"backend {type(model).__name__!r} must declare capabilities or pass capabilities="
+    )
+
+
+def prepare_engine_grouped_decode(
+    model: CausalLMBackend,
+    cache: PagedKVCache,
+    capabilities: BackendCapabilities,
+    *,
+    capture_sizes: tuple[int, ...],
+    grouped_layers: int | None,
+    shared_workspace: bool,
+) -> dict[int, EngineOwnedGroupedDecodeGraphRunner]:
+    """Construct model-specific grouped graphs against the engine-owned cache."""
+    if not capabilities.planned_decode or not isinstance(model, PretrainBundleModel):
+        raise ValueError(
+            "grouped_decode_graphs requires a bundle model with planned decode; "
+            "omit it for this backend"
+        )
+    # Four layers preserves the raw-engine benchmark configuration. Serving passes all layers.
+    layers = min(4, model.num_layers) if grouped_layers is None else grouped_layers
+    return build_engine_grouped_runners(
+        model,
+        cache,
+        capture_sizes,
+        grouped_layers=layers,
+        shared_workspace=shared_workspace,
+    )
 
 
 def load_model_runtime(
@@ -169,14 +230,7 @@ def _load_qwen_runtime(
         model_id=resolved_model_id,
         revision=resolved_revision,
     )
-    capabilities = BackendCapabilities(
-        paged_kv=True,
-        prefix_caching=True,
-        speculative=True,
-        flash_attention=isinstance(
-            model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
-        ),
-    )
+    capabilities = resolve_backend_capabilities(model)
     eos_token_ids = _generation_eos_ids(
         model_id=resolved_model_id,
         revision=resolved_revision,
@@ -289,24 +343,15 @@ def _load_bundle_runtime(
         default_add_special_tokens=tokenizer_metadata.add_special_tokens,
         chat_template=tokenizer_metadata.chat_template,
     )
-    # Bundle backends expose the full shared-engine capability set; flash_attention reflects
-    # the actual backend (torch_naive unless a flash backend is passed in).
-    capabilities = BackendCapabilities(
-        paged_kv=DENSE_CAPABILITIES.paged_kv,
-        prefix_caching=DENSE_CAPABILITIES.prefix_caching,
-        speculative=DENSE_CAPABILITIES.speculative,
-        flash_attention=isinstance(
-            model.backend, (FlashAttnPagedAttention, FlashInferPagedAttention)
-        ),
-        planned_decode=DENSE_CAPABILITIES.planned_decode,
-        batched_prefill=isinstance(model.backend, PackedPrefillAttentionBackend),
-    )
+    capabilities = resolve_backend_capabilities(model)
     return ModelRuntime(
         backend_id=backend_id,
         model_id=_dense_model_id(manifest, root),
         model=model,
         tokenizer=tokenizer,
-        eos_token_ids=_dense_eos_ids(manifest),
+        eos_token_ids=_dense_eos_ids(
+            manifest, tokenizer, is_chat_bundle=tokenizer_metadata.chat_template is not None
+        ),
         capabilities=capabilities,
         metadata={
             "source": "esme-export",
@@ -422,16 +467,54 @@ def _dense_model_id(manifest: Mapping[str, object], root: Path) -> str:
     return root.name
 
 
-def _dense_eos_ids(manifest: Mapping[str, object]) -> frozenset[int]:
-    direct = manifest.get("eos_token_ids")
-    if isinstance(direct, list):
-        return frozenset(int(item) for item in direct)
+def _dense_eos_ids(
+    manifest: Mapping[str, object],
+    tokenizer: TokenizersJsonTokenizer,
+    *,
+    is_chat_bundle: bool,
+) -> frozenset[int]:
+    """Resolve stop ids: manifest EOS ids, else the tokenizer's `<eos>` for a base bundle.
+
+    A chat bundle must declare its EOS ids. A base bundle (esme-pretrain
+    `llm_pretrain_dense_v1`) declares none; its tokenizer must hold `<eos>`, the
+    end-of-document token that esme-pretrain appends after every training document.
+    """
+    declared = _declared_eos_ids(manifest)
+    if declared:
+        return declared
+    if is_chat_bundle:
+        raise ModelRegistryError(
+            "chat bundle has a chat_template but no EOS ids; "
+            "set manifest eos_token_ids or decoding.eos_token_ids"
+        )
+    eos_id = tokenizer.token_to_id("<eos>")
+    if eos_id is None:
+        raise ModelRegistryError(
+            "bundle declares no EOS ids (manifest eos_token_ids or decoding.eos_token_ids) "
+            f"and {tokenizer.path.name} has no <eos> token"
+        )
+    return frozenset({eos_id})
+
+
+def _declared_eos_ids(manifest: Mapping[str, object]) -> frozenset[int]:
     decoding = manifest.get("decoding")
-    if isinstance(decoding, dict):
-        nested = decoding.get("eos_token_ids")
-        if isinstance(nested, list):
-            return frozenset(int(item) for item in nested)
-    return frozenset()
+    nested = decoding.get("eos_token_ids") if isinstance(decoding, dict) else None
+    direct = manifest.get("eos_token_ids")
+    declared = [_eos_id_list(value) for value in (direct, nested) if value is not None]
+    if len(declared) == 2 and declared[0] != declared[1]:
+        raise ModelRegistryError(
+            f"bundle eos_token_ids {sorted(declared[0])} disagree with "
+            f"decoding.eos_token_ids {sorted(declared[1])}"
+        )
+    return declared[0] if declared else frozenset()
+
+
+def _eos_id_list(value: object) -> frozenset[int]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    ):
+        raise ModelRegistryError("bundle eos_token_ids must be a list of integers")
+    return frozenset(value)
 
 
 def _dense_tokenizer_metadata(manifest: Mapping[str, object]) -> _DenseTokenizerMetadata:

@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from llm_infer.model.decode import greedy_decode
+from llm_infer.model.interface import ModelRuntime
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import load_model_runtime
 
@@ -52,6 +53,14 @@ def _bundle_path() -> Path:
     if bundle is None:
         pytest.skip("set ESME_BUNDLE_PATH to run the Esme HF/vLLM external-baseline parity check")
     return Path(bundle)
+
+
+def _chat_ids(runtime: ModelRuntime, content: str) -> list[int]:
+    ids = runtime.tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
+    )
+    assert isinstance(ids, list)
+    return [int(token) for token in ids]
 
 
 def _convert(bundle: Path, out: Path) -> Path:
@@ -124,15 +133,13 @@ def test_hf_greedy_chat_matches_bundle_oracle(hf_checkpoint: Path) -> None:
     ).eval()
 
     for content in CHAT_PROMPTS:
-        prompt_ids = runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
-        )
+        prompt_ids = _chat_ids(runtime, content)
         reference = greedy_decode(
-            runtime.model, list(prompt_ids), max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=set(eos)
+            runtime.model, prompt_ids, max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=set(eos)
         )
         input_ids = torch.tensor([prompt_ids])
         with torch.no_grad():
-            generated = hf.generate(
+            generated = hf.generate(  # pyright: ignore[reportAttributeAccessIssue]  # transformers typing gap
                 input_ids,
                 attention_mask=torch.ones_like(input_ids),
                 max_new_tokens=MAX_NEW_TOKENS,
@@ -145,55 +152,6 @@ def test_hf_greedy_chat_matches_bundle_oracle(hf_checkpoint: Path) -> None:
         assert _normalize_at_eos(hf_generated, eos) == _normalize_at_eos(reference, eos)
 
 
-def test_three_way_routes_distinct_llm_infer_runtime(hf_checkpoint: Path) -> None:
-    """The three-way seam keeps ``runtime`` as the oracle and routes llm_infer to its own runtime.
-
-    Structural guard for the flash wiring (flash itself is GPU-only, so the GPU harness runs it on
-    ``FlashAttnPagedAttention`` while CPU uses ``torch_naive``): a *distinct* llm_infer runtime must
-    drive the llm_infer row, the oracle/reference stays ``runtime``, every system stays
-    reference-gated, and the llm_infer mode label surfaces the engine runtime's backend class.
-    """
-    import math
-
-    from llm_infer.benchmarks.esme_paged import build_requests
-    from llm_infer.benchmarks.esme_three_way import run_three_way
-
-    oracle_runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
-    engine_runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
-    assert engine_runtime is not oracle_runtime
-
-    requests = build_requests(oracle_runtime.tokenizer, 2)
-    max_new = 8
-    block_size = 128
-    num_blocks = (
-        sum(math.ceil((len(req.prompt_ids) + max_new) / block_size) for req in requests) + 8
-    )
-    timings, agreements = run_three_way(
-        oracle_runtime,
-        hf_checkpoint,
-        requests,
-        max_new_tokens=max_new,
-        block_size=block_size,
-        num_blocks=num_blocks,
-        warmup=0,
-        iters=1,
-        device="cpu",
-        include_vllm=False,
-        llm_infer_runtime=engine_runtime,
-    )
-    by_system = {t.system: t for t in timings}
-    assert set(by_system) == {"hf_sequential", "llm_infer"}
-    assert set(agreements) == {"hf_sequential", "llm_infer"}
-    # CPU bundle is torch_naive; on GPU this label is FlashAttnPagedAttention. The point is the
-    # label reflects the engine runtime's actual backend, so a flash row can never be mislabeled.
-    backend_name = type(engine_runtime.model.backend).__name__
-    assert backend_name in by_system["llm_infer"].mode
-    # Both systems agree with the fp32 oracle (else no tok/s) — match-before-measuring holds. On CPU
-    # (fp32 model) the agreement is exact; matches_reference is driven by the tie-tolerant profile.
-    assert all(t.matches_reference for t in timings)
-    assert all(agreements[s].all_ties_or_exact for s in agreements)
-
-
 def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: Path) -> None:
     """The bench agreement reuses Qwen's tie rule: exact / genuine-tie / non-tie classified."""
     from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, reference_outputs
@@ -201,9 +159,7 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
 
     runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
     eos = runtime.eos_token_ids
-    prompt = runtime.tokenizer.apply_chat_template(
-        [{"role": "user", "content": CHAT_PROMPTS[0]}], add_generation_prompt=True, tokenize=True
-    )
+    prompt = _chat_ids(runtime, CHAT_PROMPTS[0])
     requests = [EsmeBenchRequest(request_id="r0", prompt=CHAT_PROMPTS[0], prompt_ids=tuple(prompt))]
     reference = reference_outputs(runtime.model, requests, max_new_tokens=8, eos_token_ids=eos)
 
@@ -216,7 +172,8 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
     # NON-tie -> not agreement, so the system would report no tok/s. This proves the gate still
     # rejects real divergences; it is not a blanket pass.
     gold = reference["r0"]
-    wrong = [(gold[0] + 1) % runtime.model.config.vocab_size] + list(gold[1:])
+    assert isinstance(runtime.model, PretrainBundleModel)
+    wrong = [(gold[0] + 1) % runtime.model.config.vocab_size, *gold[1:]]
     bad = tie_tolerant_agreement(runtime.model, requests, {"r0": wrong}, reference, eos)
     assert bad.nontie == 1
     assert not bad.all_ties_or_exact
@@ -228,16 +185,11 @@ def test_tie_tolerant_agreement_classifies_exact_tie_and_nontie(hf_checkpoint: P
 def test_vllm_greedy_matches_bundle_oracle(hf_checkpoint: Path) -> None:
     """vLLM greedy ids on the converted checkpoint match the oracle, token-for-token (GPU only)."""
     pytest.importorskip("vllm", reason="vLLM not installed (GPU-deferred path)")
-    from vllm import LLM, SamplingParams
+    from vllm import LLM, SamplingParams  # pyright: ignore[reportMissingImports]  # GPU-only package
 
     runtime = load_model_runtime("esme", bundle_path=_bundle_path(), dtype=torch.float32)
     eos = runtime.eos_token_ids
-    prompts = [
-        runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True
-        )
-        for content in CHAT_PROMPTS
-    ]
+    prompts = [_chat_ids(runtime, content) for content in CHAT_PROMPTS]
     reference = [
         greedy_decode(
             runtime.model, list(ids), max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=set(eos)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -22,29 +22,6 @@ PHASE_BUCKETS: dict[str, tuple[str, ...]] = {
     "sampling": ("sampling",),
     "window_flushing": ("window_flushing",),
 }
-
-
-def attach_host_method_profile(
-    profiler: TimingProfiler,
-    target: object,
-    bucket: str,
-    method_names: tuple[str, ...],
-) -> None:
-    """Wrap diagnostic-only instance methods in one host timing bucket."""
-    for method_name in method_names:
-        original = getattr(target, method_name)
-        if not callable(original):
-            raise TypeError(f"{type(target).__name__}.{method_name} is not callable")
-
-        def measured(
-            *args: object,
-            _original: Callable[..., object] = original,
-            **kwargs: object,
-        ) -> object:
-            with profiler.host(bucket):
-                return _original(*args, **kwargs)
-
-        setattr(target, method_name, measured)
 
 
 @dataclass
@@ -69,6 +46,11 @@ class TimingSummary:
 
     device: str
     buckets: list[TimingBucket] = field(default_factory=list)
+
+    def phase_total_ms(self, phase: str) -> float:
+        """Total milliseconds of the buckets that make up ``phase`` (0.0 when none ran)."""
+        by_name = {bucket.name: bucket for bucket in self.buckets}
+        return sum(by_name[name].total_ms for name in PHASE_BUCKETS[phase] if name in by_name)
 
     def as_dict(self) -> dict[str, object]:
         by_name = {bucket.name: bucket for bucket in self.buckets}
@@ -114,7 +96,7 @@ class TimingProfiler:
         self._cuda_spans: list[_CudaSpan] = []
 
     @contextmanager
-    def record(self, name: str) -> Iterator[None]:
+    def record(self, name: str) -> Generator[None]:
         """Record device work without synchronizing CUDA."""
         if self._cuda:
             start = torch.cuda.Event(enable_timing=True)
@@ -134,7 +116,7 @@ class TimingProfiler:
             self._add(name, (time.perf_counter() - start_s) * 1000.0)
 
     @contextmanager
-    def host(self, name: str) -> Iterator[None]:
+    def host(self, name: str) -> Generator[None]:
         """Record host-side work, including intentional tensor materialization boundaries."""
         start_s = time.perf_counter()
         try:

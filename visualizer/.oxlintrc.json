@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "node"],
+  "ignorePatterns": ["node_modules"],
+  "overrides": [
+    {
+      "files": ["**/*.test.mjs"],
+      "rules": { "typescript/no-floating-promises": "off" }
+    }
+  ]
+}

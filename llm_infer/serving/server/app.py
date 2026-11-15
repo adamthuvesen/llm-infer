@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from llm_infer.model.interface import TokenizerLike
-from llm_infer.serving.sampler import SamplingParams
+from llm_infer.request.sampling import SamplingParams
 from llm_infer.serving.server.async_engine import AsyncInferenceEngine, TokenStreamItem
 from llm_infer.serving.server.metrics import ServerMetrics
 from llm_infer.serving.server.protocol import (
@@ -51,7 +51,7 @@ class _StartedGeneration:
     request_id: str
     created: int
     arrival: float
-    token_stream: AsyncIterator[TokenStreamItem]
+    token_stream: AsyncGenerator[TokenStreamItem]
     detok: StopSequenceDetokenizer
 
 
@@ -72,7 +72,7 @@ def create_app(
     metrics = metrics or ServerMetrics()
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         async_engine.start()
         try:
             yield
@@ -94,8 +94,10 @@ def create_app(
     async def models() -> ModelList:
         return ModelList(data=[ModelCard(id=model_id, created=int(time.time()))])
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatCompletionRequest):
+    @app.post("/v1/chat/completions", response_model=None)
+    async def chat_completions(
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResponse | CompletionResponse | StreamingResponse:
         _reject_unsupported(request)
         _check_sampling(request)
         model = _resolve_model(request.model, model_id)
@@ -112,8 +114,10 @@ def create_app(
             prefix_group_id=request.llm_infer_prefix_group_id,
         )
 
-    @app.post("/v1/completions")
-    async def completions(request: CompletionRequest):
+    @app.post("/v1/completions", response_model=None)
+    async def completions(
+        request: CompletionRequest,
+    ) -> ChatCompletionResponse | CompletionResponse | StreamingResponse:
         _check_sampling(request)
         model = _resolve_model(request.model, model_id)
         if isinstance(request.prompt, list):
@@ -133,8 +137,8 @@ def create_app(
             prefix_group_id=request.llm_infer_prefix_group_id,
         )
 
-    @app.post("/v1/responses")
-    async def responses(request: ResponsesRequest):
+    @app.post("/v1/responses", response_model=None)
+    async def responses(request: ResponsesRequest) -> Response | StreamingResponse:
         _reject_responses_unsupported(request)
         model = _resolve_model(request.model, model_id)
         prompt_ids = _responses_prompt_ids(tokenizer, request)
@@ -183,7 +187,7 @@ def create_app(
         sampling: SamplingParams,
         stop: list[str],
         prefix_group_id: str | None,
-    ):
+    ) -> ChatCompletionResponse | CompletionResponse | StreamingResponse:
         started = _start_generation(
             async_engine=async_engine,
             tokenizer=tokenizer,
@@ -258,7 +262,7 @@ def _start_generation(
 async def _collect(
     *,
     request_kind: str,
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     detok: StopSequenceDetokenizer,
     completion_id: str,
     created: int,
@@ -266,7 +270,7 @@ async def _collect(
     prompt_tokens: int,
     metrics: ServerMetrics | None = None,
     arrival: float | None = None,
-):
+) -> ChatCompletionResponse | CompletionResponse:
     """Drain the token stream and assemble a single non-streaming response.
 
     A stop string truncates the text before the stop, sets ``finish_reason="stop"``, and aborts
@@ -307,7 +311,7 @@ async def _collect(
 
 async def _collect_response(
     *,
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     detok: StopSequenceDetokenizer,
     response_id: str,
     created: int,
@@ -315,7 +319,7 @@ async def _collect_response(
     input_tokens: int,
     metrics: ServerMetrics | None = None,
     arrival: float | None = None,
-):
+) -> Response:
     """Drain the stream into one Responses ``response`` object (a single assistant message)."""
     drained = await drain_token_stream(
         token_stream=token_stream,
@@ -344,13 +348,20 @@ def _template_token_ids(rendered: object) -> list[int]:
 
     Real HF tokenizers return a ``BatchEncoding`` (``{"input_ids": [...]}``); a stand-in may
     return a bare list. Iterating a mapping yields its *keys*, not its ids, so read
-    ``input_ids`` explicitly, drop a leading batch dimension if present, and coerce to int.
+    ``input_ids`` explicitly and drop a leading batch dimension if present.
+    Reject malformed token ids before generation starts.
     """
     ids = rendered["input_ids"] if isinstance(rendered, Mapping) else rendered
-    ids = list(ids)
+    if not isinstance(ids, Sequence) or isinstance(ids, (str, bytes, bytearray)):
+        raise TypeError("chat template token ids must be a sequence")
     if ids and isinstance(ids[0], (list, tuple)):
-        ids = list(ids[0])
-    return [int(token) for token in ids]
+        ids = ids[0]
+    token_ids: list[int] = []
+    for token in ids:
+        if not isinstance(token, int) or isinstance(token, bool):
+            raise TypeError("chat template token ids must be integers")
+        token_ids.append(token)
+    return token_ids
 
 
 def _apply_chat_template(tokenizer: TokenizerLike, messages: list[ChatMessage]) -> list[int]:
@@ -421,7 +432,7 @@ def _stop_sequences(stop: str | list[str] | None) -> list[str]:
             400, f"'stop' accepts at most {_MAX_STOP_SEQUENCES} sequences; got {len(sequences)}"
         )
     for sequence in sequences:
-        if not isinstance(sequence, str):
+        if not isinstance(sequence, str):  # pyright: ignore[reportUnnecessaryIsInstance]  # request JSON may hold non-strings
             raise HTTPException(400, "'stop' sequences must be strings")
         if len(sequence) > _MAX_STOP_LENGTH:
             raise HTTPException(

@@ -47,6 +47,7 @@ from llm_infer.model.layers import (
     rope_tables_for_positions,
     swiglu_mlp,
 )
+from llm_infer.model.no_grad import no_grad
 from llm_infer.model.pretrain_bundle_loader import (
     BUNDLE_FORMAT,
     PretrainBundleError,
@@ -97,7 +98,7 @@ class PretrainBundleModel:
         # Resolve the native-paged capability once. The Protocol is runtime_checkable, so
         # ``isinstance`` scans every protocol attribute — too costly to repeat per layer per decode
         # step. The backend never changes after construction, so cache the narrowed reference.
-        self._paged_backend: PagedDecodeAttentionBackend | None = (
+        self.paged_backend: PagedDecodeAttentionBackend | None = (
             backend if isinstance(backend, PagedDecodeAttentionBackend) else None
         )
         # A grouped-decode backend (SDPA) broadcasts KV heads itself, so the packed decode path
@@ -178,7 +179,7 @@ class PretrainBundleModel:
             dtype=dtype,
         )
 
-    @torch.no_grad()
+    @no_grad
     def logits(self, token_ids: list[int]) -> torch.Tensor:
         """Next-token logits for every input position. Shape ``(seq_len, vocab_size)``.
 
@@ -195,10 +196,10 @@ class PretrainBundleModel:
             )
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
-            return self._apply_logit_soft_cap(hidden @ self._lm_head().T)
+            hidden = rms_norm(hidden, self.norm_weight("norm.weight"), self.rms_eps)
+            return self.apply_logit_soft_cap(hidden @ self.lm_head().T)
 
-    @torch.no_grad()
+    @no_grad
     def prefill(
         self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
     ) -> torch.Tensor:
@@ -226,10 +227,10 @@ class PretrainBundleModel:
         table.length = seq_len
 
         with self._profile("logits"):
-            last = rms_norm(hidden[-1:], self._norm_weight("norm.weight"), self.rms_eps)
-            return self._apply_logit_soft_cap((last @ self._lm_head().T)[-1])
+            last = rms_norm(hidden[-1:], self.norm_weight("norm.weight"), self.rms_eps)
+            return self.apply_logit_soft_cap((last @ self.lm_head().T)[-1])
 
-    @torch.no_grad()
+    @no_grad
     def prefill_many(
         self,
         prompts: list[list[int]],
@@ -312,13 +313,13 @@ class PretrainBundleModel:
         )
         with self._profile("logits"):
             last = hidden.index_select(0, final_positions)
-            last = rms_norm(last, self._norm_weight("norm.weight"), self.rms_eps)
-            logits = self._apply_logit_soft_cap(last @ self._lm_head().T)
+            last = rms_norm(last, self.norm_weight("norm.weight"), self.rms_eps)
+            logits = self.apply_logit_soft_cap(last @ self.lm_head().T)
         for table, length in zip(tables, lengths, strict=True):
             table.length = length
         return logits
 
-    @torch.no_grad()
+    @no_grad
     def prefill_chunk(
         self,
         prompt_ids: list[int],
@@ -363,10 +364,10 @@ class PretrainBundleModel:
         table.length = end_pos
 
         with self._profile("logits"):
-            last = rms_norm(hidden[-1:], self._norm_weight("norm.weight"), self.rms_eps)
-            return self._apply_logit_soft_cap((last @ self._lm_head().T)[-1])
+            last = rms_norm(hidden[-1:], self.norm_weight("norm.weight"), self.rms_eps)
+            return self.apply_logit_soft_cap((last @ self.lm_head().T)[-1])
 
-    @torch.no_grad()
+    @no_grad
     def decode_one(
         self, cache: PagedKVCache, table: BlockTable, token_id: int | torch.Tensor
     ) -> torch.Tensor:
@@ -379,7 +380,7 @@ class PretrainBundleModel:
         tokens = [token_id] if isinstance(token_id, int) else token_id
         return self.decode_tokens(cache, table, tokens)[-1]
 
-    @torch.no_grad()
+    @no_grad
     def decode_many(
         self,
         cache: PagedKVCache,
@@ -416,14 +417,14 @@ class PretrainBundleModel:
         # One RoPE cos/sin row per request, each at the request's own absolute position — from
         # the cached table, already in model dtype, so the per-layer apply_rope cast is a no-op.
         cos, sin = self._rope_rows(positions)
-        uses_native_pages = self._uses_paged_decode_backend()
+        uses_native_pages = self.uses_paged_decode_backend()
         read_plan = cache.plan_read_many(
             tables,
             new_lengths,
             include_pages=uses_native_pages,
             include_packed=not uses_native_pages,
         )
-        self._prepare_paged_decode(read_plan)
+        self.prepare_paged_decode(read_plan)
         for layer in range(self.num_layers):
             hidden = self._apply_decoder_layer(
                 hidden,
@@ -436,8 +437,8 @@ class PretrainBundleModel:
             table.length = new_length
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
-            return self._apply_logit_soft_cap(hidden @ self._lm_head().T)  # (B, vocab)
+            hidden = rms_norm(hidden, self.norm_weight("norm.weight"), self.rms_eps)
+            return self.apply_logit_soft_cap(hidden @ self.lm_head().T)  # (B, vocab)
 
     def open_decode_window(
         self, cache: PagedKVCache, tables: list[BlockTable], budget: int
@@ -447,8 +448,12 @@ class PretrainBundleModel:
         Also grows the cached RoPE table to cover every position the window can reach, so
         :meth:`decode_window_step` never allocates or syncs for positions.
         """
-        uses_native_pages = self._uses_paged_decode_backend()
-        runner_needs_packed = bool(getattr(self.decode_graphs, "requires_packed_read_plan", False))
+        uses_native_pages = self.uses_paged_decode_backend()
+        runner_needs_packed = (
+            self.decode_graphs.requires_packed_read_plan
+            if self.decode_graphs is not None
+            else False
+        )
         plan = build_decode_window_plan(
             cache,
             tables,
@@ -457,7 +462,7 @@ class PretrainBundleModel:
             include_packed=not uses_native_pages or runner_needs_packed,
         )
         if plan is not None:
-            self._ensure_rope_rows(max(plan.base_lengths) + budget)
+            self.ensure_rope_rows(max(plan.base_lengths) + budget)
         return plan
 
     def enable_decode_graphs(
@@ -479,7 +484,7 @@ class PretrainBundleModel:
         )
         return self.decode_graphs
 
-    @torch.no_grad()
+    @no_grad
     def decode_window_step(
         self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
     ) -> torch.Tensor:
@@ -503,16 +508,16 @@ class PretrainBundleModel:
             logits = self.decode_graphs.window_step(cache, plan, token_ids)
             if logits is not None:
                 return logits
-        uses_native_pages = self._uses_paged_decode_backend()
+        uses_native_pages = self.uses_paged_decode_backend()
         write_slots, read_plan = plan.begin_step(
             include_pages=uses_native_pages,
             include_packed=not uses_native_pages,
         )
-        self._prepare_paged_decode(read_plan)
+        self.prepare_paged_decode(read_plan)
         hidden = self.w["embed_tokens.weight"][token_ids.reshape(-1)].to(self.dtype)
         # max_len - 1 is the largest position this step touches; the table already covers the
         # whole window (open_decode_window grew it), so this is a cheap host-side check.
-        cos_table, sin_table = self._ensure_rope_rows(plan.max_len)
+        cos_table, sin_table = self.ensure_rope_rows(plan.max_len)
         cos = cos_table.index_select(0, plan.positions)
         sin = sin_table.index_select(0, plan.positions)
         for layer in range(self.num_layers):
@@ -526,10 +531,10 @@ class PretrainBundleModel:
         plan.complete_step()
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
-            return self._apply_logit_soft_cap(hidden @ self._lm_head().T)  # (B, vocab)
+            hidden = rms_norm(hidden, self.norm_weight("norm.weight"), self.rms_eps)
+            return self.apply_logit_soft_cap(hidden @ self.lm_head().T)  # (B, vocab)
 
-    @torch.no_grad()
+    @no_grad
     def decode_tokens(
         self,
         cache: PagedKVCache,
@@ -565,18 +570,18 @@ class PretrainBundleModel:
         table.length = end_pos
 
         with self._profile("logits"):
-            hidden = rms_norm(hidden, self._norm_weight("norm.weight"), self.rms_eps)
-            return self._apply_logit_soft_cap(hidden @ self._lm_head().T)
+            hidden = rms_norm(hidden, self.norm_weight("norm.weight"), self.rms_eps)
+            return self.apply_logit_soft_cap(hidden @ self.lm_head().T)
 
     def release_table(self, table: BlockTable) -> None:
         """No-op — real K/V lives in the paged cache, not per-table backend state."""
         del table
 
-    def _uses_paged_decode_backend(self) -> bool:
-        return self._paged_backend is not None
+    def uses_paged_decode_backend(self) -> bool:
+        return self.paged_backend is not None
 
-    def _prepare_paged_decode(self, read_plan: KVReadPlan) -> None:
-        backend = self._paged_backend
+    def prepare_paged_decode(self, read_plan: KVReadPlan) -> None:
+        backend = self.paged_backend
         if backend is None or read_plan.page_plan is None:
             return
         with self._profile("paged_attention_plan"):
@@ -588,14 +593,14 @@ class PretrainBundleModel:
                 dtype=self.dtype,
             )
 
-    def _decode_attention_from_plan(
+    def decode_attention_from_plan(
         self,
         queries: torch.Tensor,
         layer: int,
         cache: PagedKVCache,
         read_plan: KVReadPlan,
     ) -> torch.Tensor:
-        backend = self._paged_backend
+        backend = self.paged_backend
         if backend is not None and read_plan.page_plan is not None:
             with self._profile("paged_attention"):
                 return backend.forward_decode_batch_paged(queries, cache.layer_kv(layer))
@@ -626,19 +631,19 @@ class PretrainBundleModel:
         """
         prefix = f"layers.{layer}."
         residual = hidden
-        x = rms_norm(hidden, self._norm_weight(prefix + "input_norm.weight"), self.rms_eps)
+        x = rms_norm(hidden, self.norm_weight(prefix + "input_norm.weight"), self.rms_eps)
         hidden = residual + attention(x, prefix, layer)
 
         residual = hidden
-        x = rms_norm(hidden, self._norm_weight(prefix + "post_attention_norm.weight"), self.rms_eps)
+        x = rms_norm(hidden, self.norm_weight(prefix + "post_attention_norm.weight"), self.rms_eps)
         return residual + swiglu_mlp(self.w, x, prefix, self.dtype)
 
     def _attention(
         self, x: torch.Tensor, prefix: str, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
         """Full-recompute attention over the whole sequence (known-good reference path)."""
-        q, k, v = self._project_heads(x, prefix)
-        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k, v = self.project_heads(x, prefix)
+        q, k = self.qk_norm_rope(q, k, cos, sin, prefix)
         k, v = self._expand_kv(k, v)
         attn = self.backend.forward(q, k, v)
         return self._output_proj(attn, prefix)
@@ -658,8 +663,8 @@ class PretrainBundleModel:
         The just-computed K/V (positions ``0 .. L-1``) is exactly what attention needs here, so
         it is used directly; writing it to the paged store seeds the decode steps that follow.
         """
-        q, k, v = self._project_heads(x, prefix)
-        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k, v = self.project_heads(x, prefix)
+        q, k = self.qk_norm_rope(q, k, cos, sin, prefix)
         # Store pre-GQA K/V as (seq, num_kv_heads, head_dim) at positions 0..seq-1.
         with self._profile("kv_write"):
             cache.write(
@@ -687,8 +692,8 @@ class PretrainBundleModel:
         backend: PackedPrefillAttentionBackend,
     ) -> torch.Tensor:
         """Packed full-prompt attention with native-GQA cache writes."""
-        q, k, v = self._project_heads(x, prefix)
-        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k, v = self.project_heads(x, prefix)
+        q, k = self.qk_norm_rope(q, k, cos, sin, prefix)
         k_rows = k.transpose(0, 1).contiguous()
         v_rows = v.transpose(0, 1).contiguous()
         with self._profile("kv_write"):
@@ -716,8 +721,8 @@ class PretrainBundleModel:
         end_pos: int,
     ) -> torch.Tensor:
         """Chunked prefill attention over cached prefix plus the current prompt chunk."""
-        q, k, v = self._project_heads(x, prefix)
-        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k, v = self.project_heads(x, prefix)
+        q, k = self.qk_norm_rope(q, k, cos, sin, prefix)
         with self._profile("kv_write"):
             cache.write(
                 table,
@@ -751,9 +756,9 @@ class PretrainBundleModel:
         written to its own paged history and its full history gathered (GQA-expanded) — ragged
         across requests — then one batched attention call returns the ``B`` outputs.
         """
-        q, k, v = self._project_heads(x, prefix)
+        q, k, v = self.project_heads(x, prefix)
         # q/k/v shapes: (heads, B, hd), (kv_heads, B, hd), (kv_heads, B, hd).
-        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k = self.qk_norm_rope(q, k, cos, sin, prefix)
 
         with self._profile("kv_write"):
             cache.write_many(
@@ -765,7 +770,7 @@ class PretrainBundleModel:
             )
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
-        attn = self._decode_attention_from_plan(queries, layer, cache, read_plan)
+        attn = self.decode_attention_from_plan(queries, layer, cache, read_plan)
         return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)  # (B, hidden)
 
     def _decode_attention_planned(
@@ -785,8 +790,8 @@ class PretrainBundleModel:
         slots (``write_rows``) and the gather reuses the window's packed read plan, so no block
         table is touched inside the layer loop.
         """
-        q, k, v = self._project_heads(x, prefix)
-        q, k = self._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k, v = self.project_heads(x, prefix)
+        q, k = self.qk_norm_rope(q, k, cos, sin, prefix)
 
         with self._profile("kv_write"):
             cache.write_rows(
@@ -797,10 +802,10 @@ class PretrainBundleModel:
             )
 
         queries = q.transpose(0, 1).contiguous()  # (B, num_heads, head_dim)
-        attn = self._decode_attention_from_plan(queries, layer, cache, read_plan)
+        attn = self.decode_attention_from_plan(queries, layer, cache, read_plan)
         return self._output_proj(attn.transpose(0, 1).contiguous(), prefix)  # (B, hidden)
 
-    def _qk_norm_rope(
+    def qk_norm_rope(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -815,11 +820,11 @@ class PretrainBundleModel:
         is correct to cache once at write time.
         """
         if self.qk_norm:
-            q = rms_norm(q, self._norm_weight(prefix + "attn.q_norm.weight"), self.rms_eps)
-            k = rms_norm(k, self._norm_weight(prefix + "attn.k_norm.weight"), self.rms_eps)
+            q = rms_norm(q, self.norm_weight(prefix + "attn.q_norm.weight"), self.rms_eps)
+            k = rms_norm(k, self.norm_weight(prefix + "attn.k_norm.weight"), self.rms_eps)
         return apply_rope(q, cos, sin), apply_rope(k, cos, sin)
 
-    def _project_heads(
+    def project_heads(
         self, x: torch.Tensor, prefix: str
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Q/K/V projections reshaped to ``(heads, seq, head_dim)`` (KV keeps kv-head count)."""
@@ -867,7 +872,7 @@ class PretrainBundleModel:
             return nullcontext()
         return self.profiler.record(name)
 
-    def _norm_weight(self, name: str) -> torch.Tensor:
+    def norm_weight(self, name: str) -> torch.Tensor:
         """The named RMSNorm weight pre-cast to fp32 (cast once, reused every call)."""
         cached = self._norm_weights_fp32.get(name)
         if cached is None:
@@ -875,7 +880,7 @@ class PretrainBundleModel:
             self._norm_weights_fp32[name] = cached
         return cached
 
-    def _lm_head(self) -> torch.Tensor:
+    def lm_head(self) -> torch.Tensor:
         if self.tie_word_embeddings:
             return self.w["embed_tokens.weight"].to(self.dtype)
         return self.w["lm_head.weight"].to(self.dtype)
@@ -886,11 +891,11 @@ class PretrainBundleModel:
 
     def _rope_rows(self, positions: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
         """Cached RoPE cos/sin rows (model dtype) for host-known integer positions."""
-        cos_table, sin_table = self._ensure_rope_rows(max(positions) + 1)
+        cos_table, sin_table = self.ensure_rope_rows(max(positions) + 1)
         index = torch.tensor(positions, dtype=torch.long, device=self.device)
         return cos_table.index_select(0, index), sin_table.index_select(0, index)
 
-    def _ensure_rope_rows(self, min_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def ensure_rope_rows(self, min_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Grow the cached RoPE table to at least ``min_len`` rows (doubling to limit rebuilds).
 
         Rows are the full-table form of :meth:`_rope_for_positions` — the same outer-product
@@ -922,7 +927,7 @@ class PretrainBundleModel:
             token_id
             for token_id in token_ids
             if isinstance(token_id, bool)
-            or not isinstance(token_id, int)
+            or not isinstance(token_id, int)  # pyright: ignore[reportUnnecessaryIsInstance]  # untrusted token ids
             or not 0 <= token_id < self.config.vocab_size
         ]
         if bad:
@@ -930,7 +935,7 @@ class PretrainBundleModel:
                 f"token_ids must be ints in [0, {self.config.vocab_size}); got {bad[:3]}"
             )
 
-    def _apply_logit_soft_cap(self, logits: torch.Tensor) -> torch.Tensor:
+    def apply_logit_soft_cap(self, logits: torch.Tensor) -> torch.Tensor:
         cap = self.config.logit_soft_cap
         if cap is None or cap <= 0.0:
             return logits

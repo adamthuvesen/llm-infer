@@ -34,19 +34,28 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import torch
 
 from llm_infer.model.layers import linear_projection, swiglu_mlp
+from llm_infer.model.no_grad import no_grad
 from llm_infer.model.rope_utils import rms_norm
 
 if TYPE_CHECKING:
     from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
     from llm_infer.model.decode_plan import DecodeWindowPlan
-    from llm_infer.model.pretrain_bundle import PretrainBundleModel
+    from llm_infer.model.pretrain_bundle_loader import PretrainDenseConfig
 
 DEFAULT_CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128)
+
+
+@runtime_checkable
+class DecodeGraphBackend(Protocol):
+    device: torch.device
+
+    def enable_decode_graphs(self, capture_sizes: tuple[int, ...]) -> object:
+        """Capture the backend's decode graphs at startup."""
 
 
 def enable_decode_graphs_if_cuda(
@@ -59,12 +68,10 @@ def enable_decode_graphs_if_cuda(
     not on CUDA, where capture is impossible; the eager planned window keeps running there.
     Callers log the returned capture time so the startup cost stays visible.
     """
-    enable = getattr(model, "enable_decode_graphs", None)
-    device = getattr(model, "device", None)
-    if enable is None or device is None or device.type != "cuda":
+    if not isinstance(model, DecodeGraphBackend) or model.device.type != "cuda":
         return None
     start = time.perf_counter()
-    enable(capture_sizes)
+    model.enable_decode_graphs(capture_sizes)
     return time.perf_counter() - start
 
 
@@ -76,6 +83,36 @@ def select_bucket(capture_sizes: tuple[int, ...], batch: int) -> int | None:
         if size >= batch:
             return size
     return None
+
+
+class DecodeGraphModel(Protocol):
+    """The ``PretrainBundleModel`` members the runner reads, so this module need not import it."""
+
+    w: dict[str, torch.Tensor]
+    config: PretrainDenseConfig
+    device: torch.device
+    dtype: torch.dtype
+    num_layers: int
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int
+    rms_eps: float
+
+    def ensure_rope_rows(self, min_len: int) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def uses_paged_decode_backend(self) -> bool: ...
+    def prepare_paged_decode(self, read_plan: KVReadPlan) -> None: ...
+    def decode_attention_from_plan(
+        self, queries: torch.Tensor, layer: int, cache: PagedKVCache, read_plan: KVReadPlan
+    ) -> torch.Tensor: ...
+    def norm_weight(self, name: str) -> torch.Tensor: ...
+    def project_heads(
+        self, x: torch.Tensor, prefix: str
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def qk_norm_rope(
+        self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, prefix: str
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def apply_logit_soft_cap(self, logits: torch.Tensor) -> torch.Tensor: ...
+    def lm_head(self) -> torch.Tensor: ...
 
 
 @dataclass
@@ -109,7 +146,7 @@ class DecodeGraphRunner:
 
     def __init__(
         self,
-        model: PretrainBundleModel,
+        model: DecodeGraphModel,
         *,
         capture_sizes: tuple[int, ...] = DEFAULT_CAPTURE_SIZES,
         max_position: int = 8192,
@@ -128,10 +165,10 @@ class DecodeGraphRunner:
         self.capture_sizes = sizes
         self.mode = mode
         # Pin the RoPE rows the graphs read. The eager path may later *replace* the model's
-        # table (``_ensure_rope_rows`` reallocates on growth); these references keep the
+        # table (``ensure_rope_rows`` reallocates on growth); these references keep the
         # captured memory alive, and the ``max_position`` bound keeps every graph-path
         # position inside it, where the row values are immutable and correct.
-        cos, sin = model._ensure_rope_rows(max_position)
+        cos, sin = model.ensure_rope_rows(max_position)
         self._rope_cos = cos
         self._rope_sin = sin
         self.max_position = int(cos.shape[0])
@@ -139,7 +176,7 @@ class DecodeGraphRunner:
         # eager path at its first step must stay eager for its whole window (the positions
         # buffer is loaded only at step 0).
         self._active_plan: DecodeWindowPlan | None = None
-        self._buckets = {size: self._build_bucket(size) for size in sizes}
+        self.buckets = {size: self._build_bucket(size) for size in sizes}
         if mode == "graph":
             self._capture_all()
 
@@ -147,7 +184,7 @@ class DecodeGraphRunner:
         """The padded size ``batch`` would replay at, or ``None`` (caller stays eager)."""
         return select_bucket(self.capture_sizes, batch)
 
-    @torch.no_grad()
+    @no_grad
     def window_step(
         self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
     ) -> torch.Tensor | None:
@@ -163,7 +200,7 @@ class DecodeGraphRunner:
         bucket_size = self.bucket_for(batch)
         if bucket_size is None:
             return None
-        state = self._buckets[bucket_size]
+        state = self.buckets[bucket_size]
         if plan.steps_used == 0:
             if max(plan.base_lengths) + plan.budget > self.max_position:
                 return None
@@ -175,28 +212,28 @@ class DecodeGraphRunner:
         elif self._active_plan is not plan:
             return None
 
-        uses_native_pages = self.model._uses_paged_decode_backend()
+        uses_native_pages = self.model.uses_paged_decode_backend()
         runner_needs_packed = self.requires_packed_read_plan
         write_slots, read_plan = plan.begin_step(
             include_pages=uses_native_pages,
             include_packed=not uses_native_pages or runner_needs_packed,
         )
-        self.model._prepare_paged_decode(read_plan)
+        self.model.prepare_paged_decode(read_plan)
         state.tokens[:batch].copy_(token_ids.reshape(-1))
-        self._run_segment(state, 0)
+        self.run_segment(state, 0)
         for layer in range(self.model.num_layers):
-            self._attention_eager(state, layer, cache, batch, write_slots, read_plan)
-            self._run_segment(state, layer + 1)
+            self.attention_eager(state, layer, cache, batch, write_slots, read_plan)
+            self.run_segment(state, layer + 1)
         plan.complete_step()
         return state.logits[:batch]
 
-    def _run_segment(self, state: _BucketState, index: int) -> None:
+    def run_segment(self, state: _BucketState, index: int) -> None:
         if state.graphs is not None:
             state.graphs[index].replay()
         else:
             state.run_segments[index]()
 
-    def _attention_eager(
+    def attention_eager(
         self,
         state: _BucketState,
         layer: int,
@@ -213,7 +250,7 @@ class DecodeGraphRunner:
         """
         model = self.model
         cache.write_rows(layer, write_slots, state.k[:batch], state.v[:batch])
-        out = model._decode_attention_from_plan(state.q[:batch], layer, cache, read_plan)
+        out = model.decode_attention_from_plan(state.q[:batch], layer, cache, read_plan)
         state.attn[:batch].copy_(out)
 
     def _pre_attention(self, state: _BucketState, layer: int) -> None:
@@ -221,11 +258,11 @@ class DecodeGraphRunner:
         model = self.model
         prefix = f"layers.{layer}."
         state.residual.copy_(state.hidden)
-        x = rms_norm(state.hidden, model._norm_weight(prefix + "input_norm.weight"), model.rms_eps)
-        q, k, v = model._project_heads(x, prefix)
+        x = rms_norm(state.hidden, model.norm_weight(prefix + "input_norm.weight"), model.rms_eps)
+        q, k, v = model.project_heads(x, prefix)
         cos = self._rope_cos.index_select(0, state.positions)
         sin = self._rope_sin.index_select(0, state.positions)
-        q, k = model._qk_norm_rope(q, k, cos, sin, prefix)
+        q, k = model.qk_norm_rope(q, k, cos, sin, prefix)
         state.q.copy_(q.transpose(0, 1))
         state.k.copy_(k.transpose(0, 1))
         state.v.copy_(v.transpose(0, 1))
@@ -239,7 +276,7 @@ class DecodeGraphRunner:
             model.w, merged, prefix + "attn.o_proj", model.dtype
         )
         x = rms_norm(
-            hidden, model._norm_weight(prefix + "post_attention_norm.weight"), model.rms_eps
+            hidden, model.norm_weight(prefix + "post_attention_norm.weight"), model.rms_eps
         )
         state.hidden.copy_(hidden + swiglu_mlp(model.w, x, prefix, model.dtype))
 
@@ -286,13 +323,13 @@ class DecodeGraphRunner:
 
         def last() -> None:
             self._post_attention(state, model.num_layers - 1)
-            x = rms_norm(state.hidden, model._norm_weight("norm.weight"), model.rms_eps)
-            state.logits.copy_(model._apply_logit_soft_cap(x @ model._lm_head().T))
+            x = rms_norm(state.hidden, model.norm_weight("norm.weight"), model.rms_eps)
+            state.logits.copy_(model.apply_logit_soft_cap(x @ model.lm_head().T))
             state.positions += 1
 
         return [first, *(mid(layer) for layer in range(1, model.num_layers)), last]
 
-    @torch.no_grad()
+    @no_grad
     def _capture_all(self) -> None:
         """Warm up on a side stream, then capture every bucket into one shared pool.
 
@@ -305,14 +342,14 @@ class DecodeGraphRunner:
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
-            for size in sorted(self._buckets, reverse=True):
+            for size in sorted(self.buckets, reverse=True):
                 for _ in range(3):
-                    for segment in self._buckets[size].run_segments:
+                    for segment in self.buckets[size].run_segments:
                         segment()
         torch.cuda.current_stream().wait_stream(side)
         torch.cuda.synchronize()
-        for size in sorted(self._buckets, reverse=True):
-            state = self._buckets[size]
+        for size in sorted(self.buckets, reverse=True):
+            state = self.buckets[size]
             graphs: list[torch.cuda.CUDAGraph] = []
             for segment in state.run_segments:
                 graph = torch.cuda.CUDAGraph()

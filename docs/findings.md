@@ -438,7 +438,7 @@ engine rungs, outside their rotation, so the engine-over-HF ratio is not drift-c
 way adjacent rungs are.
 
 Record: [`assets/esme-ablation-ladder.json`](../assets/esme-ablation-ladder.json).
-Reproduce: `modal run scripts/modal_esme_batch_curve.py --command ladder`.
+Reproduce: `modal run scripts/modal_esme_batch_curve.py --command ladder` at tag `archive/llm-infer-experiments-2026-11-11`.
 
 ## 14. Batch-1 roofline: the step is GPU-bound on kernel count
 
@@ -979,8 +979,8 @@ bundle, a long-context workload, or a gap above 0.25 is outside it and gets a fu
 Record: [`assets/esme-bf16-error.json`](../assets/esme-bf16-error.json). It stores the Dolly line
 indices and a hash, not the prompt text.
 
-Reproduce: `modal run scripts/modal_esme_bf16_error.py`. A CPU wiring check runs with
-`--command smoke`.
+Reproduce: `modal run scripts/modal_esme_bf16_error.py` at tag `archive/llm-infer-experiments-2026-11-11`. A CPU wiring check runs
+with `--command smoke`.
 
 ## 21. Full-step decode graphs (predictions registered before the run)
 
@@ -990,7 +990,7 @@ graphs, with KV writes and attention running eagerly between them. In July, grou
 beat grouping 2 by about twice the margin, and nobody tried all of them. Does grouping all 30
 layers, so that a token step is one graph launch plus its `plan()`, beat the four-layer default?
 
-**Method.** `scripts/modal_esme_full_step_ab.py`. One persistent engine per arm and batch size:
+**Method.** `scripts/modal_esme_full_step_ab.py` (tag `archive/llm-infer-experiments-2026-11-11`). One persistent engine per arm and batch size:
 `grouped4` (the server default) and `full_step` (`grouped_layers=30`). Batch 1, 8, and 64, fixed
 128-token greedy output with EOS ignored, two warmup rounds, and 11 measured rounds that
 alternate which arm goes first. Every arm gates against the fp32 oracle, and the record stores
@@ -1037,8 +1037,8 @@ intervals; negative is faster.)
   much grouped graphs pay, so the gain on another host may differ.
 
 **Decision.** By the registered rule, full-depth grouping becomes the HTTP-server default.
-`build_app_from_runtime` in `llm_infer/serve.py` now groups every layer. The raw engine keeps four
-layers, so benchmark records stay comparable.
+`build_app_from_runtime` (now in `llm_infer/serve_runtime.py`) groups every layer.
+The raw engine keeps four layers, so benchmark records stay comparable.
 
 Records: [`assets/esme-full-step-ab-1.json`](../assets/esme-full-step-ab-1.json),
 [`assets/esme-full-step-ab-2.json`](../assets/esme-full-step-ab-2.json).
@@ -1051,7 +1051,7 @@ drafted tokens in one forward pass, but it gives up the decode window and its gr
 pay at batch 1 on the current engine, on ordinary prompts or on prompts whose answers copy their
 input?
 
-**Method.** `scripts/modal_esme_spec_decode_ab.py`. Two workloads of 64 distinct Dolly prompts each
+**Method.** `scripts/modal_esme_spec_decode_ab.py` (tag `archive/llm-infer-experiments-2026-11-11`). Two workloads of 64 distinct Dolly prompts each
 (pinned revision, seed 1), after 4 warmup prompts: `open` (context-free instructions) and `grounded`
 (summarization, extraction, and closed QA over a 200–1,200-character passage). Batch 1, 128 new
 tokens, EOS ignored. Each prompt runs once on each arm, alternating which arm goes first, so each
@@ -1128,7 +1128,7 @@ plain piecewise at batch 1 and 18–30% faster at batch 8 and 64 (raw timing, di
 one run, not paired). Does fusion pay on top of the server's full-depth graphs? A second, smaller
 question closes a gap in entry 21: what does full depth cost at server startup?
 
-**Method.** `scripts/modal_esme_fusion_ab.py`, with entry 21's protocol. One persistent engine per
+**Method.** `scripts/modal_esme_fusion_ab.py` (tag `archive/llm-infer-experiments-2026-11-11`), with entry 21's protocol. One persistent engine per
 arm and batch size, both grouping all 30 layers: `full_step` (the server default) and
 `full_step_fused` (the same, with `torch.compile` versions of the two functions swapped in while
 that arm's engine captures and runs). Batch 1, 8, and 64, 128 new tokens, EOS ignored, two warmup
@@ -1318,7 +1318,7 @@ Records: [`assets/esme-fused-startup.json`](../assets/esme-fused-startup.json) a
 **Question.** The README's HF headline comes from entry 13's ladder, which predates fused kernels
 and grouped all layers only in the server. What does the ladder show on the current CUDA path?
 
-**Method.** `modal run scripts/modal_esme_batch_curve.py --command ladder`, entry 13's protocol:
+**Method.** `modal run scripts/modal_esme_batch_curve.py --command ladder` (tag `archive/llm-infer-experiments-2026-11-11`), entry 13's protocol:
 one A100 container, chat prompts, up to 256 new tokens, real EOS, greedy, HF sequential and
 batched `generate()` first, then the cumulative engine rungs, each a persistent engine built
 before timing, with rotated rung order, one warmup, and five measured runs. Two changes. The

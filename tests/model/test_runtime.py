@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import ast
 import asyncio
 import hashlib
@@ -28,7 +27,11 @@ from llm_infer.model.runtime import (
     available_backends,
     load_model_runtime,
 )
-from llm_infer.serve import DEFAULT_BACKEND, _bundle_path_for_backend, build_app_from_runtime
+from llm_infer.serve_runtime import (
+    DEFAULT_BACKEND,
+    build_app_from_runtime,
+    bundle_path_for_backend,
+)
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -88,7 +91,7 @@ def test_bundle_runtime_disables_batched_prefill_for_narrow_attention_backend(
     runtime = load_model_runtime(
         "esme",
         bundle_path=_write_tiny_bundle(tmp_path),
-        attention_backend=NarrowAttention(),
+        attention_backend=NarrowAttention(),  # pyright: ignore[reportArgumentType]  # narrow backend on purpose
     )
 
     assert runtime.capabilities.batched_prefill is False
@@ -181,7 +184,7 @@ def test_serve_defaults_to_esme_backend() -> None:
 
 
 def test_serve_bundle_backend_uses_env_bundle() -> None:
-    bundle = _bundle_path_for_backend(
+    bundle = bundle_path_for_backend(
         "esme",
         explicit_bundle=None,
         env_bundle="/tmp/esme-214m-chat",
@@ -191,12 +194,12 @@ def test_serve_bundle_backend_uses_env_bundle() -> None:
 
 
 def test_serve_bundle_backend_requires_bundle() -> None:
-    with pytest.raises(argparse.ArgumentTypeError, match="requires --bundle"):
-        _bundle_path_for_backend("esme", explicit_bundle=None, env_bundle=None)
+    with pytest.raises(ValueError, match="requires --bundle"):
+        bundle_path_for_backend("esme", explicit_bundle=None, env_bundle=None)
 
 
 def test_serve_qwen_reproduction_ignores_env_bundle() -> None:
-    bundle = _bundle_path_for_backend(
+    bundle = bundle_path_for_backend(
         "qwen",
         explicit_bundle=None,
         env_bundle="/tmp/esme-214m-chat",
@@ -206,8 +209,8 @@ def test_serve_qwen_reproduction_ignores_env_bundle() -> None:
 
 
 def test_serve_qwen_rejects_explicit_bundle() -> None:
-    with pytest.raises(argparse.ArgumentTypeError, match="does not accept --bundle"):
-        _bundle_path_for_backend(
+    with pytest.raises(ValueError, match="does not accept --bundle"):
+        bundle_path_for_backend(
             "qwen",
             explicit_bundle=Path("/tmp/esme-214m-chat"),
             env_bundle=None,
@@ -285,7 +288,91 @@ def test_esme_runtime_honors_bundle_chat_template_and_special_token_policy(
     assert rendered == "user\nhello\nassistant\n"
     assert tokenized == [2, 5, 3]
     assert runtime.tokenizer.encode("hello") == [5]
-    assert runtime.tokenizer.encode("hello", add_special_tokens=True) == [5, 9]
+    assert runtime.tokenizer.encode("hello", add_special_tokens=True) == [5, 9]  # pyright: ignore[reportCallIssue]  # the concrete tokenizer takes extra kwargs
+
+
+def test_esme_v2_chat_template_ends_each_served_assistant_turn_with_the_eos_id(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    _write_chat_tokenizer(bundle / "tokenizer.json", register_eos=True)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    manifest["files"]["tokenizer"]["sha256"] = hashlib.sha256(
+        (bundle / "tokenizer.json").read_bytes()
+    ).hexdigest()
+    manifest["eos_token_ids"] = [9]
+    manifest["chat_template"] = {
+        "id": "esme_newline_v2",
+        "roles": {
+            "system": "system\n{content}\n",
+            "user": "user\n{content}\n",
+            "assistant": "assistant\n{content}<eos>",
+        },
+        "generation_prompt": "assistant\n",
+        "add_special_tokens": False,
+    }
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    runtime = load_model_runtime("esme", bundle_path=bundle)
+    tokenized = runtime.tokenizer.apply_chat_template(
+        history, add_generation_prompt=True, tokenize=True
+    )
+
+    assert tokenized == [2, 5, 3, 5, 9, 2, 5, 3, 5, 9, 2, 5, 3]
+
+
+def test_base_bundle_without_eos_ids_stops_on_the_tokenizer_eos(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert "eos_token_ids" not in manifest
+    assert "decoding" not in manifest
+
+    runtime = load_model_runtime("dense", bundle_path=bundle)
+
+    assert runtime.eos_token_ids == frozenset({2})
+
+
+def test_chat_bundle_without_eos_ids_fails_at_load(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    _edit_manifest(
+        bundle,
+        chat_template={"roles": {"user": "user\n{content}\n"}, "generation_prompt": "a\n"},
+    )
+
+    with pytest.raises(ModelRegistryError, match=r"eos_token_ids or decoding\.eos_token_ids"):
+        load_model_runtime("esme", bundle_path=bundle)
+
+
+def test_base_bundle_with_no_eos_source_fails_at_load(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    tokenizer_path = bundle / "tokenizer.json"
+    tokenizer_path.write_text(
+        tokenizer_path.read_text(encoding="utf-8").replace('"<eos>"', '"<end>"'),
+        encoding="utf-8",
+    )
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    manifest["files"]["tokenizer"]["sha256"] = hashlib.sha256(
+        tokenizer_path.read_bytes()
+    ).hexdigest()
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ModelRegistryError, match="no <eos> token"):
+        load_model_runtime("dense", bundle_path=bundle)
+
+
+def test_bundle_with_disagreeing_eos_keys_fails_at_load(tmp_path: Path) -> None:
+    bundle = _write_tiny_bundle(tmp_path)
+    _edit_manifest(bundle, eos_token_ids=[2], decoding={"eos_token_ids": [3]})
+
+    with pytest.raises(ModelRegistryError, match="disagree"):
+        load_model_runtime("dense", bundle_path=bundle)
 
 
 def test_dense_runtime_drives_serving_path(tmp_path: Path) -> None:
@@ -391,7 +478,13 @@ def test_esme_chat_bundle_reference_checked_when_configured() -> None:
     assert engine.run()["esme"] == reference
 
 
-def _write_chat_tokenizer(path: Path) -> None:
+def _edit_manifest(bundle: Path, **fields: object) -> None:
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    manifest.update(fields)
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _write_chat_tokenizer(path: Path, *, register_eos: bool = False) -> None:
     tokenizer = Tokenizer(
         WordLevel(
             vocab={
@@ -415,6 +508,8 @@ def _write_chat_tokenizer(path: Path) -> None:
         single="$A <eos>",
         special_tokens=[("<eos>", 9)],
     )
+    if register_eos:
+        tokenizer.add_special_tokens(["<eos>"])
     tokenizer.save(str(path))
 
 
@@ -424,6 +519,7 @@ def test_generic_modules_do_not_import_qwen_directly() -> None:
         root / "llm_infer" / "model" / "decode.py",
         root / "llm_infer" / "serving" / "engine.py",
         root / "llm_infer" / "serve.py",
+        root / "llm_infer" / "serve_runtime.py",
     ]
     for path in generic_paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -9,8 +10,11 @@ import torch
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.kernels.torch_naive import TorchNaiveAttention
+from llm_infer.kv_cache import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import KVPagePlan, PagedKVCache
+from llm_infer.model.interface import CausalLMBackend
 from llm_infer.model.layers import expand_grouped_kv
+from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.model.runtime import load_model_runtime
 
 _PROMPTS = ([1, 4, 7], [2, 5, 3, 6])
@@ -78,7 +82,7 @@ class PageTableReferenceAttention:
         lengths: list[int] = []
         indptr = self.page_plan.indptr.cpu().tolist()
         last_page_len = self.page_plan.last_page_len.cpu().tolist()
-        for row, (start, end) in enumerate(zip(indptr[:-1], indptr[1:], strict=True)):
+        for row, (start, end) in enumerate(pairwise(indptr)):
             page_count = end - start
             length = (page_count - 1) * self.page_plan.page_size + last_page_len[row]
             pages = self.page_plan.indices[start:end].to(torch.long)
@@ -101,12 +105,17 @@ class PageTableReferenceAttention:
         )
 
 
+def _bundle_model(model: CausalLMBackend) -> PretrainBundleModel:
+    assert isinstance(model, PretrainBundleModel)
+    return model
+
+
 @pytest.fixture()
 def bundle(tmp_path: Path) -> Path:
     return write_tiny_pretrain_bundle(tmp_path)
 
 
-def _prefill(model, cache: PagedKVCache) -> tuple[list, torch.Tensor]:
+def _prefill(model, cache: PagedKVCache) -> tuple[list[BlockTable], torch.Tensor]:
     tables, tokens = [], []
     for prompt in _PROMPTS:
         table = cache.new_request()
@@ -130,9 +139,11 @@ def _cache(model) -> PagedKVCache:
 def test_decode_many_uses_page_plan_when_backend_supports_it(
     bundle: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    baseline = load_model_runtime("esme", bundle_path=bundle).model
+    baseline = _bundle_model(load_model_runtime("esme", bundle_path=bundle).model)
     backend = PageTableReferenceAttention()
-    paged = load_model_runtime("esme", bundle_path=bundle, attention_backend=backend).model
+    paged = _bundle_model(
+        load_model_runtime("esme", bundle_path=bundle, attention_backend=backend).model
+    )
 
     baseline_cache = _cache(baseline)
     paged_cache = _cache(paged)
@@ -162,9 +173,11 @@ def test_decode_many_uses_page_plan_when_backend_supports_it(
 
 
 def test_planned_window_uses_page_plan_when_backend_supports_it(bundle: Path) -> None:
-    baseline = load_model_runtime("esme", bundle_path=bundle).model
+    baseline = _bundle_model(load_model_runtime("esme", bundle_path=bundle).model)
     backend = PageTableReferenceAttention()
-    paged = load_model_runtime("esme", bundle_path=bundle, attention_backend=backend).model
+    paged = _bundle_model(
+        load_model_runtime("esme", bundle_path=bundle, attention_backend=backend).model
+    )
 
     baseline_cache = _cache(baseline)
     paged_cache = _cache(paged)

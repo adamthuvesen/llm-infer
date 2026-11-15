@@ -50,6 +50,8 @@ def test_plan_matches_classic_bookkeeping_step_by_step() -> None:
         new_lengths = [table.length + 1 for table in tables]
         reference = cache.plan_read_many(tables, new_lengths, include_pages=True)
         assert read_plan.idx is not None
+        assert read_plan.cu_seqlens is not None
+        assert reference.cu_seqlens is not None
         assert reference.idx is not None
         assert read_plan.idx.tolist() == reference.idx.tolist()
         assert read_plan.cu_seqlens.tolist() == reference.cu_seqlens.tolist()

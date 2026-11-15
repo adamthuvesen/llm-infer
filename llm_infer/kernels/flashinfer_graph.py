@@ -10,8 +10,51 @@ fixed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
+
+
+class FlashInferDecodeWrapper(Protocol):
+    def plan(
+        self,
+        indptr: torch.Tensor,
+        indices: torch.Tensor,
+        last_page_len: torch.Tensor,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        *,
+        pos_encoding_mode: str,
+        q_data_type: torch.dtype,
+        kv_data_type: torch.dtype,
+        o_data_type: torch.dtype,
+        sm_scale: float,
+    ) -> None: ...
+
+    def run(
+        self,
+        query: torch.Tensor,
+        paged_kv: torch.Tensor,
+        *,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor | None: ...
+
+
+class FlashInferDecodeWrapperFactory(Protocol):
+    def __call__(
+        self,
+        workspace: torch.Tensor,
+        kv_layout: str,
+        *,
+        use_tensor_cores: bool,
+        backend: str,
+        use_cuda_graph: bool = False,
+        paged_kv_indptr_buffer: torch.Tensor | None = None,
+        paged_kv_indices_buffer: torch.Tensor | None = None,
+        paged_kv_last_page_len_buffer: torch.Tensor | None = None,
+    ) -> FlashInferDecodeWrapper: ...
 
 
 class PlanCopyFence:
@@ -81,10 +124,10 @@ def page_metadata_for_lengths(
 
 
 def build_graph_wrapper(
-    wrapper_class,
+    wrapper_class: FlashInferDecodeWrapperFactory,
     workspace: torch.Tensor,
     fixed_metadata: FlashInferPageMetadata,
-):
+) -> FlashInferDecodeWrapper:
     """Construct the pinned FlashInfer wrapper with caller-owned graph buffers."""
     return wrapper_class(
         workspace,
@@ -99,7 +142,7 @@ def build_graph_wrapper(
 
 
 def plan_wrapper(
-    wrapper,
+    wrapper: FlashInferDecodeWrapper,
     metadata: FlashInferPageMetadata,
     shape: FlashInferDecodeShape,
 ) -> None:
@@ -121,7 +164,10 @@ def plan_wrapper(
 
 
 def run_wrapper_into(
-    wrapper, query: torch.Tensor, paged_kv: torch.Tensor, output: torch.Tensor
+    wrapper: FlashInferDecodeWrapper,
+    query: torch.Tensor,
+    paged_kv: torch.Tensor,
+    output: torch.Tensor,
 ) -> None:
     """Run into a caller-owned output so capture replays keep its address fixed."""
     result = wrapper.run(query, paged_kv, out=output)

@@ -8,15 +8,340 @@ durable review — it withholds the public number, it does not mean the row is b
 
 from __future__ import annotations
 
-from typing import Literal
+import math
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Literal, TypedDict
 
-from llm_infer.benchmarks.esme_three_way import EsmeAgreement
 from llm_infer.benchmarks.report import normalize_at_eos
 
 POLICY_VERSION = 2
 ReferenceStatus = Literal["exact", "accepted_numerical", "review_required", "failed"]
+ParityStatus = Literal["exact", "accepted_numerical", "review_required", "failed", "not_applicable"]
 
 QUALIFIED_REFERENCE_STATUSES = frozenset({"exact", "accepted_numerical"})
+
+# docs/findings.md entry 20 audits this automatic bf16 acceptance boundary.
+BF16_AGREEMENT_TOLERANCE = 0.1
+
+
+def _freeze_sample(sample: dict[str, object]) -> Mapping[str, object]:
+    def freeze(value: object) -> object:
+        if isinstance(value, dict):
+            return _freeze_sample(record_object(value, "agreement diagnostic"))
+        if isinstance(value, list):
+            return tuple(freeze(item) for item in value)
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        raise ValueError("agreement diagnostics must contain JSON values")
+
+    return MappingProxyType({key: freeze(value) for key, value in sample.items()})
+
+
+def _copy_samples(samples: tuple[Mapping[str, object], ...]) -> list[dict[str, object]]:
+    def copy(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {key: copy(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [copy(item) for item in value]
+        return value
+
+    return [{key: copy(value) for key, value in sample.items()} for sample in samples]
+
+
+@dataclass(frozen=True, init=False)
+class EsmeAgreement:
+    """One system's agreement with the fp32 reference, independent of model execution."""
+
+    exact: int
+    tie: int
+    nontie: int
+    total: int
+    review_required: int
+    failed: int
+    _ties_sample: tuple[Mapping[str, object], ...]
+    _divergences_sample: tuple[Mapping[str, object], ...]
+    _numerical_evidence: tuple[Mapping[str, object], ...]
+
+    def __init__(
+        self,
+        exact: int,
+        tie: int,
+        nontie: int,
+        total: int,
+        ties_sample: list[dict[str, object]],
+        divergences_sample: list[dict[str, object]],
+        review_required: int = 0,
+        failed: int = 0,
+        numerical_evidence: list[dict[str, object]] | None = None,
+    ) -> None:
+        for name, count in (
+            ("exact", exact),
+            ("tie", tie),
+            ("nontie", nontie),
+            ("total", total),
+            ("review_required", review_required),
+            ("failed", failed),
+        ):
+            if type(count) is not int or count < 0:
+                raise ValueError(
+                    f"agreement.{name}={count!r}, expected a non-negative integer count"
+                )
+            object.__setattr__(self, name, count)
+        object.__setattr__(
+            self, "_ties_sample", tuple(_freeze_sample(sample) for sample in ties_sample)
+        )
+        object.__setattr__(
+            self,
+            "_divergences_sample",
+            tuple(_freeze_sample(sample) for sample in divergences_sample),
+        )
+        object.__setattr__(
+            self,
+            "_numerical_evidence",
+            tuple(_freeze_sample(sample) for sample in numerical_evidence or []),
+        )
+        reference_status(self)
+
+    @property
+    def ties_sample(self) -> list[dict[str, object]]:
+        return _copy_samples(self._ties_sample)
+
+    @property
+    def divergences_sample(self) -> list[dict[str, object]]:
+        return _copy_samples(self._divergences_sample)
+
+    @property
+    def numerical_evidence(self) -> list[dict[str, object]]:
+        return _copy_samples(self._numerical_evidence)
+
+    @property
+    def all_ties_or_exact(self) -> bool:
+        return self.nontie == 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "exact": self.exact,
+            "tie": self.tie,
+            "nontie": self.nontie,
+            "total": self.total,
+            "ties_sample": self.ties_sample,
+            "divergences_sample": self.divergences_sample,
+            "review_required": self.review_required,
+            "failed": self.failed,
+            "numerical_evidence": self.numerical_evidence,
+        }
+
+    @classmethod
+    def from_record(cls, value: object) -> EsmeAgreement:
+        row = record_object(value, "agreement")
+
+        def count(name: str) -> int:
+            value = row.get(name)
+            if type(value) is not int or value < 0:
+                raise ValueError(
+                    f"agreement.{name}={value!r}, expected a non-negative integer count; "
+                    "reclassify measured outputs before building evidence"
+                )
+            return value
+
+        def samples(name: str) -> list[dict[str, object]]:
+            value = row.get(name, [])
+            if not isinstance(value, list):
+                raise ValueError(f"agreement.{name} must be a list")
+            return [record_object(item, f"agreement.{name}") for item in value]
+
+        agreement = cls(
+            exact=count("exact"),
+            tie=count("tie"),
+            nontie=count("nontie"),
+            total=count("total"),
+            ties_sample=samples("ties_sample"),
+            divergences_sample=samples("divergences_sample"),
+            review_required=count("review_required"),
+            failed=count("failed"),
+            numerical_evidence=samples("numerical_evidence"),
+        )
+        reference_status(agreement)
+        return agreement
+
+
+class ReferenceEvidenceRecord(TypedDict):
+    """JSON boundary fields. Construct domain evidence before serializing them."""
+
+    policy_version: int
+    reference_status: ReferenceStatus
+    parity_status: ParityStatus
+    headline_eligible: bool
+
+
+class SystemEvidenceRecord(ReferenceEvidenceRecord):
+    """JSON boundary fields for timed evidence."""
+
+    raw_tokens_per_second: float | None
+    tokens_per_second: float | None
+
+
+@dataclass(frozen=True)
+class ReferenceEvidence:
+    agreement: EsmeAgreement
+
+    @property
+    def policy_version(self) -> int:
+        return POLICY_VERSION
+
+    @property
+    def reference_status(self) -> ReferenceStatus:
+        return reference_status(self.agreement)
+
+    @property
+    def parity_status(self) -> Literal["not_applicable"]:
+        return "not_applicable"
+
+    @property
+    def headline_eligible(self) -> bool:
+        return False
+
+    def as_dict(self) -> ReferenceEvidenceRecord:
+        return {
+            "policy_version": self.policy_version,
+            "reference_status": self.reference_status,
+            "parity_status": self.parity_status,
+            "headline_eligible": self.headline_eligible,
+        }
+
+
+@dataclass(frozen=True)
+class SystemEvidence(ReferenceEvidence):
+    raw_tokens_per_second: float | None
+
+    def __post_init__(self) -> None:
+        raw = self.raw_tokens_per_second
+        if raw is not None and (isinstance(raw, bool) or not math.isfinite(raw) or raw < 0):
+            raise ValueError("raw_tokens_per_second must be finite and non-negative")
+
+    @classmethod
+    def from_timing(
+        cls, *, agreement: EsmeAgreement, median_seconds: float, total_tokens: int
+    ) -> SystemEvidence:
+        if (
+            isinstance(median_seconds, bool)
+            or not math.isfinite(median_seconds)
+            or median_seconds < 0
+            or type(total_tokens) is not int
+            or total_tokens < 0
+        ):
+            raise ValueError("timing and token count must be finite and non-negative")
+        raw = total_tokens / median_seconds if median_seconds > 0 else None
+        return cls(agreement, raw)
+
+    @property
+    def headline_eligible(self) -> bool:
+        raw = self.raw_tokens_per_second
+        return self.reference_status in QUALIFIED_REFERENCE_STATUSES and raw is not None and raw > 0
+
+    @property
+    def tokens_per_second(self) -> float | None:
+        return self.raw_tokens_per_second if self.headline_eligible else None
+
+    def as_dict(self) -> SystemEvidenceRecord:
+        return {
+            **super().as_dict(),
+            "raw_tokens_per_second": self.raw_tokens_per_second,
+            "tokens_per_second": self.tokens_per_second,
+        }
+
+    @classmethod
+    def from_record(cls, row: Mapping[str, object]) -> SystemEvidence:
+        agreement = EsmeAgreement.from_record(row.get("agreement"))
+        raw = row.get("raw_tokens_per_second")
+        if raw is not None and (not isinstance(raw, (int, float)) or isinstance(raw, bool)):
+            raise ValueError("raw_tokens_per_second must be finite and non-negative")
+        evidence = cls(agreement, float(raw) if raw is not None else None)
+        problems: list[str] = []
+        if "median_seconds" in row and "total_output_tokens" in row:
+            seconds = row["median_seconds"]
+            tokens = row["total_output_tokens"]
+            if not isinstance(seconds, (float, int)) or isinstance(seconds, bool):
+                raise ValueError("median_seconds must be a finite non-negative measurement")
+            if type(tokens) is not int:
+                raise ValueError("total_output_tokens must be a non-negative integer")
+            measured = cls.from_timing(
+                agreement=agreement, median_seconds=float(seconds), total_tokens=tokens
+            )
+            if measured.raw_tokens_per_second != evidence.raw_tokens_per_second:
+                problems.append(
+                    f"raw_tokens_per_second={raw!r}, "
+                    f"expected {measured.raw_tokens_per_second!r} "
+                    "from measured timing and token count"
+                )
+        for name, expected in evidence.as_dict().items():
+            observed = row.get(name)
+            if (
+                observed != expected
+                or (
+                    name in {"policy_version", "headline_eligible"}
+                    and type(observed) is not type(expected)
+                )
+                or (name == "tokens_per_second" and isinstance(observed, bool))
+            ):
+                detail = (
+                    f"expected {expected!r} from agreement counts"
+                    if name == "reference_status"
+                    else f"expected raw_tokens_per_second={evidence.raw_tokens_per_second!r} "
+                    "only after reference qualification"
+                    if name == "tokens_per_second"
+                    else f"expected {expected!r} from agreement and timing"
+                )
+                problems.append(f"{name}={observed!r}, {detail}")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return evidence
+
+
+def record_object(value: object, context: str) -> dict[str, object]:
+    """Validate a JSON object before reading persisted evidence fields."""
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{context} must be a JSON object with string keys")
+    return dict(value.items())
+
+
+def benchmark_rows(value: object) -> list[dict[str, object]]:
+    record = record_object(value, "benchmark record")
+    rows = record.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("benchmark record must contain a rows list")
+    return [record_object(row, "benchmark row") for row in rows]
+
+
+def row_number(row: Mapping[str, object], key: str) -> float:
+    """Read a numeric field of a benchmark row, rejecting booleans and other types."""
+    value = row[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"benchmark row field {key!r} must be a number; got {value!r}")
+    return float(value)
+
+
+def headline_tokens_per_second(row: Mapping[str, object]) -> float:
+    """Read a public speed claim through the same policy used to construct it."""
+    try:
+        evidence = SystemEvidence.from_record(row)
+        public = evidence.tokens_per_second
+        if public is None:
+            raise ValueError(
+                f"agreement reference_status={evidence.reference_status!r}, "
+                f"headline_eligible={evidence.headline_eligible!r}; "
+                "resolve the reference failure or review before publishing speed"
+            )
+    except ValueError as error:
+        raise ValueError(
+            "row is not a reference-gated, headline-eligible policy-v2 speed claim: "
+            f"{error}. Rebuild policy fields with build_system_evidence_record() in "
+            "llm_infer/benchmarks/reference_policy.py. Keep tokens_per_second=None "
+            "until the reference evidence qualifies."
+        ) from error
+    return public
 
 
 def reference_status(agreement: EsmeAgreement) -> ReferenceStatus:
@@ -27,18 +352,35 @@ def reference_status(agreement: EsmeAgreement) -> ReferenceStatus:
     construction bug, not a benchmark result, so it raises instead of guessing.
     """
     if agreement.total < 1:
-        raise ValueError("agreement covers no requests")
+        raise ValueError(
+            f"agreement covers no requests: total={agreement.total}, expected total >= 1; "
+            "classify measured outputs before building evidence"
+        )
+    for field_name, count in (
+        ("exact", agreement.exact),
+        ("tie", agreement.tie),
+        ("nontie", agreement.nontie),
+        ("review_required", agreement.review_required),
+        ("failed", agreement.failed),
+    ):
+        if count < 0:
+            raise ValueError(
+                f"agreement.{field_name}={count}, expected a non-negative count; "
+                "reclassify measured outputs before building evidence"
+            )
     if agreement.exact + agreement.tie + agreement.nontie != agreement.total:
         raise ValueError(
             "inconsistent agreement: exact + tie + nontie must equal total "
             f"(exact={agreement.exact}, tie={agreement.tie}, "
-            f"nontie={agreement.nontie}, total={agreement.total})"
+            f"nontie={agreement.nontie}, total={agreement.total}). "
+            "Classify every measured request once before calling build_system_evidence_record()."
         )
     if agreement.nontie != agreement.review_required + agreement.failed:
         raise ValueError(
             "inconsistent agreement: nontie must equal review_required + failed "
             f"(nontie={agreement.nontie}, review_required={agreement.review_required}, "
-            f"failed={agreement.failed})"
+            f"failed={agreement.failed}). Classify every non-tie as review_required or failed "
+            "before calling build_system_evidence_record()."
         )
     if agreement.failed:
         return "failed"
@@ -64,14 +406,9 @@ def normalized_outputs_match(
     )
 
 
-def build_reference_only_record(agreement: EsmeAgreement) -> dict[str, object]:
-    """Policy fields for a correctness-only row that makes no tok/s claim."""
-    return {
-        "policy_version": POLICY_VERSION,
-        "reference_status": reference_status(agreement),
-        "parity_status": "not_applicable",
-        "headline_eligible": False,
-    }
+def build_reference_only_record(agreement: EsmeAgreement) -> ReferenceEvidenceRecord:
+    """Serialize correctness-only evidence at a JSON boundary."""
+    return ReferenceEvidence(agreement).as_dict()
 
 
 def build_system_evidence_record(
@@ -79,33 +416,25 @@ def build_system_evidence_record(
     agreement: EsmeAgreement,
     median_seconds: float,
     total_tokens: int,
-) -> dict[str, object]:
-    """Policy fields for one independently reference-checked system row.
-
-    ``raw_tokens_per_second`` is always retained for diagnosis. ``tokens_per_second`` is the
-    public field and stays ``None`` unless the row is headline eligible.
-    """
-    status = reference_status(agreement)
-    raw_tps = total_tokens / median_seconds if median_seconds > 0 else None
-    headline_eligible = (
-        status in QUALIFIED_REFERENCE_STATUSES and raw_tps is not None and raw_tps > 0
-    )
-    return {
-        "policy_version": POLICY_VERSION,
-        "reference_status": status,
-        "parity_status": "not_applicable",
-        "headline_eligible": headline_eligible,
-        "raw_tokens_per_second": raw_tps,
-        "tokens_per_second": raw_tps if headline_eligible else None,
-    }
+) -> SystemEvidenceRecord:
+    """Serialize independently reference-checked timing at a JSON boundary."""
+    return SystemEvidence.from_timing(
+        agreement=agreement, median_seconds=median_seconds, total_tokens=total_tokens
+    ).as_dict()
 
 
 __all__ = [
+    "BF16_AGREEMENT_TOLERANCE",
     "POLICY_VERSION",
     "QUALIFIED_REFERENCE_STATUSES",
+    "EsmeAgreement",
+    "ReferenceEvidence",
     "ReferenceStatus",
+    "SystemEvidence",
+    "benchmark_rows",
     "build_reference_only_record",
     "build_system_evidence_record",
+    "headline_tokens_per_second",
     "normalized_outputs_match",
     "reference_status",
 ]

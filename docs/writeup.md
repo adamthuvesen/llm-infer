@@ -100,7 +100,7 @@ valid target under bf16. The contract became same-shape seeded replay, and sampl
 
 ## Check it yourself
 
-`make reproduce` needs no GPU. It checks the committed benchmark records against the public tables,
-regenerates the README figures, and reruns the judge on each registered A/B. The judge must give
+`make evidence-check` needs no GPU. It checks the committed benchmark records against the public tables,
+reruns the judge on each registered A/B. The judge must give
 the verdict that findings.md reports. The Modal commands that produce new records are listed in
 each entry and in [benchmark.md](benchmark.md).

@@ -18,7 +18,9 @@
           <span class="tag" id="schemaTag">schema v3</span>
           <label class="btn btn-ghost btn-file">
             <input id="fileInput" type="file" accept=".jsonl,application/jsonl,text/plain" />
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 18v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 16V4m0 0L8 8m4-4 4 4M5 18v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1" />
+            </svg>
             <span>Load JSONL</span>
           </label>
         </div>
@@ -30,8 +32,9 @@
         <h1>Four requests. One cache.<br />Every token, in order.</h1>
         <p class="lede">
           A frame-by-frame replay of a paged-attention inference engine. Requests are admitted,
-          prompts are prefilled into KV blocks, tokens are decoded under continuous batching,
-          and real cache blocks are allocated and freed. The bundled sample was recorded from the engine.
+          prompts are prefilled into KV blocks, tokens are decoded under continuous batching, and
+          real cache blocks are allocated and freed. The bundled sample was recorded from the
+          engine.
         </p>
         <p class="trace-meta" id="traceMeta">loading schema-v3 trace…</p>
       </header>
@@ -39,8 +42,12 @@
       <!-- ===== Player ===== -->
       <section class="player" aria-label="trace playback">
         <button id="playButton" type="button" class="btn btn-primary btn-play">
-          <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l12-7-12-7z"/></svg>
-          <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+          <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 5v14l12-7-12-7z" />
+          </svg>
+          <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
+          </svg>
           <span id="playLabel">Play</span>
         </button>
 
@@ -49,11 +56,21 @@
             <div class="scrub-fill" id="scrubFill"></div>
             <div class="scrub-head" id="scrubHead"></div>
           </div>
-          <input id="scrubber" type="range" min="1" max="1" value="1" aria-label="scrub trace events" />
+          <input
+            id="scrubber"
+            type="range"
+            min="1"
+            max="1"
+            value="1"
+            aria-label="scrub trace events"
+          />
         </div>
 
         <div class="player-readout">
-          <span class="seq"><span id="seqNow">01</span><span class="seq-of">/<span id="seqTotal">49</span></span></span>
+          <span class="seq"
+            ><span id="seqNow">01</span
+            ><span class="seq-of">/<span id="seqTotal">49</span></span></span
+          >
           <span class="phase-chip" id="phaseChip" data-event="">
             <span class="phase-dot"></span><span id="phaseName">request admitted</span>
           </span>
@@ -76,7 +93,9 @@
         </article>
         <article class="stat">
           <span class="stat-key">Occupancy</span>
-          <span class="stat-val"><span id="gRunning">0</span><span class="stat-unit">running</span></span>
+          <span class="stat-val"
+            ><span id="gRunning">0</span><span class="stat-unit">running</span></span
+          >
           <span class="stat-foot"><span id="gWaiting">0</span> waiting</span>
           <div class="occ-bar" id="occBar" aria-hidden="true"></div>
         </article>
@@ -84,12 +103,26 @@
           <span class="stat-key">Throughput</span>
           <span class="stat-val"><span id="gTps">—</span><span class="stat-unit">tok/s</span></span>
           <span class="stat-foot" id="tpsNote"></span>
-          <svg class="spark" id="sparkTps" viewBox="0 0 200 38" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <svg
+            class="spark"
+            id="sparkTps"
+            viewBox="0 0 200 38"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          ></svg>
         </article>
         <article class="stat">
           <span class="stat-key">Generated</span>
-          <span class="stat-val"><span id="gGen">0</span><span class="stat-unit">tokens</span></span>
-          <svg class="spark" id="sparkGen" viewBox="0 0 200 38" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <span class="stat-val"
+            ><span id="gGen">0</span><span class="stat-unit">tokens</span></span
+          >
+          <svg
+            class="spark"
+            id="sparkGen"
+            viewBox="0 0 200 38"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          ></svg>
         </article>
         <article class="stat" id="statStatus">
           <span class="stat-key">Status</span>
@@ -100,36 +133,40 @@
       <!-- ===== Main ===== -->
       <div class="main">
         <div class="main-left">
-        <section class="stage" aria-label="request timeline">
-          <div class="panel-bar">
-            <h2>Decode timeline</h2>
-            <div class="legend" aria-label="token source legend">
-              <span class="lg" data-k="prefill"><i></i>prefill</span>
-              <span class="lg" data-k="decode"><i></i>decode</span>
-              <span class="lg" data-k="speculative"><i></i>speculative</span>
-              <span class="lg" data-k="preempt"><i></i>preempt</span>
-              <span class="lg" data-k="finish"><i></i>finish</span>
+          <section class="stage" aria-label="request timeline">
+            <div class="panel-bar">
+              <h2>Decode timeline</h2>
+              <div class="legend" aria-label="token source legend">
+                <span class="lg" data-k="prefill"><i></i>prefill</span>
+                <span class="lg" data-k="decode"><i></i>decode</span>
+                <span class="lg" data-k="speculative"><i></i>speculative</span>
+                <span class="lg" data-k="preempt"><i></i>preempt</span>
+                <span class="lg" data-k="finish"><i></i>finish</span>
+              </div>
             </div>
-          </div>
-          <div class="stage-scroll">
-            <svg id="theater" role="img" aria-label="request lanes over scheduler steps"></svg>
-          </div>
-        </section>
+            <div class="stage-scroll">
+              <svg id="theater" role="img" aria-label="request lanes over scheduler steps"></svg>
+            </div>
+          </section>
 
-        <section class="card stream" aria-label="event stream">
-          <div class="panel-bar">
-            <h2>Event stream</h2>
-            <span class="stream-hint">click to scrub</span>
-          </div>
-          <div class="stream-list" id="eventList"></div>
-        </section>
-        </div><!-- /main-left -->
+          <section class="card stream" aria-label="event stream">
+            <div class="panel-bar">
+              <h2>Event stream</h2>
+              <span class="stream-hint">click to scrub</span>
+            </div>
+            <div class="stream-list" id="eventList"></div>
+          </section>
+        </div>
+        <!-- /main-left -->
 
         <aside class="rail">
           <section class="card kvwall" aria-label="paged KV cache">
             <div class="panel-bar">
               <h2>Paged KV cache</h2>
-              <span class="kv-reserve"><span id="kvReserved">0</span><span class="kv-slash">/</span><span id="kvTotal">0</span> blocks live</span>
+              <span class="kv-reserve"
+                ><span id="kvReserved">0</span><span class="kv-slash">/</span
+                ><span id="kvTotal">0</span> blocks live</span
+              >
             </div>
             <div class="kv-grid" id="kvGrid" aria-hidden="true"></div>
             <div class="kv-legend" aria-hidden="true">
@@ -137,12 +174,16 @@
               <span class="kv-lg" data-k="reserved"><i></i>reserved headroom</span>
             </div>
             <div class="kv-meter">
-              <div class="kv-meter-head"><span>Logical footprint</span><span id="kvLogical">0 tokens</span></div>
+              <div class="kv-meter-head">
+                <span>Logical footprint</span><span id="kvLogical">0 tokens</span>
+              </div>
               <div class="kv-meter-track"><span id="kvLogicalFill"></span></div>
             </div>
-            <p class="kv-note">Schema v3 emits real <code>block_allocated</code> /
-              <code>block_freed</code> from the allocator: filled blocks are physically held
-              right now, freed when a request finishes. Prefix-shared blocks are counted once.</p>
+            <p class="kv-note">
+              Schema v3 emits real <code>block_allocated</code> / <code>block_freed</code> from the
+              allocator: filled blocks are physically held right now, freed when a request finishes.
+              Prefix-shared blocks are counted once.
+            </p>
           </section>
 
           <section class="card now" aria-label="current event">

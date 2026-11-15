@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from llm_infer.kv_cache.block_table import BlockTable
+from llm_infer.model.interface import BackendCapabilities, CausalLMBackend
 
 
 class FakeCausalLMBase:
@@ -15,6 +18,17 @@ class FakeCausalLMBase:
     device = None
     profiler = None
     backend = None
+    capabilities = BackendCapabilities(
+        paged_kv=True,
+        prefix_caching=True,
+        speculative=True,
+        flash_attention=False,
+    )
 
     def release_table(self, table: BlockTable) -> None:
         del table
+
+
+def as_backend(fake: object) -> CausalLMBackend:
+    """Hand a partial test double to code typed against the full backend protocol."""
+    return cast(CausalLMBackend, fake)

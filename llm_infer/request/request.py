@@ -15,14 +15,43 @@ change across batch shapes when bf16 model kernels produce slightly different lo
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 
 from llm_infer.kv_cache.block_table import BlockTable
-from llm_infer.serving.sampler import GREEDY, SamplingParams
+from llm_infer.request.sampling import GREEDY, SamplingParams
+
+PrefillMode = Literal["initial", "recompute"]
 
 
-@dataclass
+@dataclass(frozen=True)
+class Pending:
+    mode: PrefillMode = "initial"
+
+
+@dataclass(frozen=True)
+class Prefilling:
+    table: BlockTable
+    cached_tokens: int
+    mode: PrefillMode
+
+
+@dataclass(frozen=True)
+class DecodeReady:
+    table: BlockTable
+
+
+@dataclass(frozen=True)
+class Terminal:
+    reason: Literal["eos", "length", "cancelled"]
+    table: BlockTable | None = None
+
+
+RequestState = Pending | Prefilling | DecodeReady | Terminal
+
+
+@dataclass(eq=False)
 class Request:
     """One generation request, carrying its sampling params, KV block table, and output."""
 
@@ -33,10 +62,7 @@ class Request:
     prefix_group_id: str | None = None
     sampling: SamplingParams = GREEDY
 
-    block_table: BlockTable | None = None
-    prompt_cached_tokens: int = 0
-    prefilled: bool = False
-    finished: bool = False
+    _state: RequestState = field(default_factory=Pending, init=False, repr=False)
     _generated_tokens: list[torch.Tensor] = field(default_factory=list, init=False, repr=False)
     _generated_cache: list[int] | None = field(default_factory=list, init=False, repr=False)
     _generator: torch.Generator | None = field(default=None, init=False, repr=False)
@@ -46,6 +72,75 @@ class Request:
             raise ValueError("prompt_ids must be non-empty")
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be >= 1; got {self.max_new_tokens}")
+
+    @property
+    def state(self) -> RequestState:
+        return self._state
+
+    @property
+    def block_table(self) -> BlockTable | None:
+        state = self._state
+        return None if isinstance(state, Pending) else state.table
+
+    @property
+    def prompt_cached_tokens(self) -> int:
+        state = self._state
+        if isinstance(state, Prefilling):
+            return state.cached_tokens
+        table = self.block_table
+        return table.length if table is not None else 0
+
+    @property
+    def finished(self) -> bool:
+        return isinstance(self._state, Terminal)
+
+    @property
+    def generated_count(self) -> int:
+        return len(self._generated_tokens)
+
+    def begin_prefill(self, table: BlockTable, *, cached_tokens: int = 0) -> Prefilling:
+        state = self._state
+        if not isinstance(state, Pending):
+            raise ValueError(f"request {self.request_id!r} is not pending")
+        total = self._prefill_length(state.mode)
+        if not 0 <= cached_tokens <= total or table.length != cached_tokens:
+            raise ValueError("prefill progress must match the block table and sequence length")
+        self._state = Prefilling(table, cached_tokens, state.mode)
+        return self._state
+
+    def advance_prefill(self, cached_tokens: int) -> None:
+        state = self._state
+        if not isinstance(state, Prefilling):
+            raise ValueError(f"request {self.request_id!r} is not prefilling")
+        if not state.cached_tokens < cached_tokens <= self._prefill_length(state.mode):
+            raise ValueError("prefill progress must advance within the sequence")
+        if state.table.length != cached_tokens:
+            raise ValueError("prefill progress must match the block table length")
+        self._state = Prefilling(state.table, cached_tokens, state.mode)
+
+    def finish_recompute(self) -> None:
+        state = self._state
+        if not isinstance(state, Prefilling) or state.mode != "recompute":
+            raise ValueError(f"request {self.request_id!r} is not recomputing")
+        if state.cached_tokens != self._prefill_length(state.mode):
+            raise ValueError("cannot finish an incomplete recompute")
+        self._state = DecodeReady(state.table)
+
+    def release_finished_table(self) -> None:
+        """Remove the terminal table after the engine returns its blocks."""
+        state = self._state
+        if not isinstance(state, Terminal):
+            raise ValueError(f"request {self.request_id!r} is not finished")
+        self._state = Terminal(state.reason)
+
+    def cancel(self) -> None:
+        if self.finished:
+            raise ValueError(f"request {self.request_id!r} is already finished")
+        self._state = Terminal("cancelled", self.block_table)
+
+    def _prefill_length(self, mode: PrefillMode) -> int:
+        generated_prefix = self.generated_count - 1 if mode == "recompute" else 0
+        return len(self.prompt_ids) + generated_prefix
 
     def generator(self, device: torch.device) -> torch.Generator:
         """This request's seeded RNG, created once on first sample on the logits' device.
@@ -115,16 +210,21 @@ class Request:
         the trace stays clear); it only clears the request's view of its cache so a fresh
         prefill over :attr:`recompute_prompt_ids` rebuilds it from scratch on resume.
         """
-        if self.finished:
+        state = self._state
+        if isinstance(state, Terminal):
             raise ValueError(f"cannot preempt finished request {self.request_id!r}")
-        self.block_table = None
-        self.prompt_cached_tokens = 0
-        self.prefilled = False
+        mode = "recompute" if isinstance(state, DecodeReady) else state.mode
+        self._state = Pending(mode)
 
     def record(self, token_id: int | torch.Tensor, *, is_eos: bool | None = None) -> None:
         """Append a sampled token and apply the stop rule (EOS or length cap)."""
-        if self.finished:
+        state = self._state
+        if isinstance(state, Terminal):
             raise ValueError(f"request {self.request_id!r} is already finished")
+        if isinstance(state, (Pending, Prefilling)) and state.mode == "recompute":
+            raise ValueError("cannot record a token before recompute")
+        if isinstance(state, Prefilling) and state.cached_tokens != len(self.prompt_ids):
+            raise ValueError("cannot record a token before initial prefill completes")
         token = torch.as_tensor(token_id, dtype=torch.long).reshape(())
         self._generated_tokens.append(token.detach())
         self._generated_cache = None
@@ -132,4 +232,6 @@ class Request:
         if is_eos is None:
             is_eos = int(token.cpu().item()) in self.eos_token_ids
         if is_eos or len(self._generated_tokens) >= self.max_new_tokens:
-            self.finished = True
+            self._state = Terminal("eos" if is_eos else "length", self.block_table)
+        elif isinstance(state, Prefilling):
+            self._state = DecodeReady(state.table)

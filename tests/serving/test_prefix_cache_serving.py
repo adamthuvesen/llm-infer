@@ -14,7 +14,7 @@ import httpx
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.interface import BackendCapabilities
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serve import build_app_from_runtime
+from llm_infer.serve_runtime import build_app_from_runtime
 
 _CAPS = BackendCapabilities(
     paged_kv=True, prefix_caching=True, speculative=True, flash_attention=False

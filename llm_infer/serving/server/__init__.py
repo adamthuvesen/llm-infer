@@ -21,8 +21,8 @@ from llm_infer.serving.server.metrics import ServerMetrics
 from llm_infer.serving.server.webui import register_webui
 
 __all__ = [
-    "AsyncInferenceEngine",
     "AsyncEngineRequestObserver",
+    "AsyncInferenceEngine",
     "IncrementalDetokenizer",
     "ServerMetrics",
     "TokenStreamItem",

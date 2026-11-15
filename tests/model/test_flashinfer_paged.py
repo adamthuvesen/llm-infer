@@ -15,7 +15,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
-from llm_infer import serve
+import llm_infer.serve_runtime as serve
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.kernels import flashinfer_paged
 from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
@@ -44,7 +44,7 @@ class _FakeWrapper:
 
 def _fake_flashinfer_module() -> ModuleType:
     module = ModuleType("flashinfer")
-    module.BatchDecodeWithPagedKVCacheWrapper = _FakeWrapper
+    module.__dict__["BatchDecodeWithPagedKVCacheWrapper"] = _FakeWrapper
     return module
 
 
@@ -73,23 +73,23 @@ def test_import_guard_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -
 
 def test_decode_wrapper_class_prefers_top_level() -> None:
     module = ModuleType("flashinfer")
-    module.BatchDecodeWithPagedKVCacheWrapper = _FakeWrapper
+    module.__dict__["BatchDecodeWithPagedKVCacheWrapper"] = _FakeWrapper
 
-    assert FlashInferPagedAttention._decode_wrapper_class(module) is _FakeWrapper
+    assert FlashInferPagedAttention.decode_wrapper_class(module) is _FakeWrapper
 
 
 def test_decode_wrapper_class_falls_back_to_submodule() -> None:
     module = ModuleType("flashinfer")
-    module.decode = SimpleNamespace(BatchDecodeWithPagedKVCacheWrapper=_FakeWrapper)
+    module.__dict__["decode"] = SimpleNamespace(BatchDecodeWithPagedKVCacheWrapper=_FakeWrapper)
 
-    assert FlashInferPagedAttention._decode_wrapper_class(module) is _FakeWrapper
+    assert FlashInferPagedAttention.decode_wrapper_class(module) is _FakeWrapper
 
 
 def test_decode_wrapper_class_missing_raises() -> None:
     module = ModuleType("flashinfer")
 
     with pytest.raises(RuntimeError, match="BatchDecodeWithPagedKVCacheWrapper"):
-        FlashInferPagedAttention._decode_wrapper_class(module)
+        FlashInferPagedAttention.decode_wrapper_class(module)
 
 
 def test_non_positive_workspace_bytes_rejected() -> None:

@@ -16,6 +16,8 @@ Exports two static SVG cards into ``assets/``:
 - fig-esme-ablation-ladder.svg: what each engine technique adds over HF batched generate(),
   one panel per batch size, from ``scripts/modal_esme_batch_curve.py --command ladder``.
 
+That script is archived at tag ``archive/llm-infer-experiments-2026-11-11``.
+
 The committed inputs live at ``assets/esme-batch-curve.json`` and
 ``assets/esme-ablation-ladder.json`` (curated copies of bench-results records), so the
 figures regenerate from repo state alone:
@@ -32,8 +34,17 @@ import math
 import sys
 from pathlib import Path
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import plotly.graph_objects as go  # pyright: ignore[reportMissingImports] -- a PEP 723 script dependency, not in the dev env
+from plotly.subplots import make_subplots  # pyright: ignore[reportMissingImports] -- a PEP 723 script dependency
+
+# PEP 723 runs in an isolated environment, without installing the inference package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from llm_infer.benchmarks.reference_policy import (
+    benchmark_rows,
+    headline_tokens_per_second,
+    row_number,
+)
 
 # Style contract: match esme-pretrain scripts/plot_run_telemetry.py (the shared card spec).
 FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
@@ -61,23 +72,14 @@ LADDER_SYSTEMS = (
 FULL_ENGINE = LADDER_SYSTEMS[-1][0]
 
 
-def _record_rows(record: dict[str, object], path: Path) -> list[dict]:
-    """Read the policy-v2 benchmark rows."""
-    rows = record.get("rows")
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise ValueError(f"{path}: expected a rows list")
-    return rows
+def _require_headline_row(path: Path, row: dict[str, object]) -> None:
+    try:
+        headline_tokens_per_second(row)
+    except ValueError as error:
+        raise ValueError(f"{path}: {row['system']} batch={row['batch_size']}: {error}") from error
 
 
-def _require_headline_row(path: Path, row: dict) -> None:
-    if row.get("policy_version") != 2 or row.get("headline_eligible") is not True:
-        raise ValueError(
-            f"{path}: {row['system']} batch={row['batch_size']} is not a headline-eligible "
-            "policy-v2 row"
-        )
-
-
-def load_rows(path: Path) -> dict[str, list[dict]]:
+def load_rows(path: Path) -> dict[str, list[dict[str, object]]]:
     """Plotted rows per system, sorted by batch size; a diverged (ungated) row is a hard error.
 
     Only ``llm_infer`` and ``hf_sequential`` are plotted. The record's vLLM rows are
@@ -85,22 +87,17 @@ def load_rows(path: Path) -> dict[str, list[dict]]:
     (docs/benchmark.md states that framing once).
     """
     record = json.loads(path.read_text(encoding="utf-8"))
-    by_system: dict[str, list[dict]] = {"llm_infer": [], "hf_sequential": []}
-    for row in _record_rows(record, path):
+    by_system: dict[str, list[dict[str, object]]] = {"llm_infer": [], "hf_sequential": []}
+    for row in benchmark_rows(record):
         system = row["system"]
-        if system not in by_system:
+        if not isinstance(system, str) or system not in by_system:
             continue
         _require_headline_row(path, row)
-        if row.get("tokens_per_second") is None:
-            raise ValueError(
-                f"{path}: {system} batch={row['batch_size']} reports no tok/s "
-                "(reference gate failed); the figure only plots gated rows"
-            )
         by_system[system].append(row)
     for system, rows in by_system.items():
         if not rows:
             raise ValueError(f"{path}: no rows for {system}")
-        rows.sort(key=lambda r: r["batch_size"])
+        rows.sort(key=lambda r: row_number(r, "batch_size"))
     return by_system
 
 
@@ -190,11 +187,13 @@ def styled_axis(**overrides: object) -> dict[str, object]:
     return axis
 
 
-def _series(rows: list[dict]) -> tuple[list[int], list[float]]:
-    return [r["batch_size"] for r in rows], [r["tokens_per_second"] for r in rows]
+def _series(rows: list[dict[str, object]]) -> tuple[list[int], list[float]]:
+    return [int(row_number(r, "batch_size")) for r in rows], [
+        row_number(r, "tokens_per_second") for r in rows
+    ]
 
 
-def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
+def build_curve_figure(by_system: dict[str, list[dict[str, object]]]) -> go.Figure:
     """The engine curve against the naive-HF floor: batch-scaling evidence, not the headline."""
     llm_x, llm_y = _series(by_system["llm_infer"])
     hf_x, hf_y = _series(by_system["hf_sequential"])
@@ -292,16 +291,18 @@ def build_curve_figure(by_system: dict[str, list[dict]]) -> go.Figure:
 
 
 def load_ladder_rows(path: Path) -> dict[int, dict[str, float]]:
-    """Raw tok/s per batch and ladder system; any ungated row is a hard error."""
+    """Qualified tok/s per batch and ladder system; any ungated row is a hard error."""
     record = json.loads(path.read_text(encoding="utf-8"))
     wanted = {system for system, _ in LADDER_SYSTEMS}
     by_batch: dict[int, dict[str, float]] = {}
-    for row in _record_rows(record, path):
+    for row in benchmark_rows(record):
         system = row["system"]
-        if system not in wanted:
+        if not isinstance(system, str) or system not in wanted:
             continue
         _require_headline_row(path, row)
-        by_batch.setdefault(int(row["batch_size"]), {})[system] = float(row["tokens_per_second"])
+        by_batch.setdefault(int(row_number(row, "batch_size")), {})[system] = row_number(
+            row, "tokens_per_second"
+        )
     if not by_batch:
         raise ValueError(f"{path}: no ladder rows")
     for batch, systems in by_batch.items():

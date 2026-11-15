@@ -9,16 +9,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.kv_cache.block_allocator import BlockAllocator
 from llm_infer.kv_cache.prefix_cache import PrefixCacheStore
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.runtime import load_model_runtime
+from llm_infer.request.request import Request
 from llm_infer.serving.engine import InferenceEngine
-from llm_infer.serving.request import Request
 
 _BLOCK_SIZE = 4
 _EOS: frozenset[int] = frozenset()
+
+
+def _prefixes(store: PrefixCacheStore) -> list[tuple[int, ...]]:
+    return [entry.token_ids for entry in store._entries]
 
 
 def _engine(tmp_path: Path, *, prefix_cache: bool, num_blocks: int = 64) -> InferenceEngine:
@@ -51,7 +57,7 @@ def test_cache_hit_matches_cold_run_and_reuses_block_aligned_prefix(tmp_path: Pa
     # Turn A: prompt P, greedy to the length cap; it donates its block-aligned prefix on finish.
     prompt_a = [4, 5, 6, 7, 8]
     output_a = _run_one(engine, "A", prompt_a, steps=5)
-    assert engine.prefix_cache.entry_count == 1
+    assert len(engine.prefix_cache._entries) == 1
 
     # Turn B continues the conversation: P + A's output + one more token. Its leading positions
     # are identical to A's, so the cache should serve a block-aligned prefix.
@@ -75,14 +81,50 @@ def test_blocks_return_to_pool_after_clear(tmp_path: Path) -> None:
     total = engine.cache.allocator.num_blocks
 
     output_a = _run_one(engine, "A", [4, 5, 6, 7, 8], steps=5)
-    _run_one(engine, "B", [4, 5, 6, 7, 8] + output_a + [9], steps=5)
+    _run_one(engine, "B", [4, 5, 6, 7, 8, *output_a, 9], steps=5)
 
     # Finished tables freed, but donated blocks are still held by the store — so the pool is not
     # yet whole. Clearing the store returns every cached block.
     assert engine.cache.allocator.num_free < total
     engine.prefix_cache.clear()
     assert engine.cache.allocator.num_free == total
-    assert engine.prefix_cache.entry_count == 0
+    assert len(engine.prefix_cache._entries) == 0
+
+
+@pytest.mark.parametrize("decode_window_size", [1, 4])
+def test_early_eos_donates_only_recorded_kv_and_reuses_it(
+    tmp_path: Path, decode_window_size: int
+) -> None:
+    runtime = load_model_runtime("esme", bundle_path=_write_tiny_bundle(tmp_path))
+    engine = InferenceEngine(
+        runtime.model,
+        block_size=2,
+        num_blocks=32,
+        capabilities=runtime.capabilities,
+        prefix_cache=True,
+        decode_window_size=decode_window_size,
+    )
+    assert engine.prefix_cache is not None
+    prompt_a = [2, 5]
+    first = Request("A", prompt_a, 12, frozenset({9}))
+    engine.add_request(first)
+
+    assert engine.run()["A"] == [5, 9]
+    assert first.block_table is None
+    assert not engine.scheduler.has_work()
+    assert _prefixes(engine.prefix_cache) == [(2, 5)]
+    assert engine.cache.allocator.num_used == 1
+
+    prompt_b = prompt_a + first.generated + [7]
+    output_b = _run_one(engine, "B", prompt_b, steps=5)
+    reference_b = greedy_decode(runtime.model, prompt_b, max_new_tokens=5, eos_token_ids=set())
+
+    assert output_b == reference_b
+    assert engine.prefix_cache.hits == 1
+    assert engine.prefix_cache.hit_tokens == 2
+    assert not engine.scheduler.has_work()
+    engine.prefix_cache.clear()
+    assert engine.cache.allocator.num_free == 32
 
 
 def _finish_and_donate(
@@ -102,14 +144,14 @@ def test_eviction_frees_lru_blocks_for_a_legal_allocation() -> None:
     _finish_and_donate(allocator, store, [10, 11])  # LRU entry (one block), held outside free list
     _finish_and_donate(allocator, store, [20, 21])  # MRU entry (one block)
     assert allocator.num_free == 0
-    assert store.entry_count == 2
+    assert len(store._entries) == 2
 
     # A one-block allocation with an empty free list: the store must give a block back. It evicts
     # only the LRU entry (its freed block covers the one-block shortfall).
     handed = allocator.allocate(1, owner="new")
     assert len(handed) == 1
-    assert store.entry_count == 1
-    assert store.cached_prefixes() == [(20, 21)]  # the LRU (10, 11) entry was evicted
+    assert len(store._entries) == 1
+    assert _prefixes(store) == [(20, 21)]  # the LRU (10, 11) entry was evicted
 
 
 def test_partial_match_reuses_common_block_aligned_prefix() -> None:
@@ -131,7 +173,7 @@ def test_cap_evicts_lru_entry_on_the_ninth_donation() -> None:
     for index in range(9):
         _finish_and_donate(allocator, store, [100 + index])
 
-    assert store.entry_count == 8
-    prefixes = store.cached_prefixes()
+    assert len(store._entries) == 8
+    prefixes = _prefixes(store)
     assert (100,) not in prefixes  # the first (LRU) donation was evicted by the ninth
     assert prefixes[-1] == (108,)  # the ninth donation is the most-recently-used entry

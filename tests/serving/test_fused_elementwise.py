@@ -12,7 +12,7 @@ from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.model import rope_utils
 from llm_infer.model.fused_elementwise import use_fused_elementwise
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serve import build_app_from_runtime
+from llm_infer.serve_runtime import build_app_from_runtime
 
 
 def test_switch_swaps_every_call_site_and_restores_the_originals() -> None:

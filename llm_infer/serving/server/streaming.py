@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 
 from llm_infer.serving.server.async_engine import TokenStreamItem
@@ -41,7 +41,7 @@ class TextStreamItem:
 
 async def drain_token_stream(
     *,
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     detok: StopSequenceDetokenizer,
     metrics: ServerMetrics | None = None,
     arrival: float | None = None,
@@ -71,7 +71,7 @@ async def drain_token_stream(
 
 async def iter_text_stream(
     *,
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     detok: StopSequenceDetokenizer,
     metrics: ServerMetrics | None = None,
     arrival: float | None = None,
@@ -99,7 +99,7 @@ async def iter_text_stream(
 
 async def stream_responses_sse(
     *,
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     detok: StopSequenceDetokenizer,
     response_id: str,
     created: int,
@@ -154,7 +154,7 @@ async def stream_responses_sse(
 async def stream_openai_sse(
     *,
     request_kind: str,
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     detok: StopSequenceDetokenizer,
     completion_id: str,
     created: int,
@@ -200,7 +200,7 @@ async def stream_openai_sse(
     yield "data: [DONE]\n\n"
 
 
-def sse_event(event: str, payload: dict) -> str:
+def sse_event(event: str, payload: dict[str, object]) -> str:
     """A named SSE event (``event:``/``data:`` pair) for semantic streams."""
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
@@ -269,7 +269,7 @@ def sse(chunk: ChatCompletionChunk | CompletionChunk) -> str:
 
 
 async def finish_on_stop(
-    token_stream: AsyncIterator[TokenStreamItem],
+    token_stream: AsyncGenerator[TokenStreamItem],
     metrics: ServerMetrics | None = None,
     arrival: float | None = None,
 ) -> None:

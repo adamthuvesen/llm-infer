@@ -13,6 +13,7 @@ flip tokens. CPU-runnable, fp32, zero GPU spend.
 
 from __future__ import annotations
 
+from llm_infer.request.request import DecodeReady
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.tracing import TraceRecorder
 from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
@@ -63,7 +64,7 @@ def test_preemption_actually_fires_under_a_tight_budget() -> None:
     # Each preemption frees the victim's KV clearly and names the pressure reason.
     for event in preemptions:
         assert event.preempt_reason == "kv_pressure"
-        assert event.block_count >= 1
+        assert event.block_count is not None and event.block_count >= 1
         assert event.pool_used is not None and event.pool_free is not None
 
 
@@ -134,7 +135,7 @@ def test_prefill_skips_a_request_preempted_mid_step() -> None:
         steps += 1
         assert steps < 200, "engine made no forward progress (suspected preemption livelock)"
         for waiting in engine.scheduler.waiting:
-            assert not waiting.prefilled and waiting.block_table is None, (
+            assert not isinstance(waiting.state, DecodeReady) and waiting.block_table is None, (
                 f"{waiting.request_id!r} was prefilled while in the waiting queue — a request "
                 "preempted mid-step must not be touched again until it is re-admitted"
             )
@@ -197,7 +198,7 @@ def test_shared_prefix_group_under_preemption_is_uncorrupted_and_exact() -> None
         steps += 1
         assert steps < 600, "engine made no forward progress"
         for waiting in engine.scheduler.waiting:
-            assert not waiting.prefilled and waiting.block_table is None, (
+            assert not isinstance(waiting.state, DecodeReady) and waiting.block_table is None, (
                 f"{waiting.request_id!r} holds cache state while waiting — a sibling was forked "
                 "out of the waiting queue during shared-group prefill"
             )

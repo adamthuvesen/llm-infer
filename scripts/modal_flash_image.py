@@ -28,20 +28,25 @@ from pathlib import Path
 
 import modal
 
+from scripts.modal_image_pins import UV_VERSION, VLLM_VERSION, locked, locked_version
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
+# Images mount the whole repo, so .python-version is present in the container too.
+LOCAL_PYTHON = (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip()
+_WHEEL_TAG = "cp" + LOCAL_PYTHON.replace(".", "")
 # CUDA devel is intentional: FlashInfer's paged decode wrapper may JIT through nvcc at startup.
 CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu22.04"
-FLASHINFER_VERSION = "0.6.14"
+FLASHINFER_VERSION = locked_version("flashinfer-python")
 
 # Pinned stack that ships a prebuilt flash-attn wheel (no source build):
 #   torch 2.8.0 (cu128) + flash-attn 2.8.3.post1 (cu12torch2.8).
-TORCH_VERSION = "2.8.0"
+TORCH_VERSION = locked_version("torch")
 TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 FLASH_ATTN_VERSION = "2.8.3.post1"
 FLASH_ATTN_WHEEL_URL = (
     "https://github.com/Dao-AILab/flash-attention/releases/download/"
-    "v{ver}/flash_attn-{ver}+cu12torch2.8cxx11abi{abi}-cp313-cp313-linux_x86_64.whl"
+    "v{ver}/flash_attn-{ver}+cu12torch2.8cxx11abi{abi}-{tag}-{tag}-linux_x86_64.whl"
 )
 
 IGNORE = [
@@ -62,13 +67,15 @@ IGNORE = [
 # install stay in ONE run-string so the shell var ``$ABI`` persists. The URL's ``{abi}`` is left as
 # the literal shell ``${{ABI}}`` (doubled braces escape the f-string), resolved by the shell from
 # torch's real ``compiled_with_cxx11_abi()``, never guessed.
-_FLASH_WHEEL_URL_SHELL = FLASH_ATTN_WHEEL_URL.format(ver=FLASH_ATTN_VERSION, abi="${ABI}")
+_FLASH_WHEEL_URL_SHELL = FLASH_ATTN_WHEEL_URL.format(
+    ver=FLASH_ATTN_VERSION, abi="${ABI}", tag=_WHEEL_TAG
+)
 _DETECT_ABI = (
     "python -c \"import torch; print('TRUE' if torch.compiled_with_cxx11_abi() else 'FALSE')\""
 )
 _INSTALL_FLASH_ATTN = (
     f'ABI=$({_DETECT_ABI}) && echo "flash-attn wheel ABI=$ABI" '
-    f'&& pip install --no-cache-dir "{_FLASH_WHEEL_URL_SHELL}"'
+    f'&& uv pip install --system --no-cache "{_FLASH_WHEEL_URL_SHELL}"'
 )
 # Step 2: guard, as its own one-line command. Importing flash_attn's CUDA extension is the real ABI
 # check — a wrong-ABI wheel imports the Python package but raises ``undefined symbol`` here, so a
@@ -89,23 +96,25 @@ def build_flash_image() -> modal.Image:
     across every harness and across ordinary source edits.
     """
     return _finish_image(
-        _build_flash_base().pip_install(f"flashinfer-python=={FLASHINFER_VERSION}")
+        _build_flash_base().uv_pip_install(
+            f"flashinfer-python=={FLASHINFER_VERSION}", uv_version=UV_VERSION
+        )
     )
 
 
 def _build_flash_base(*, cuda_image: str = CUDA_IMAGE) -> modal.Image:
     return (
-        modal.Image.from_registry(cuda_image, add_python="3.13")
+        modal.Image.from_registry(cuda_image, add_python=LOCAL_PYTHON)
         .apt_install("git", "build-essential")
-        .pip_install(f"torch=={TORCH_VERSION}", extra_options=f"--index-url {TORCH_CUDA_INDEX}")
+        # uv itself is a pinned package, so later RUN steps can call `uv pip install`.
+        .uv_pip_install(f"uv=={UV_VERSION}", uv_version=UV_VERSION)
+        .uv_pip_install(
+            f"torch=={TORCH_VERSION}", index_url=TORCH_CUDA_INDEX, uv_version=UV_VERSION
+        )
         .run_commands(_INSTALL_FLASH_ATTN, _GUARD_FLASH_ATTN)
-        .pip_install(
-            "transformers>=4.51",
-            "numpy>=1.26",
-            "pytest>=8.0",
-            "fastapi>=0.110",
-            "uvicorn>=0.29",
-            "httpx>=0.27",
+        .uv_pip_install(
+            *locked("transformers", "numpy", "pytest", "fastapi", "uvicorn", "httpx"),
+            uv_version=UV_VERSION,
         )
     )
 
@@ -114,9 +123,25 @@ def _finish_image(image: modal.Image) -> modal.Image:
     return (
         image.add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=IGNORE)
         .workdir(REMOTE_ROOT)
-        .run_commands("pip install --no-deps -e .")
+        .run_commands("uv pip install --system --no-deps -e .")
     )
 
 
 # Module-level baseline instance so every existing harness imports the same image object.
 FLASH_IMAGE = build_flash_image()
+
+# vLLM brings its own torch and CUDA stack, so it cannot share the flash image or its container.
+# The env pins spawn the engine core and use the native sampler, so no nvcc JIT runs.
+VLLM_IMAGE = (
+    modal.Image.debian_slim(python_version=LOCAL_PYTHON)
+    .uv_pip_install(f"uv=={UV_VERSION}", f"vllm=={VLLM_VERSION}", uv_version=UV_VERSION)
+    .env(
+        {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        }
+    )
+    .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=IGNORE)
+    .workdir(REMOTE_ROOT)
+    .run_commands("uv pip install --system --no-deps -e .")
+)

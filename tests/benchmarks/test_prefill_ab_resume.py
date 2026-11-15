@@ -15,6 +15,7 @@ from scripts.modal_esme_prefill_ab import (
     parse_event_lines,
     row_key,
 )
+from tests.support.json_result import dig_rows
 
 
 def _meta_event(backend: str) -> dict[str, object]:
@@ -72,7 +73,12 @@ def test_completed_row_keys_ignores_meta_and_preserves_order() -> None:
 
 def test_row_key_honors_a_different_command_key_field_set() -> None:
     # The mixed-load command keys resume on (burst_size, burst_shape), not the prefill fields.
-    row = {"kind": "row", "burst_size": 64, "burst_shape": "uniform", "burst_context": 512}
+    row: dict[str, object] = {
+        "kind": "row",
+        "burst_size": 64,
+        "burst_shape": "uniform",
+        "burst_context": 512,
+    }
 
     key = row_key(row, MIXED_LOAD_KEY_FIELDS)
 
@@ -116,9 +122,9 @@ def test_assemble_final_record_combines_rows_and_uses_newest_meta() -> None:
 
     assert record["attention_backend"] == "NewBackend"
     assert record["config"] == {"command": "prefill-ab"}
-    assert [row["batch_size"] for row in record["rows"]] == [1, 8]
+    assert [row["batch_size"] for row in dig_rows(record, "rows")] == [1, 8]
     # Rows carry the domain schema, not the streaming envelope.
-    assert all("kind" not in row for row in record["rows"])
+    assert all("kind" not in row for row in dig_rows(record, "rows"))
 
 
 def test_assemble_final_record_requires_a_meta_event() -> None:

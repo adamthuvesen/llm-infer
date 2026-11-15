@@ -8,7 +8,7 @@ separately by the ``ESME_BUNDLE_PATH``-gated parity tests.
 
 Two things are checked here that the landed engine-unit tests do not:
 
-* Esme serves end-to-end through ``serve.py``'s ``build_app_from_runtime`` →
+* Esme serves end-to-end through ``serve_runtime.build_app_from_runtime`` →
   ``AsyncInferenceEngine`` → OpenAI app, and the served token ids match the full-recompute
   ``greedy_decode`` reference (the "match the reference before measuring" gate, serving path).
 * Prefix caching **and** recompute preemption run through the **async serving loop** under
@@ -26,10 +26,11 @@ import pytest
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
 from llm_infer.model.decode import greedy_decode
+from llm_infer.model.interface import CausalLMBackend
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serve import build_app_from_runtime
+from llm_infer.request.request import Request
+from llm_infer.serve_runtime import build_app_from_runtime
 from llm_infer.serving.engine import InferenceEngine
-from llm_infer.serving.request import Request
 from llm_infer.serving.server import AsyncInferenceEngine
 from llm_infer.tracing import TraceRecorder
 
@@ -267,15 +268,15 @@ def test_build_app_passes_decode_window_size_to_engine(
     The CLI's ``--decode-window-size`` funnels through this kwarg, so pinning the passthrough
     here covers the serve entrypoint's only engine-tuning path for the decode window.
     """
-    import llm_infer.serve as serve_module
+    import llm_infer.serve_runtime as serve_module
 
     runtime = _esme_runtime(tmp_path)
     captured: dict[str, object] = {}
     real_engine = serve_module.InferenceEngine
 
-    def capturing_engine(*args: object, **kwargs: object) -> InferenceEngine:
+    def capturing_engine(model: CausalLMBackend, **kwargs: object) -> InferenceEngine:
         captured.update(kwargs)
-        return real_engine(*args, **kwargs)
+        return real_engine(model, **kwargs)  # pyright: ignore[reportArgumentType]  # kwargs pass through untyped
 
     monkeypatch.setattr(serve_module, "InferenceEngine", capturing_engine)
     build_app_from_runtime(runtime, block_size=8, num_blocks=32, decode_window_size=3)

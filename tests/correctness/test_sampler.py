@@ -101,7 +101,7 @@ def test_non_finite_params_rejected() -> None:
         {"frequency_penalty": float("nan")},
     ):
         with pytest.raises(ValueError):
-            SamplingParams(**kwargs)
+            SamplingParams(**kwargs)  # pyright: ignore[reportArgumentType]  # nan/inf on purpose
 
 
 def test_frequency_penalty_pushes_off_a_repeated_token() -> None:

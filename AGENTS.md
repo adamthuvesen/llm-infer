@@ -1,107 +1,79 @@
 # AGENTS.md: llm-infer
 
-`llm-infer` is a small inference engine focused on building real serving techniques
-and measuring them clearly. `Esme-214M-Chat` is the headline and default documented
-model. Qwen2.5-Coder is kept as the independent HuggingFace reference for
-correctness regression. Full scope and what the repo proves live in
-[`docs/scoping.md`](docs/scoping.md). Read it before proposing work.
+`llm-infer` is a small inference engine that builds real serving techniques and measures them
+clearly. `Esme-214M-Chat` is the headline model. Qwen2.5-Coder-3B-Instruct is the independent
+HuggingFace reference for correctness regression. Read [`docs/scoping.md`](docs/scoping.md)
+before you propose work. [`docs/architecture.md`](docs/architecture.md) maps modules, backends,
+and the reference contract. [`docs/benchmark.md`](docs/benchmark.md) holds the benchmark method.
 
-## Core rule: check the reference before publishing speed
+Domain terms are in `GLOSSARY.md` and decisions in `docs/adr/`. A change that adds, renames, or redefines a term, or reverses a decision, updates them in the same commit.
 
-Raw benchmark timing is always kept. A public headline speed claim first has to qualify against a
-known-good reference output on the same prompt and model. For Esme bundles, the reference is the source bundle
-logits/generation contract. The Qwen reference uses the pinned HuggingFace
-full-recompute greedy output. Experimental paths are allowed, but they must be
-labeled as experimental until they pass those checks. The single-request unit path still requires
-exact token ids. For Esme A/B experiments, keep fp32 reference status separate from direct
-candidate/baseline parity: exact direct parity can support a relative result even when both paths
-share a numerical review.
+## Judgment Calls
 
-## Backends
+- Speed needs a reference. Keep raw timing in every measured row. A public tok/s claim needs a
+  qualified fp32 reference row (`headline_eligible`). Label a path experimental until it passes.
+- The single-request unit path needs exact token ids.
+- Keep fp32 reference status separate from direct candidate/baseline parity. Exact direct parity
+  can support a relative A/B result even when both paths share a numerical review.
+- A difference above the 0.1-logit bf16 bound needs a durable review. `docs/findings.md` entry 20
+  says when a review may cite the measured bf16 error.
+- Do not rerun a settled experiment only to move its record to a newer policy format.
+- Modal runs bill until they finish. Never add `--approved` or `LLM_INFER_SERVE_APPROVED=1`
+  yourself: when a run refuses, stop and ask Adam, quoting the printed command.
+- Run one GPU job at a time unless the experiment needs more.
+  Whoever starts a background run watches its log and raises an alarm after 10 minutes of silence.
 
-- `esme`: Esme export bundles, with `Esme-214M-Chat` as the headline path. Internally these use
-  the `llm_pretrain_dense_v1` DenseBackbone export format. Real paged KV runs through the same
-  engine prefill/decode and scheduler path, with prefix caching, speculative decode, and
-  preemption all checked for parity. `PretrainBundleModel.logits()` stays the full-recompute
-  reference for the paged path: exact greedy-token parity on the real bundle, with cached logits
-  within documented fp32 BLAS reduction-order noise and well below any decision margin. On CUDA
-  fp16/bf16 bundles `auto` selects `FlashInferPagedAttention` for batched decode (see
-  `_resolve_attention_backend` in `llm_infer/model/runtime.py`), and the HTTP server compiles
-  RMSNorm and RoPE into fused kernels (`llm_infer/model/fused_elementwise.py`). `torch_naive`
-  stays the fp32/CPU reference oracle. See `BackendCapabilities` in `llm_infer/model/interface.py`.
-- `dense`: compatibility alias for the same internal bundle loader. Public docs/examples
-  use `esme`.
-- `qwen`: independent HF reference backend for `Qwen/Qwen2.5-Coder-3B-Instruct` at HF revision
-  `488639f1ff808d1d3d0ba301aef8c11461451ec5`. Use the **Instruct** variant and its
-  chat template for reference reproduction. Plain `-3B` is a different model and would
-  invalidate the Qwen reference.
+## Commands
 
-Qwen's revision pin lives in `llm_infer/model/config.py` (`MODEL_ID`, `MODEL_REVISION`).
-Backend selection lives in `llm_infer/model/runtime.py`.
-
-## Layout
-
-```
-llm_infer/
-  model/             # backend registry, Esme/DenseBackbone loader, Qwen reference, rope utils
-  kernels/           # AttentionBackend protocol, torch_naive reference, torch_sdpa, FlashInfer, flash-attn
-  kv_cache/          # block allocator, block tables, paged page store
-  scheduler/         # prefill/decode admission, continuous batching, optional preemption
-  serving/           # InferenceEngine step loop, sampler, OpenAI HTTP server, metrics
-  benchmarks/        # Esme workloads, reference policy, timing, and report helpers
-tests/correctness/   # reference tests + batch/prefix/preemption/speculative suites
-docs/                # scoping.md, architecture.md, benchmark.md, serving-eval.md, fixture-format.md
-scripts/             # generate_goldens, Qwen reference check, Esme Modal harnesses,
-                     # serving/loadgen tools, benchmark evidence checks, real KV trace generator
-visualizer/          # schema-v3 KV trace replay UI
-```
-
-Implemented features include greedy reference tests, paged KV cache, continuous batching,
-chunked prefill, prefix caching, FlashInfer and flash-attn backends, piecewise and grouped CUDA
-decode graphs, prompt-lookup speculative decode, request preemption, KV trace visualizer, and
-OpenAI-compatible serving with metrics/loadgen.
-
-## Benchmark rules
-
-The single-request unit path must produce exact token ids. Esme policy-v2 statuses are `exact`,
-`accepted_numerical`, `review_required`, and `failed`; direct parity also allows `not_applicable`.
-The 0.1-logit bf16 boundary is automatic acceptance. It stays below the measured bf16 error
-(p99.9 shrink 0.25, `docs/findings.md` entry 20) so the gate can still see a bug. Larger
-numerical differences need a durable review. Entry 20 lists when that review may cite it.
-Missing/extra output and confirmed bugs fail. Keep raw
-timing in all measured rows, gate public tok/s with `headline_eligible`, and do not rerun a settled
-experiment only to move its record to a newer policy format.
-
-## Development
-
-Managed with [`uv`](https://docs.astral.sh/uv/). Python 3.13 only, to match the GPU image.
+Use Python 3.13, [`uv`](https://docs.astral.sh/uv/), and Node 24. CI runs the same `make check`.
 
 ```bash
-uv sync --extra dev --extra serving   # dev tests + HTTP server deps
-uv run ruff check                     # lint (must be clean)
-uv run mypy llm_infer                 # package type check
-uv run pytest tests/correctness -q    # fast CPU reference check (slow 3B reference checks deselected)
-make check                            # lint, format, types, and full fast suite before merge
-uv run pytest tests/correctness -q -m slow  # opt-in 3B CPU reference check
+make install
+make check        # import contracts, lint, format, types, CPU tests, evidence, visualizer
+make fix         # ruff fixes and format
+make help         # every target with its purpose
+make slow         # opt-in 3B Qwen reference check and figure regeneration
 ```
 
-The local check is **CPU-runnable**: no GPU required. The slow 3B reference checks are opt-in
-because they load the pinned Qwen model and can take minutes on CPU.
-The FlashInfer and flash-attn backends are GPU-only; Esme and Qwen reference checks run on the target
-GPU via the Modal harnesses in `scripts/`. Benchmark harnesses use Modal A100-80GB, with
-Esme in `scripts/modal_esme_*` and the Qwen flash check in `scripts/modal_reference_check.py`.
+Prove changes with `make verify` (`verify-llm-infer` skill at `.agents/skills/verify-llm-infer/`).
 
-Modal runs bill until they finish or time out, and a hung run prints nothing. A GPU function
-calls `stall_guard.arm()` from `scripts/modal_stall_guard.py` and `stall_guard.progress()` after
-each row or batch, so a stall exits with thread stacks instead of running to its timeout. Run
-GPU jobs one at a time unless the experiment needs them together. Whoever launches a background
-run also watches its log and raises an alarm after 10 minutes without output.
+GPU-only paths (FlashInfer, flash-attn) run on Modal A100-80GB through `scripts/modal_*.py`.
+An import contract failure names the forbidden import and its source line. Fix the import, then
+run `make architecture-check` and `make check`.
 
-## Conventions
+## Enforced Rules
 
-- Atomic [conventional commits](https://www.conventionalcommits.org/) (`type(scope): message`),
-  one per logical unit.
-- Type hints throughout; no `Any` casts. Fix the type.
-- `pathlib.Path` for filesystem work.
-- Comments explain _why_, not _what_. Names use concrete domain terms.
-- Validate untrusted input loudly; keep `try` bodies small.
+The scheduler views restrict typed callers but do not enforce runtime immutability. Change
+membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
+
+| Rule | Enforced by |
+| --- | --- |
+| Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
+| The HTTP server imports no model module except the `TokenizerLike` protocol; model loading lives in `serve_runtime.py` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
+| `llm_infer` never imports `scripts`; the engine never imports the HTTP server; serving never imports benchmarks; `model/decode_graph.py` never imports `pretrain_bundle` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
+| Modal images install exact versions through uv: lock versions from `uv.lock`, vLLM from one pin | `tests/test_modal_image_pins.py::test_no_modal_image_installs_a_floating_version_or_uses_pip`, `scripts/modal_image_pins.py::locked` |
+| Process, network, and Modal modules stay in their owner files; Modal only in `scripts/modal_*.py`, where the spend checks look | `tests/test_process_network_owners.py::test_process_and_network_modules_stay_in_their_owners` |
+| Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` |
+| A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` |
+| Tests never sleep or read wall-clock time, and every skip or xfail gives a reason | `tests/ruff.toml::lint.flake8-tidy-imports.banned-api`, `tests/test_strict_mode.py::test_every_skip_gives_a_reason` |
+| Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py::DecodeWindows`, `tests/serving/test_decode_window.py::test_abort_flush_lands_in_next_step_result` |
+| Decode-ready requests always have a KV table | `llm_infer/request/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` |
+| Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py::Scheduler`, `tests/scheduler/test_scheduler.py::test_cancel_releases_only_the_cancelled_requests_reservation` |
+| Trace replay rejects malformed events | `visualizer/trace_loader.js::validateEvent`, `Makefile::visualizer-test`, `tests/serving/test_tracing.py::test_trace_recorder_captures_real_engine_events` |
+| Modal entrypoints and every Modal function, CPU-only included, refuse to spend without `--approved`; the server needs `LLM_INFER_SERVE_APPROVED=1`; paid work uses `@app.function`, never `@app.cls` | `scripts/modal_approval.py::require_spend_approval`, `tests/test_modal_approval.py::test_local_entrypoints_gate_before_any_modal_call`, `tests/test_modal_approval.py::test_modal_functions_refuse_direct_calls_without_approval`, `tests/test_modal_approval.py::test_paid_work_uses_modal_functions_not_classes`, `tests/test_modal_approval.py::test_only_a_gated_entrypoint_forwards_approval`, `tests/test_modal_approval.py::test_server_apps_refuse_to_start_without_approval` |
+| No doc shows a runnable Modal command with `--approved` or `LLM_INFER_SERVE_APPROVED=1` | `tests/test_docs_approval_commands.py::test_docs_show_no_approved_command` |
+| Modal GPU functions arm the stall guard; web servers are exempt | `scripts/modal_stall_guard.py::arm`, `tests/test_modal_stall_guard.py::test_gpu_functions_arm_the_stall_guard` |
+| `make verify ARGS=control` passes only on its exact expected FAIL; CI runs it after `verify all` | `.agents/skills/verify-llm-infer/drives.py::control_serve_http`, `Makefile::verify` |
+
+## Change Navigation
+
+Paths start inside `llm_infer/`, except `tests/` and `visualizer/`.
+
+| Change | Start here | Check |
+| --- | --- | --- |
+| Backend support or grouped graph construction | `model/interface.py`, `model/runtime.py` | `tests/model/test_runtime.py`, `tests/serving/test_engine_grouped_decode.py` |
+| Request lifecycle or KV release | `request/request.py`, `serving/engine.py`, `scheduler/scheduler.py` | `tests/correctness/test_request_lifecycle.py`, `tests/correctness/test_preemption.py` |
+| Deferred decode windows | `serving/decode_window.py`, `serving/engine.py` | `tests/serving/test_decode_window.py` |
+| Benchmark timing or oracle caching | `benchmarks/esme_paged.py`, `benchmarks/esme_measurement.py` | `tests/benchmarks/test_esme_measurement.py` |
+| Benchmark qualification or A/B verdicts | `benchmarks/reference_policy.py`, `benchmarks/paired_ab.py` | `tests/benchmarks/`, `make evidence-check` |
+| Trace events or replay | `tracing.py`, `serving/engine_trace.py`, `visualizer/trace_loader.js` | `tests/serving/test_tracing.py`, `make visualizer-test` |

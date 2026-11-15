@@ -1,7 +1,8 @@
 """Same-host A100 comparison: llm_infer and vLLM on the converted Esme checkpoint.
 
-``scripts/modal_esme_three_way.py`` starts two Modal GPU functions, so its vLLM and ``llm_infer``
-rows can land on different A100 hosts. This harness reserves one A100 and launches each
+The archived ``scripts/modal_esme_three_way.py`` (tag ``archive/llm-infer-experiments-2026-11-11``)
+started two Modal GPU functions, so its vLLM and ``llm_infer`` rows could land on different A100
+hosts. This harness reserves one A100 and launches each
 system as a fresh child process inside that function. Process exit releases vLLM's CUDA memory,
 while the parent keeps the host reservation. Hostname and GPU UUID are recorded for the parent,
 the fp32 oracle, and both engine children and must match before a result is accepted.
@@ -38,12 +39,15 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 
 import modal
 
+from scripts.modal_approval import require_spend_approval
+
 if TYPE_CHECKING:
-    from llm_infer.benchmarks.esme_three_way import EsmeAgreement
+    from llm_infer.benchmarks.reference_policy import EsmeAgreement
+    from llm_infer.model.interface import TokenizerLike
 
 from scripts import modal_stall_guard as stall_guard
 from scripts.modal_esme_bundle import (
@@ -54,6 +58,7 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REMOTE_ROOT, REPO_ROOT
+from scripts.modal_image_pins import VLLM_VERSION, locked
 
 ESME_HF_DIR = "esme-214m-chat-hf-phase0"
 REMOTE_HF_PATH = f"{ESME_BUNDLE_MOUNT}/{ESME_HF_DIR}"
@@ -65,8 +70,6 @@ MAX_NEW_TOKENS = 128
 WARMUPS = 2
 MEASURED_ITERS = 10
 VLLM_PYTHON = "/opt/vllm/bin/python"
-# The version in the committed assets/esme-vllm-same-host*.json records, so reruns stay comparable.
-VLLM_VERSION = "0.24.0"
 ENGINE_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused", "vllm")
 LLM_INFER_SYSTEMS = ("llm_infer", "llm_infer_grouped", "llm_infer_fused")
 
@@ -151,8 +154,8 @@ app = modal.App("llm-infer-esme-vllm-baseline")
 # interpreter, so neither engine rewrites the other's dependencies or retains CUDA memory.
 comparison_image = FLASH_IMAGE.run_commands(
     f"python -m venv {VLLM_PYTHON.rsplit('/', 2)[0]}",
-    f"{VLLM_PYTHON} -m pip install vllm=={VLLM_VERSION} modal==1.5.0",
-    f"{VLLM_PYTHON} -m pip install --no-deps -e {REMOTE_ROOT}",
+    f"uv pip install --python {VLLM_PYTHON} vllm=={VLLM_VERSION} {' '.join(locked('modal'))}",
+    f"uv pip install --python {VLLM_PYTHON} --no-deps -e {REMOTE_ROOT}",
 ).env(
     {
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -164,7 +167,7 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 def build_context_workloads(
-    tokenizer: object,
+    tokenizer: TokenizerLike,
     batch_sizes: tuple[int, ...],
     context_lengths: tuple[int, ...],
 ) -> list[WorkloadSpec]:
@@ -305,19 +308,19 @@ def _run_child_process(
 
 
 def run_oracle_process(worker_input: WorkerInput, directory: Path) -> OracleResult:
-    return _run_child_process("oracle", worker_input, directory)
+    return cast(OracleResult, _run_child_process("oracle", worker_input, directory))
 
 
 def run_engine_process(system: str, worker_input: WorkerInput, directory: Path) -> WorkerResult:
     if system not in ENGINE_SYSTEMS:
         raise ValueError(f"engine system must be one of {ENGINE_SYSTEMS}; got {system!r}")
-    return _run_child_process(system, worker_input, directory)
+    return cast(WorkerResult, _run_child_process(system, worker_input, directory))
 
 
 def _run_oracle_worker(worker_input: WorkerInput) -> OracleResult:
     import torch
 
-    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
+    from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
     from llm_infer.model.runtime import load_model_runtime
 
     assert torch.cuda.is_available(), "fp32 oracle worker needs CUDA"
@@ -426,15 +429,6 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, system: str) -> WorkerRe
     ) // worker_input["block_size"]
     num_blocks = largest_batch * blocks_per_request + largest_batch
     batch_sizes = tuple(sorted({workload["batch_size"] for workload in worker_input["workloads"]}))
-    grouped_kwargs: dict[str, object] = (
-        {
-            "grouped_decode_graphs": True,
-            "grouped_capture_sizes": batch_sizes,
-            "grouped_layers": runtime.model.num_layers,
-        }
-        if grouped
-        else {}
-    )
     engine_start = time.perf_counter()
     engine = InferenceEngine(
         runtime.model,
@@ -442,7 +436,10 @@ def _run_llm_infer_worker(worker_input: WorkerInput, *, system: str) -> WorkerRe
         num_blocks=num_blocks,
         device="cuda",
         capabilities=runtime.capabilities,
-        **grouped_kwargs,
+        # Capture sizes and layer count only take effect with grouped graphs on.
+        grouped_decode_graphs=grouped,
+        grouped_capture_sizes=batch_sizes,
+        grouped_layers=runtime.model.num_layers,
     )
     if grouped and set(engine.grouped_decode_runners) != set(batch_sizes):
         raise AssertionError(
@@ -573,6 +570,7 @@ def _run_vllm_worker(worker_input: WorkerInput) -> WorkerResult:
 
 def _worker_main(system: str, input_path: Path, output_path: Path) -> None:
     worker_input: WorkerInput = json.loads(input_path.read_text(encoding="utf-8"))
+    result: OracleResult | WorkerResult
     if system == "oracle":
         result = _run_oracle_worker(worker_input)
     elif system in LLM_INFER_SYSTEMS:
@@ -597,7 +595,7 @@ def gate_outputs(
     recorded set is exactly the same check as recomputing the step in
     ``compare_under_tie_tolerance``. The parent can therefore gate without owning a CUDA context.
     """
-    from llm_infer.benchmarks.esme_three_way import EsmeAgreement
+    from llm_infer.benchmarks.reference_policy import EsmeAgreement
     from llm_infer.benchmarks.report import normalize_at_eos
 
     expected_ids = {request["request_id"] for request in requests}
@@ -695,9 +693,8 @@ def finalize_row(
     total_output_tokens: int,
 ) -> dict[str, object]:
     """Attach gate and steady-state statistics; suppress speed for a failed gate."""
-    import dataclasses
 
-    from llm_infer.benchmarks.reference_policy import build_system_evidence_record
+    from llm_infer.benchmarks.reference_policy import SystemEvidence
 
     timings = worker_row["per_iter_seconds"]
     median_seconds = statistics.median(timings)
@@ -705,16 +702,16 @@ def finalize_row(
         "system": system,
         "batch_size": worker_row["batch_size"],
         "context_tokens": worker_row["context_tokens"],
-        "agreement": dataclasses.asdict(agreement),
+        "agreement": agreement.as_dict(),
         "per_iter_seconds": timings,
         "median_seconds": median_seconds,
         "p95_seconds": percentile(timings, 95),
         "total_output_tokens": total_output_tokens,
-        **build_system_evidence_record(
+        **SystemEvidence.from_timing(
             agreement=agreement,
             median_seconds=median_seconds,
             total_tokens=total_output_tokens,
-        ),
+        ).as_dict(),
     }
 
 
@@ -730,8 +727,10 @@ def run_same_host(
     max_new_tokens: int,
     warmup: int,
     iters: int,
+    approved: bool = False,
 ) -> str:
     """Reserve one A100, run both systems in children, then apply the fp32 output gate."""
+    require_spend_approval(approved, __file__)
     from llm_infer.benchmarks import gpu_snapshot
     from llm_infer.benchmarks.report import total_output_tokens
     from llm_infer.model.pretrain_bundle_loader import read_json_object
@@ -866,13 +865,14 @@ def _command_config(command: str) -> tuple[tuple[int, ...], tuple[int, ...], int
 
 
 @app.local_entrypoint()
-def main(command: str = "focused", bundle_path: str = "") -> None:
+def main(command: str = "focused", bundle_path: str = "", approved: bool = False) -> None:
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
     batch_sizes, context_lengths, max_new_tokens, warmup, iters = _command_config(command)
     local_bundle = local_bundle_path(bundle_path)
     stage_bundle(esme_bundles, local_bundle, label="esme-vllm-baseline")
     result = json.loads(
         run_same_host.remote(
-            list(batch_sizes), list(context_lengths), max_new_tokens, warmup, iters
+            list(batch_sizes), list(context_lengths), max_new_tokens, warmup, iters, approved=True
         )
     )
     record = {

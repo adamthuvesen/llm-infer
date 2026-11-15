@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
+from llm_infer.kv_cache import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
 from llm_infer.model.decode_graph import select_bucket
 from llm_infer.model.grouped_decode_graph import EngineOwnedGroupedDecodeGraphRunner
@@ -51,7 +52,7 @@ def _fresh_cache(model) -> PagedKVCache:
     )
 
 
-def _prefill(model, cache) -> tuple[list, torch.Tensor]:
+def _prefill(model, cache) -> tuple[list[BlockTable], torch.Tensor]:
     tables, first_tokens = [], []
     for prompt in _PROMPTS:
         table = cache.new_request()
@@ -99,7 +100,7 @@ def test_static_buffers_hold_step_inputs_and_advance_positions(runtime) -> None:
     assert plan is not None
 
     logits = model.decode_window_step(cache, plan, tokens)
-    state = runner._buckets[4]
+    state = runner.buckets[4]
     assert logits.shape == (3, model.config.vocab_size)
     assert logits.data_ptr() == state.logits.data_ptr()  # a static-buffer view, not a copy
     assert state.tokens[:3].tolist() == tokens.tolist()

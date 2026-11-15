@@ -11,6 +11,7 @@ import torch
 from llm_infer.kernels.base import AttentionBackend
 from llm_infer.kv_cache.block_table import BlockTable
 from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+from llm_infer.model.decode_plan import DecodeWindowPlan
 from llm_infer.profiling import TimingProfiler
 
 
@@ -66,11 +67,13 @@ class CausalLMBackend(Protocol):
 
     def logits(self, token_ids: list[int]) -> torch.Tensor:
         """Return next-token logits for each input position."""
+        ...
 
     def prefill(
         self, prompt_ids: list[int], cache: PagedKVCache, table: BlockTable
     ) -> torch.Tensor:
         """Cache a full prompt and return logits for the last prompt token."""
+        ...
 
     def prefill_chunk(
         self,
@@ -82,11 +85,13 @@ class CausalLMBackend(Protocol):
         chunk_size: int,
     ) -> torch.Tensor:
         """Cache one prompt chunk and return logits for the last chunk token."""
+        ...
 
     def decode_one(
         self, cache: PagedKVCache, table: BlockTable, token_id: int | torch.Tensor
     ) -> torch.Tensor:
         """Append one token for one request and return its next-token logits."""
+        ...
 
     def decode_many(
         self,
@@ -95,6 +100,7 @@ class CausalLMBackend(Protocol):
         token_ids: list[int] | torch.Tensor,
     ) -> torch.Tensor:
         """Append one token per request and return one logits row per request."""
+        ...
 
     def decode_tokens(
         self,
@@ -103,9 +109,11 @@ class CausalLMBackend(Protocol):
         token_ids: list[int] | torch.Tensor,
     ) -> torch.Tensor:
         """Verify a token prefix in one cached forward; one logits row per input token."""
+        ...
 
     def release_table(self, table: BlockTable) -> None:
         """Release backend-specific per-table state when a block table is freed."""
+        ...
 
 
 @runtime_checkable
@@ -119,6 +127,31 @@ class BatchedPrefillBackend(Protocol):
         tables: list[BlockTable],
     ) -> torch.Tensor:
         """Cache every prompt and return one final-token logits row per request."""
+        ...
+
+
+@runtime_checkable
+class DeclaredCapabilitiesBackend(Protocol):
+    """An injected backend's explicit feature declaration."""
+
+    capabilities: BackendCapabilities
+
+
+@runtime_checkable
+class PlannedDecodeBackend(Protocol):
+    """Optional preallocated-buffer decode surface for deferred windows."""
+
+    def open_decode_window(
+        self, cache: PagedKVCache, tables: list[BlockTable], budget: int
+    ) -> DecodeWindowPlan | None:
+        """Reserve a window plan, or decline when its tables are not plan-safe."""
+        ...
+
+    def decode_window_step(
+        self, cache: PagedKVCache, plan: DecodeWindowPlan, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Advance a planned batch by one token."""
+        ...
 
 
 class TokenizerLike(Protocol):
@@ -126,9 +159,11 @@ class TokenizerLike(Protocol):
 
     def encode(self, text: str) -> list[int]:
         """Return token ids for raw text."""
+        ...
 
     def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
         """Return text for token ids."""
+        ...
 
     def apply_chat_template(
         self,
@@ -138,6 +173,7 @@ class TokenizerLike(Protocol):
         tokenize: bool,
     ) -> object:
         """Render or tokenize chat messages."""
+        ...
 
 
 @dataclass(frozen=True)

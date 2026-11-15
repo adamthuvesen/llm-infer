@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_flash_image import FLASH_IMAGE, REMOTE_ROOT
 
 APP_NAME = "llm-infer-reference-check"
@@ -40,12 +42,13 @@ hf_cache = modal.Volume.from_name("llm-infer-hf-cache", create_if_missing=True)
 
 
 @app.function(image=image, gpu="A100-80GB", volumes={HF_CACHE: hf_cache}, timeout=30 * 60)
-def smoke() -> str:
+def smoke(approved: bool = False) -> str:
     """Cheap pre-spend check: flash-attn imports, weights load on the A100, engine decodes.
 
     Decodes only a handful of tokens on one tiny golden case — enough to prove the GPU
     path is wired end to end before the full reference check runs.
     """
+    require_spend_approval(approved, __file__)
     import json
 
     import torch
@@ -56,6 +59,7 @@ def smoke() -> str:
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     print(f"device: {torch.cuda.get_device_name(0)}; flash-attn imported OK")
 
     fixture = json.loads(QWEN_COT_GOLDEN.read_text(encoding="utf-8"))
@@ -65,6 +69,7 @@ def smoke() -> str:
     model = QwenModel.load(dtype=torch.bfloat16, backend=FlashAttnPagedAttention(), device="cuda")
     hf_cache.commit()  # persist any freshly downloaded weights
     print("weights loaded on A100 (bf16, flash backend)")
+    stall_guard.progress()
 
     engine = InferenceEngine(model, block_size=128, num_blocks=8, device="cuda")
     engine.add_request(Request("smoke", list(case["prompt_ids"]), 5, eos))
@@ -75,17 +80,20 @@ def smoke() -> str:
 
 
 @app.function(image=image, gpu="A100-80GB", volumes={HF_CACHE: hf_cache}, timeout=30 * 60)
-def check() -> str:
+def check(approved: bool = False) -> str:
     """Full flash-attn reference check on the A100; fail on any mismatch.
 
     Runs ``tests/correctness/test_flash_attn_paged.py`` (the flash path under the
     documented tie rule). Exits non-zero on any failure so ``modal run`` surfaces it.
     """
+    require_spend_approval(approved, __file__)
     import subprocess
 
     import torch
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    # One pytest subprocess reports no progress: dump stacks just before the 30-minute timeout.
+    stall_guard.arm(limit_s=28 * 60)
     hf_cache.commit()
     result = subprocess.run(
         [
@@ -114,15 +122,16 @@ def check() -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "smoke") -> None:
+def main(command: str = "smoke", approved: bool = False) -> None:
     """Run the cheap smoke or the full flash reference check on the A100.
 
     smoke:   modal run scripts/modal_reference_check.py --command smoke
     check:   modal run scripts/modal_reference_check.py --command check
     """
+    require_spend_approval(approved, __file__, command=command)
     if command == "smoke":
-        print(smoke.remote())
+        print(smoke.remote(approved=True))
     elif command == "check":
-        print(check.remote())
+        print(check.remote(approved=True))
     else:
         raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")

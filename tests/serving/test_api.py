@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import httpx
 import pytest
 
 from llm_infer.serving.engine import InferenceEngine
 from llm_infer.serving.server import AsyncInferenceEngine, create_app
+from llm_infer.serving.server.app import _template_token_ids
+from tests.support.json_result import dig, dig_dict, dig_number
 from tests.support.tiny_qwen import tiny_qwen as _tiny_qwen
 
 VOCAB = 37
@@ -43,7 +46,11 @@ class TinyTokenizer:
         return "".join(chr(33 + (t % 94)) for t in ids)
 
     def apply_chat_template(
-        self, messages: list[dict], add_generation_prompt: bool = True, tokenize: bool = True
+        self,
+        messages: list[dict[str, str]],
+        *,
+        add_generation_prompt: bool = True,
+        tokenize: bool = True,
     ) -> dict[str, list[int]]:
         # Mirror a real HF tokenizer: tokenize=True yields a BatchEncoding-shaped mapping
         # ({"input_ids": [...]}), NOT a bare list — so the server must read input_ids rather
@@ -53,6 +60,20 @@ class TinyTokenizer:
             text += "\nassistant:"
         ids = self.encode(text)
         return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+
+@pytest.mark.parametrize("rendered", [[1, 2], {"input_ids": [1, 2]}, {"input_ids": [[1, 2]]}])
+def test_chat_template_token_ids_accept_tokenizer_outputs(rendered: object) -> None:
+    assert _template_token_ids(rendered) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [None, "12", {"input_ids": "12"}, [1.5], ["1"], [True], [[1, "2"]]],
+)
+def test_chat_template_token_ids_reject_malformed_outputs(rendered: object) -> None:
+    with pytest.raises(TypeError, match="chat template token ids"):
+        _template_token_ids(rendered)
 
 
 def _build_app(*, block_size: int = 8, num_blocks: int = 64):
@@ -104,11 +125,11 @@ def test_engine_step_failure_fails_streams_instead_of_hanging() -> None:
                 async for _ in stream:
                     pass
 
-            # The loop is dead: a new submission is rejected fast, not left to hang.
-            for _ in range(200):
-                if async_engine._fatal is not None:
-                    break
-                await asyncio.sleep(0.01)
+            # The loop is dead: a new submission is rejected fast, not left to hang. The fatal
+            # flag is set just before the loop thread exits, so joining the thread orders it.
+            loop_thread = async_engine._thread
+            assert loop_thread is not None
+            await asyncio.to_thread(loop_thread.join)
             later = async_engine.stream(
                 request_id="r1",
                 prompt_ids=[1, 2, 3],
@@ -134,6 +155,15 @@ def test_cancellation_aborts_engine_request() -> None:
 
     async def go() -> None:
         engine = InferenceEngine(_tiny_qwen(), block_size=8, num_blocks=64)
+        aborted = threading.Event()
+        engine_abort = engine.abort
+
+        def abort_and_signal(request_id: str) -> bool:
+            result = engine_abort(request_id)
+            aborted.set()
+            return result
+
+        engine.abort = abort_and_signal
         async_engine = AsyncInferenceEngine(engine)
         async_engine.start()
         try:
@@ -152,11 +182,7 @@ def test_cancellation_aborts_engine_request() -> None:
             await stream.aclose()
 
             # The loop sees the abort at the next step boundary and releases the request.
-            for _ in range(200):
-                running_ids = {r.request_id for r in engine.scheduler.running}
-                if request_id not in running_ids and not engine.scheduler.waiting:
-                    break
-                await asyncio.sleep(0.01)
+            assert await asyncio.to_thread(aborted.wait, 30.0)
             running_ids = {r.request_id for r in engine.scheduler.running}
             assert request_id not in running_ids
             assert count == 1
@@ -233,16 +259,21 @@ def test_completion_non_streaming_shape() -> None:
     _run(go())
 
 
-def _parse_sse(text: str) -> list:
-    chunks = []
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            payload = line[len("data: ") :]
-            if payload == "[DONE]":
-                chunks.append("[DONE]")
-            else:
-                chunks.append(json.loads(payload))
-    return chunks
+def _parse_sse(text: str) -> list[dict[str, object]]:
+    """Return the JSON data chunks of an SSE stream, without the ``[DONE]`` sentinel."""
+    payloads = [line[len("data: ") :] for line in text.splitlines() if line.startswith("data: ")]
+    return [json.loads(payload) for payload in payloads if payload != "[DONE]"]
+
+
+def _stream_is_done(text: str) -> bool:
+    data_lines = [line for line in text.splitlines() if line.startswith("data: ")]
+    return bool(data_lines) and data_lines[-1] == "data: [DONE]"
+
+
+def _delta_content(chunk: dict[str, object]) -> str:
+    content = dig_dict(chunk, "choices", 0, "delta").get("content", "")
+    assert isinstance(content, str)
+    return content
 
 
 def test_chat_completion_streaming_sse() -> None:
@@ -264,13 +295,12 @@ def test_chat_completion_streaming_sse() -> None:
                 text = ""
                 async for piece in resp.aiter_text():
                     text += piece
-            chunks = _parse_sse(text)
-            assert chunks[-1] == "[DONE]"
-            data_chunks = [c for c in chunks if c != "[DONE]"]
+            assert _stream_is_done(text)
+            data_chunks = _parse_sse(text)
             assert all(c["object"] == "chat.completion.chunk" for c in data_chunks)
-            assert data_chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+            assert dig(data_chunks[0], "choices", 0, "delta", "role") == "assistant"
             # The last data chunk carries the finish_reason, no content.
-            assert data_chunks[-1]["choices"][0]["finish_reason"] == "length"
+            assert dig(data_chunks[-1], "choices", 0, "finish_reason") == "length"
 
     _run(go())
 
@@ -294,13 +324,15 @@ def test_chat_completion_streaming_usage_chunk() -> None:
                 text = ""
                 async for piece in resp.aiter_text():
                     text += piece
-            chunks = [c for c in _parse_sse(text) if c != "[DONE]"]
+            chunks = _parse_sse(text)
             usage_chunks = [chunk for chunk in chunks if chunk.get("usage") is not None]
             assert len(usage_chunks) == 1
-            usage = usage_chunks[0]["usage"]
+            usage = dig_dict(usage_chunks[0], "usage")
             assert usage_chunks[0]["choices"] == []
             assert usage["completion_tokens"] == 5
-            assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+            assert dig_number(usage, "total_tokens") == dig_number(
+                usage, "prompt_tokens"
+            ) + dig_number(usage, "completion_tokens")
 
     _run(go())
 
@@ -318,11 +350,10 @@ def test_completion_streaming_sse() -> None:
                 text = ""
                 async for piece in resp.aiter_text():
                     text += piece
-            chunks = _parse_sse(text)
-            assert chunks[-1] == "[DONE]"
-            data_chunks = [c for c in chunks if c != "[DONE]"]
+            assert _stream_is_done(text)
+            data_chunks = _parse_sse(text)
             assert all(c["object"] == "text_completion" for c in data_chunks)
-            assert data_chunks[-1]["choices"][0]["finish_reason"] == "length"
+            assert dig(data_chunks[-1], "choices", 0, "finish_reason") == "length"
 
     _run(go())
 
@@ -366,11 +397,7 @@ def test_streaming_matches_non_streaming() -> None:
                 text = ""
                 async for piece in resp.aiter_text():
                     text += piece
-            streamed = "".join(
-                c["choices"][0]["delta"].get("content", "")
-                for c in _parse_sse(text)
-                if c != "[DONE]"
-            )
+            streamed = "".join(_delta_content(c) for c in _parse_sse(text))
             assert streamed == expected
 
     _run(go())
@@ -402,9 +429,10 @@ def test_concurrent_streams_batch_through_one_loop() -> None:
                     text = ""
                     async for piece in resp.aiter_text():
                         text += piece
-                chunks = [c for c in _parse_sse(text) if c != "[DONE]"]
-                content_chunks = sum(1 for c in chunks if c["choices"][0]["delta"].get("content"))
-                finish = chunks[-1]["choices"][0]["finish_reason"]
+                chunks = _parse_sse(text)
+                content_chunks = sum(1 for c in chunks if _delta_content(c))
+                finish = dig(chunks[-1], "choices", 0, "finish_reason")
+                assert isinstance(finish, str)
                 return content_chunks, finish
 
             results = await asyncio.gather(
@@ -444,9 +472,7 @@ def test_concurrent_streaming_equals_serial_tokens() -> None:
             raw = ""
             async for piece in resp.aiter_text():
                 raw += piece
-        return "".join(
-            c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
-        )
+        return "".join(_delta_content(c) for c in _parse_sse(raw))
 
     async def go() -> None:
         # Serial reference: a fresh app/engine per prompt, run alone.
@@ -467,9 +493,9 @@ def test_concurrent_streaming_equals_serial_tokens() -> None:
     _run(go())
 
 
-def _parse_named_sse(text: str) -> list[tuple[str, dict]]:
+def _parse_named_sse(text: str) -> list[tuple[str, dict[str, object]]]:
     """Parse Responses semantic SSE into (event_name, data) pairs."""
-    events: list[tuple[str, dict]] = []
+    events: list[tuple[str, dict[str, object]]] = []
     name: str | None = None
     for line in text.splitlines():
         if line.startswith("event: "):
@@ -551,10 +577,10 @@ def test_responses_streaming_semantic_events() -> None:
             assert "response.output_text.delta" in names
 
             streamed = "".join(
-                data["delta"] for name, data in events if name == "response.output_text.delta"
+                str(data["delta"]) for name, data in events if name == "response.output_text.delta"
             )
             completed = next(data for name, data in events if name == "response.completed")
-            assert completed["response"]["output_text"] == streamed
+            assert dig(completed, "response", "output_text") == streamed
 
     _run(go())
 
@@ -574,7 +600,7 @@ def test_responses_streaming_matches_non_streaming() -> None:
                 async for piece in resp.aiter_text():
                     text += piece
             streamed = "".join(
-                data["delta"]
+                str(data["delta"])
                 for name, data in _parse_named_sse(text)
                 if name == "response.output_text.delta"
             )
@@ -594,7 +620,7 @@ def test_responses_streaming_matches_non_streaming() -> None:
         {"model": "tiny-qwen", "input": "hi", "temperature": -1.0},  # out of range -> 400
     ],
 )
-def test_responses_unsupported_fields_rejected(payload: dict) -> None:
+def test_responses_unsupported_fields_rejected(payload: dict[str, object]) -> None:
     async def go() -> None:
         app = _build_app()
         async with app.router.lifespan_context(app), _client(app) as client:
@@ -627,7 +653,7 @@ def test_responses_per_request_sampling_is_honored() -> None:
     _run(go())
 
 
-def _chat(**extra) -> dict:
+def _chat(**extra) -> dict[str, object]:
     return {"model": "tiny-qwen", "messages": [{"role": "user", "content": "hi"}], **extra}
 
 
@@ -650,7 +676,7 @@ def _chat(**extra) -> dict:
         (_chat(seed=2**64), 400),
     ],
 )
-def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
+def test_unsupported_fields_rejected(payload: dict[str, object], status: int) -> None:
     async def go() -> None:
         app = _build_app()
         async with app.router.lifespan_context(app), _client(app) as client:
@@ -674,7 +700,7 @@ def test_unsupported_fields_rejected(payload: dict, status: int) -> None:
         ),
     ],
 )
-def test_numeric_fields_reject_json_coercion(path: str, payload: dict) -> None:
+def test_numeric_fields_reject_json_coercion(path: str, payload: dict[str, object]) -> None:
     async def go() -> None:
         app = _build_app()
         async with app.router.lifespan_context(app), _client(app) as client:
@@ -741,9 +767,7 @@ def test_concurrent_requests_use_their_own_sampling() -> None:
             raw = ""
             async for piece in resp.aiter_text():
                 raw += piece
-        return "".join(
-            c["choices"][0]["delta"].get("content", "") for c in _parse_sse(raw) if c != "[DONE]"
-        )
+        return "".join(_delta_content(c) for c in _parse_sse(raw))
 
     async def go() -> None:
         # Greedy alone, as the reference.
@@ -806,7 +830,7 @@ def test_oversized_request_is_rejected_and_engine_survives() -> None:
         ("/v1/responses", {"model": "gpt-4o", "input": "hi", "max_output_tokens": 3}),
     ],
 )
-def test_unknown_model_is_404_not_a_silent_substitution(path: str, body: dict) -> None:
+def test_unknown_model_is_404_not_a_silent_substitution(path: str, body: dict[str, object]) -> None:
     """A model id this server does not serve is a 404 — never a 200 echoing a model we did not run.
 
     The server validates ``request.model`` against the one served id and reports what truly ran,

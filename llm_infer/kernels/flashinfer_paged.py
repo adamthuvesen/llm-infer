@@ -12,11 +12,16 @@ from __future__ import annotations
 import importlib
 import math
 from types import ModuleType
+from typing import cast
 
 import torch
 
 from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
-from llm_infer.kernels.flashinfer_graph import PlanCopyFence
+from llm_infer.kernels.flashinfer_graph import (
+    FlashInferDecodeWrapper,
+    FlashInferDecodeWrapperFactory,
+    PlanCopyFence,
+)
 from llm_infer.kv_cache.paged_kv_cache import KVPagePlan
 
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -35,12 +40,12 @@ class FlashInferPagedAttention:
         if workspace_bytes <= 0:
             raise ValueError(f"workspace_bytes must be positive; got {workspace_bytes}")
         self._packed = FlashAttnPagedAttention()
-        self._flashinfer = self._import_flashinfer()
+        self.flashinfer = self._import_flashinfer()
         self.workspace_bytes = workspace_bytes
         self.use_tensor_cores = use_tensor_cores
         self.backend = backend
         self._workspace: torch.Tensor | None = None
-        self._wrapper: object | None = None
+        self._wrapper: FlashInferDecodeWrapper | None = None
         self._plan_fence = PlanCopyFence()
         # The (batch, num_qo_heads, head_dim) the live wrapper plan was built for, or None
         # before the first plan. FlashInfer's wrapper holds shape-specific metadata, so a decode
@@ -134,14 +139,14 @@ class FlashInferPagedAttention:
             raise RuntimeError("FlashInfer returned an unexpected non-tensor decode result")
         return out.to(out_dtype)
 
-    def _ensure_wrapper(self, device: torch.device) -> object:
+    def _ensure_wrapper(self, device: torch.device) -> FlashInferDecodeWrapper:
         workspace = self._workspace
         wrapper = self._wrapper
         if workspace is not None and workspace.device == device and wrapper is not None:
             return wrapper
 
         workspace = torch.zeros(self.workspace_bytes, dtype=torch.uint8, device=device)
-        wrapper_cls = self._decode_wrapper_class(self._flashinfer)
+        wrapper_cls = self.decode_wrapper_class(self.flashinfer)
         wrapper = wrapper_cls(
             workspace,
             "NHD",
@@ -165,15 +170,15 @@ class FlashInferPagedAttention:
             ) from exc
 
     @staticmethod
-    def _decode_wrapper_class(flashinfer: ModuleType):
+    def decode_wrapper_class(flashinfer: ModuleType) -> FlashInferDecodeWrapperFactory:
         wrapper_cls = getattr(flashinfer, "BatchDecodeWithPagedKVCacheWrapper", None)
         if wrapper_cls is not None:
-            return wrapper_cls
+            return cast(FlashInferDecodeWrapperFactory, wrapper_cls)
         decode_module = getattr(flashinfer, "decode", None)
         if decode_module is not None:
             wrapper_cls = getattr(decode_module, "BatchDecodeWithPagedKVCacheWrapper", None)
             if wrapper_cls is not None:
-                return wrapper_cls
+                return cast(FlashInferDecodeWrapperFactory, wrapper_cls)
         raise RuntimeError("FlashInfer does not expose BatchDecodeWithPagedKVCacheWrapper")
 
 

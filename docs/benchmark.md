@@ -152,7 +152,7 @@ is not the headline, for the reasons above.
 ## Local Checks
 
 These commands do not rerun GPU benchmarks. They check the local code, the committed records, the
-public tables against those records, and figure regeneration:
+public tables against those records:
 
 ```bash
 make check
@@ -163,7 +163,11 @@ To rerun the GPU evidence on your own Modal account (each needs a local Esme bun
 `--bundle-path` or `ESME_BUNDLE_PATH`):
 
 ```bash
-modal run scripts/modal_esme_batch_curve.py --command ladder
 modal run scripts/modal_esme_vllm_baseline.py --command full
-modal run scripts/modal_esme_batch_curve.py --command curve
 ```
+
+The ladder and curve records came from `scripts/modal_esme_batch_curve.py` (`--command ladder`
+and `--command curve`). That script is archived at tag `archive/llm-infer-experiments-2026-11-11`.
+
+Each run spends money, so it refuses until you add `--approved`. The refusal prints the exact
+approved command.

@@ -36,14 +36,19 @@ from pathlib import Path
 
 import torch
 import transformers
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 # Make the prompt builder importable when run as a script from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llm_infer.model.config import MODEL_ID, MODEL_REVISION  # noqa: E402
-from tests.correctness.cases import GOLDEN_CASES  # noqa: E402
-from tests.correctness.prompt import build_cot_messages  # noqa: E402
+from llm_infer.model.config import MODEL_ID, MODEL_REVISION
+from tests.correctness.cases import GOLDEN_CASES
+from tests.correctness.prompt import build_cot_messages
 
 # Decoding config — pinned into the fixture so the reference check decodes identically.
 DTYPE = "float32"  # fp32: greedy tie-breaks near-vanish (see docs/fixture-format.md)
@@ -124,7 +129,7 @@ def main() -> None:
 
 
 def _hf_full_recompute_greedy(
-    model: object, prompt_ids: list[int], *, max_new_tokens: int, eos_token_ids: set[int]
+    model: PreTrainedModel, prompt_ids: list[int], *, max_new_tokens: int, eos_token_ids: set[int]
 ) -> list[int]:
     """HF greedy by full recompute: one forward over the whole sequence per step, argmax, append.
 
@@ -144,7 +149,7 @@ def _hf_full_recompute_greedy(
     return generated
 
 
-def _eos_ids(model: object, tokenizer: object) -> set[int]:
+def _eos_ids(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase) -> set[int]:
     """The generation-stopping ids HF greedy uses (config eos plus the tokenizer eos)."""
     ids: set[int] = set()
     cfg_eos = model.generation_config.eos_token_id
@@ -152,8 +157,9 @@ def _eos_ids(model: object, tokenizer: object) -> set[int]:
         ids.add(cfg_eos)
     elif cfg_eos is not None:
         ids.update(cfg_eos)
-    if tokenizer.eos_token_id is not None:
-        ids.add(tokenizer.eos_token_id)
+    tokenizer_eos = tokenizer.eos_token_id
+    if isinstance(tokenizer_eos, int):
+        ids.add(tokenizer_eos)
     return ids
 
 

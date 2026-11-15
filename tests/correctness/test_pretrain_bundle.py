@@ -29,6 +29,7 @@ from llm_infer.model.pretrain_bundle import (
     PretrainBundleError,
     PretrainBundleModel,
 )
+from tests.support.json_result import dig, dig_dict
 
 
 def _file_sha256(path: Path) -> str:
@@ -173,7 +174,7 @@ def test_loads_bundle_manifest_config_weights_and_tokenizer(tmp_path: Path) -> N
     assert manifest["llm_infer_config"] == weights["llm_infer_config"]
     assert weights["format"] == weights["key_format"] == BUNDLE_FORMAT
     assert len(manifest["source_checkpoint_sha256"]) == 64
-    assert weights["state_dict"]["lm_head.weight"] is not None
+    assert dig(weights, "state_dict", "lm_head.weight") is not None
     assert (bundle / "README.md").is_file()
     for name, entry in manifest["files"].items():
         assert _file_sha256(bundle / entry["path"]) == entry["sha256"], name
@@ -367,7 +368,7 @@ def test_rejects_manifest_model_config_mismatch(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(
-        PretrainBundleError, match="manifest.json model_config does not match config.json"
+        PretrainBundleError, match=r"manifest\.json model_config does not match config\.json"
     ):
         PretrainBundleModel.load(bundle)
 
@@ -375,13 +376,15 @@ def test_rejects_manifest_model_config_mismatch(tmp_path: Path) -> None:
 def test_rejects_weights_model_config_mismatch(tmp_path: Path) -> None:
     bundle = _write_tiny_bundle(tmp_path)
     weights = _weights_payload(bundle)
-    model_config = dict(weights["model_config"])
-    model_config["layers"] += 1
+    model_config = dict(dig_dict(weights, "model_config"))
+    layers = model_config["layers"]
+    assert isinstance(layers, int)
+    model_config["layers"] = layers + 1
     weights["model_config"] = model_config
     _write_weights(bundle, weights)
 
     with pytest.raises(
-        PretrainBundleError, match="weights.pt model_config does not match config.json"
+        PretrainBundleError, match=r"weights\.pt model_config does not match config\.json"
     ):
         PretrainBundleModel.load(bundle)
 
@@ -405,7 +408,7 @@ def test_rejects_malformed_weight_shapes(tmp_path: Path) -> None:
     weights["state_dict"] = state_dict
     _write_weights(bundle, weights)
 
-    with pytest.raises(PretrainBundleError, match="attention.wq"):
+    with pytest.raises(PretrainBundleError, match=r"attention\.wq"):
         PretrainBundleModel.load(bundle)
 
 

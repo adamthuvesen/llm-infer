@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Drive the real entry points on CPU. Usage: verify [all|list|control|<drive>...]
+
+The drive table, the control, and the repo's paths live in drives.py beside this file.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+import drives
+from drives import DRIVES, ROOT, SMOKE, DriveError
+
+DEAD_URL = "http://127.0.0.1:9"
+
+
+def child_env(scratch: Path) -> dict[str, str]:
+    dropped = ("GIT_", "MODAL_", "WANDB_", "HF_")
+    keep = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(dropped) and not any(m in k for m in drives.SECRET_MARKERS)
+    }
+    home = scratch / "home"
+    for sub in ["", ".cache", ".config", ".local/share"]:
+        (home / sub).mkdir(parents=True, exist_ok=True)
+    return keep | {
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "PATH": f"{scratch / 'tripwire'}{os.pathsep}{keep.get('PATH', '')}",
+        "TRIPWIRE_LOG": str(scratch / "tripwire.log"),
+        "HF_HOME": str(home / ".cache" / "hf"),
+        "HF_HUB_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_ENDPOINT": DEAD_URL,
+        "WANDB_MODE": "disabled",
+        "WANDB_DISABLED": "true",
+        "MODAL_SERVER_URL": DEAD_URL,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def git(*args: str) -> str:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    result = subprocess.run(["git", *args], cwd=ROOT, env=env, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
+
+
+def checkout_state() -> dict[str, str]:
+    """HEAD, branch, git config and hooks, and every changed, untracked, or ignored path.
+
+    Changed and untracked files compare by content; ignored files by size and mtime, because
+    .venv holds too many files to hash. `.verify/` and `__pycache__/` are the only allowed writes.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    status = ["git", "status", "--porcelain=v2", "--branch", "-z", "-uall", "--ignored"]
+    listing = subprocess.run(status, cwd=ROOT, env=env, capture_output=True, check=True).stdout
+    git_dir = (ROOT / git("rev-parse", "--git-common-dir")).resolve()
+    state = {".git/config": digest(git_dir / "config")}
+    state |= {f".git/hooks/{hook.name}": digest(hook) for hook in (git_dir / "hooks").glob("*")}
+    entries = iter(os.fsdecode(listing).split("\0"))
+    for entry in entries:
+        if entry.startswith("# branch.oid ") or entry.startswith("# branch.head "):
+            key, _, value = entry[2:].partition(" ")
+            state[key] = value
+            continue
+        if not entry or entry.startswith("#"):
+            continue
+        kind = entry[0]
+        fields = {"1": 8, "2": 9, "u": 10}.get(kind)
+        path = entry[2:] if fields is None else entry.split(" ", fields)[fields]
+        if kind == "2":
+            next(entries)
+        if path.startswith(".verify/") or "__pycache__" in path.split("/"):
+            continue
+        target = ROOT / path
+        if kind == "!":
+            if target.exists():
+                info = target.stat()
+                state[path] = f"ignored:{info.st_size}:{info.st_mtime_ns}"
+        else:
+            status_code = entry.split(" ", 2)[1] if fields else kind
+            state[path] = f"{status_code}:{digest(target)}"
+    return state
+
+
+def unique_run_dir(stem: str) -> Path:
+    runs = ROOT / ".verify" / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, 1000):
+        candidate = runs / (stem if attempt == 1 else f"{stem}-{attempt}")
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise OSError(f"no free run directory for {stem} under {runs}")
+
+
+def changed_drives() -> list[str]:
+    base = git("merge-base", "HEAD", "main") or git("merge-base", "HEAD", "origin/main")
+    files = set(git("diff", "--name-only", base).splitlines())
+    files |= {line[3:] for line in git("status", "--porcelain").splitlines()}
+
+    def hit(globs: list[str]) -> bool:
+        return any(fnmatch.fnmatch(f, g) for f in files for g in globs)
+
+    if hit(drives.SHARED):
+        return list(DRIVES)
+    return [name for name, drive in DRIVES.items() if hit(drive.paths)] or [SMOKE]
+
+
+def preflight(scratch: Path) -> None:
+    if not drives.PYTHON.exists():
+        sys.exit(f"preflight: {drives.PYTHON} missing. Run `{drives.INSTALL_HINT}` first.")
+    probe = f"import {drives.PACKAGE}; print({drives.PACKAGE}.__file__)"
+    origin = subprocess.run(
+        [str(drives.PYTHON), "-c", probe], capture_output=True, text=True, cwd=ROOT
+    ).stdout.strip()
+    if not origin.startswith(str(drives.PACKAGE_DIR)):
+        sys.exit(f"preflight: {drives.PACKAGE} imports from {origin!r}, not {drives.PACKAGE_DIR}")
+    tripwire = scratch / "tripwire"
+    tripwire.mkdir()
+    for tool in drives.TRIPWIRE_TOOLS:
+        stub = tripwire / tool
+        stub.write_text(f'#!/bin/sh\necho "{tool} $*" >> "$TRIPWIRE_LOG"\nexit 97\n')
+        stub.chmod(0o755)
+
+
+def run_drives(names: list[str], run_dir: Path, control: bool) -> list[dict[str, object]]:
+    scratch = Path(tempfile.mkdtemp(prefix="verify-"))
+    results: list[dict[str, object]] = []
+    try:
+        preflight(scratch)
+        env = child_env(scratch)
+        for name in names:
+            evidence = run_dir / name
+            evidence.mkdir()
+            start = time.monotonic()
+            drive = drives.CONTROL[1] if control else DRIVES[name].run
+            try:
+                note, status = drive(evidence, env), "PASS"
+            except DriveError as exc:
+                status, note = "FAIL", str(exc)
+            except (Exception, SystemExit) as exc:
+                status, note = "FAIL", f"drive crashed: {type(exc).__name__}: {exc}"
+            log = scratch / "tripwire.log"
+            if log.exists() and log.read_text():
+                status, note = "FAIL", f"tripwire fired: {log.read_text().strip()}"
+            seconds = round(time.monotonic() - start, 1)
+            results.append({"drive": name, "result": status, "seconds": seconds, "note": note})
+            print(f"{status} {name} {seconds}s {note}", flush=True)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return results
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["list"]:
+        for name, drive in DRIVES.items():
+            print(f"{name:14} {drive.proves}\n{'':14} paths: {', '.join(drive.paths)}")
+        return 0
+    control = argv[:1] == ["control"]
+    if control:
+        names = [drives.CONTROL[0]]
+    elif argv[:1] == ["all"]:
+        names = list(DRIVES)
+    else:
+        names = argv or changed_drives()
+    unknown = [n for n in names if n not in DRIVES]
+    if unknown:
+        print(f"unknown drive(s): {', '.join(unknown)}; see `verify list`", file=sys.stderr)
+        return 2
+    sha, dirty = git("rev-parse", "HEAD"), bool(git("status", "--porcelain"))
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    suffix = ("-dirty" if dirty else "") + ("-control" if control else "")
+    run_dir = unique_run_dir(f"{stamp}-{sha[:7]}{suffix}")
+    before = checkout_state()
+    results: list[dict[str, object]] = []
+    changed: list[str] = []
+    try:
+        results = run_drives(names, run_dir, control)
+    finally:
+        after = checkout_state()
+        changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+        if changed:
+            print(f"FAIL checkout changed during the run: {', '.join(changed)}", flush=True)
+        failed = bool(changed) or not results or any(r["result"] == "FAIL" for r in results)
+        summary = {
+            "sha": sha,
+            "dirty": dirty,
+            "control": control,
+            "result": "FAIL" if failed else "PASS",
+            "checkout_changed": changed,
+            "drives": results,
+        }
+        (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+        print(f"evidence: {run_dir}")
+    if control:
+        failures = [str(r["note"]) for r in results if r["result"] == "FAIL"]
+        if not changed and len(failures) == 1 and failures[0] == drives.CONTROL_FAILURE:
+            print("control: FAIL observed", file=sys.stderr)
+            return 0
+        if failures:
+            print(
+                f"control: failed for another reason; expected {drives.CONTROL_FAILURE!r}",
+                file=sys.stderr,
+            )
+        else:
+            print("control: expected FAIL, drive passed", file=sys.stderr)
+        return 1
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

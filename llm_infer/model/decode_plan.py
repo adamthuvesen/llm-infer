@@ -24,6 +24,7 @@ batch and drops it at the flush, so batch-composition changes never invalidate l
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -237,7 +238,7 @@ def build_decode_window_plan(
     # copies blocking.
     non_blocking = device.type == "cuda"
 
-    def upload(values: list, dtype: torch.dtype) -> torch.Tensor:
+    def upload(values: Sequence[int | Sequence[int]], dtype: torch.dtype) -> torch.Tensor:
         # Build on the host, then upload: `torch.tensor(..., device=cuda)` ends in a blocking
         # stream sync, which at window open would stall the CPU behind the previous window's
         # queued GPU work (the GPU probe flagged exactly these five uploads).

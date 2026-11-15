@@ -24,6 +24,7 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -43,13 +44,13 @@ app = modal.App("llm-infer-esme-fused-startup")
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
-def _child(arm: str) -> dict:
+def _child(arm: str) -> dict[str, object]:
     """Cold server start and first requests, in this fresh process."""
     import torch
     from fastapi.testclient import TestClient
 
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serve import build_app_from_runtime
+    from llm_infer.serve_runtime import build_app_from_runtime
 
     load_start = time.perf_counter()
     runtime = load_model_runtime(
@@ -60,7 +61,7 @@ def _child(arm: str) -> dict:
     app_ = build_app_from_runtime(runtime, device="cuda", fused_elementwise=arm == "fused")
     torch.cuda.synchronize()
     build_s = time.perf_counter() - build_start
-    requests: list[dict] = []
+    requests: list[dict[str, object]] = []
     with TestClient(app_) as client:
         model_id = client.get("/v1/models").json()["data"][0]["id"]
         for words in PROMPT_WORDS:
@@ -96,7 +97,8 @@ def _child(arm: str) -> dict:
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=45 * 60,
 )
-def fused_startup() -> str:
+def fused_startup(approved: bool = False) -> str:
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -104,7 +106,7 @@ def fused_startup() -> str:
     stall_guard.arm(limit_s=20 * 60)
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     esme_bundles.reload()
-    runs: list[dict] = []
+    runs: list[dict[str, object]] = []
     for repeat in range(REPEATS):
         for arm in ARMS if repeat % 2 == 0 else ARMS[::-1]:
             with tempfile.TemporaryDirectory(prefix=f"fused-startup-{arm}-") as cache:
@@ -145,9 +147,10 @@ def fused_startup() -> str:
 
 
 @app.local_entrypoint()
-def main(bundle_path: str = "") -> None:
+def main(bundle_path: str = "", approved: bool = False) -> None:
+    require_spend_approval(approved, __file__, bundle_path=bundle_path)
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="fused-startup")
-    record = json.loads(fused_startup.remote())
+    record = json.loads(fused_startup.remote(approved=True))
     record["config"] = {
         "model": "Esme-214M-Chat",
         "arms": list(ARMS),

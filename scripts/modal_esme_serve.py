@@ -4,7 +4,7 @@ The same HTTP app as ``python -m llm_infer.serve``, launched on GPU instead of t
 CPU — which backend the chat UI talks to is purely a matter of how you start it:
 
     uv run python -m llm_infer.serve --bundle <path>     # local CPU, fp16 + torch_sdpa
-    modal serve scripts/modal_esme_serve.py              # A100, bf16 FlashInfer + graphs
+    modal serve scripts/modal_esme_serve.py              # A100; refuses until approved
 
 ``modal serve`` prints a temporary ``*.modal.run`` URL (hot-reloads while running;
 Ctrl-C tears it down). ``modal deploy`` keeps a persistent URL instead. Either way the
@@ -23,10 +23,20 @@ holds no GPU.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import modal
 
+from scripts.modal_approval import require_serve_approval
 from scripts.modal_esme_bundle import ESME_BUNDLE_MOUNT, REMOTE_BUNDLE_PATH, VOLUME_NAME
 from scripts.modal_flash_image import FLASH_IMAGE
+
+# The container imports this module too, without the approval variable; only a local
+# ``modal serve`` or ``modal deploy`` starts paid hardware.
+if modal.is_local():
+    _cli = ["modal", *sys.argv[1:]] if Path(sys.argv[0]).name == "modal" else []
+    require_serve_approval(" ".join(_cli) or "modal deploy scripts/modal_esme_serve.py")
 
 # One engine serves every request through continuous batching, so one container with many
 # concurrent inputs is the right shape; a second container would mean a second model copy
@@ -49,12 +59,10 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 @modal.concurrent(max_inputs=MAX_CONCURRENT_REQUESTS)
 @modal.asgi_app()
 def serve():
-    from pathlib import Path
-
     import torch
 
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serve import build_app_from_runtime
+    from llm_infer.serve_runtime import build_app_from_runtime
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     runtime = load_model_runtime(

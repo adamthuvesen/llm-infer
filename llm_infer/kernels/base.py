@@ -13,6 +13,7 @@ against ``torch_naive`` by the reference check, not a rewrite of the model forwa
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import torch
@@ -218,7 +219,7 @@ def packed_prefill_lengths(
             "packed prefill final offset must equal the token count; "
             f"got {offsets[-1]} and {total_tokens}"
         )
-    lengths = [end - start for start, end in zip(offsets, offsets[1:], strict=False)]
+    lengths = [end - start for start, end in pairwise(offsets)]
     if any(length <= 0 for length in lengths):
         raise ValueError(
             "packed prefill sequence lengths must be positive and offsets strictly increasing; "

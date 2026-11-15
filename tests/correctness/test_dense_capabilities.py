@@ -8,8 +8,10 @@ served output still matches the per-sequence ``PretrainBundleModel.logits()`` re
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import torch
 
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle as _write_tiny_bundle
@@ -18,6 +20,7 @@ from llm_infer.model.interface import DENSE_CAPABILITIES, QWEN_CAPABILITIES
 from llm_infer.model.pretrain_bundle import PretrainBundleModel
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
+from tests.support.tiny_qwen import tiny_qwen
 
 
 def test_logit_soft_cap_changes_logits(tmp_path: Path) -> None:
@@ -40,6 +43,16 @@ def test_dense_advertises_paged_kv_capabilities() -> None:
     # ...plus the planned decode window, which only the bundle model implements.
     assert DENSE_CAPABILITIES.planned_decode is True
     assert QWEN_CAPABILITIES.planned_decode is False
+
+
+def test_planned_decode_capability_requires_window_methods() -> None:
+    with pytest.raises(ValueError, match="planned_decode capability requires"):
+        InferenceEngine(
+            tiny_qwen(),
+            block_size=4,
+            num_blocks=8,
+            capabilities=replace(QWEN_CAPABILITIES, planned_decode=True),
+        )
 
 
 def test_dense_accepts_prefix_group_id(tmp_path: Path) -> None:

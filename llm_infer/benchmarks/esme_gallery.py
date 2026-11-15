@@ -26,15 +26,19 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
+from itertools import pairwise
+from typing import TypedDict
 
 import torch
 
-from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, _time, reference_outputs
-from llm_infer.benchmarks.esme_three_way import EsmeAgreement, tie_tolerant_agreement
+from llm_infer.benchmarks.esme_paged import EsmeBenchRequest, reference_outputs, time_call
+from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from llm_infer.benchmarks.reference_policy import (
     QUALIFIED_REFERENCE_STATUSES,
-    build_reference_only_record,
-    build_system_evidence_record,
+    EsmeAgreement,
+    ReferenceEvidence,
+    SystemEvidence,
     reference_status,
 )
 from llm_infer.model.runtime import ModelRuntime
@@ -54,27 +58,31 @@ class GalleryTiming:
 
     @property
     def tokens_per_second(self) -> float | None:
-        if not self.agreement.all_ties_or_exact or self.median_seconds <= 0:
-            return None
-        return self.total_output_tokens / self.median_seconds
+        return SystemEvidence.from_timing(
+            agreement=self.agreement,
+            median_seconds=self.median_seconds,
+            total_tokens=self.total_output_tokens,
+        ).tokens_per_second
 
     @property
     def raw_tokens_per_second(self) -> float | None:
-        if self.median_seconds <= 0:
-            return None
-        return self.total_output_tokens / self.median_seconds
+        return SystemEvidence.from_timing(
+            agreement=self.agreement,
+            median_seconds=self.median_seconds,
+            total_tokens=self.total_output_tokens,
+        ).raw_tokens_per_second
 
     def as_dict(self) -> dict[str, object]:
         return {
             "label": self.label,
             "median_seconds": self.median_seconds,
             "total_output_tokens": self.total_output_tokens,
-            "agreement": _agreement_dict(self.agreement),
-            **build_system_evidence_record(
+            "agreement": self.agreement.as_dict(),
+            **SystemEvidence.from_timing(
                 agreement=self.agreement,
                 median_seconds=self.median_seconds,
                 total_tokens=self.total_output_tokens,
-            ),
+            ).as_dict(),
         }
 
 
@@ -89,20 +97,6 @@ def _relative_speedup(
         and raw > 0
     )
     return eligible, raw, raw if eligible else None
-
-
-def _agreement_dict(agreement: EsmeAgreement) -> dict[str, object]:
-    return {
-        "exact": agreement.exact,
-        "tie": agreement.tie,
-        "nontie": agreement.nontie,
-        "total": agreement.total,
-        "ties_sample": agreement.ties_sample,
-        "divergences_sample": agreement.divergences_sample,
-        "review_required": agreement.review_required,
-        "failed": agreement.failed,
-        "numerical_evidence": agreement.numerical_evidence,
-    }
 
 
 def _bench_requests(prompts: Sequence[Sequence[int]], prefix: str) -> list[EsmeBenchRequest]:
@@ -174,8 +168,8 @@ def run_prefix_cache_on_off(
 
     timings: list[GalleryTiming] = []
     for label, group in (("prefix caching on", "gallery-shared"), ("prefix caching off", None)):
-        median_s, outputs = _time(
-            lambda g=group: run_once(g), warmup=warmup, iters=iters, sync=sync
+        median_s, outputs = time_call(
+            partial(run_once, group), warmup=warmup, iters=iters, sync=sync
         )
         agreement, tokens = _gate(oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens)
         timings.append(GalleryTiming(label, median_s, tokens, agreement))
@@ -196,6 +190,16 @@ def run_prefix_cache_on_off(
         "raw_wall_speedup_on_vs_off": raw_speedup,
         "wall_speedup_on_vs_off": public_speedup,
     }
+
+
+class ChunkedPrefillRun(TypedDict):
+    prefill_chunk_size: int | None
+    max_prefill_tokens_in_one_step: int
+    pre_arrival_step_p50_s: float
+    post_arrival_max_gap_s: float
+    long_prompts_done_after_s: float
+    total_wall_s: float
+    outputs: dict[str, list[int]]
 
 
 def run_chunked_prefill_latency(
@@ -224,7 +228,7 @@ def run_chunked_prefill_latency(
     eos = engine_runtime.eos_token_ids
     sync = device == "cuda"
 
-    def run_once(chunk: int | None) -> dict[str, object]:
+    def run_once(chunk: int | None) -> ChunkedPrefillRun:
         engine = InferenceEngine(
             engine_runtime.model,
             block_size=block_size,
@@ -274,7 +278,7 @@ def run_chunked_prefill_latency(
         post_arrival_gaps: list[float] = []
         for req in active_requests:
             times = token_times.get(req.request_id, [])
-            for left, right in zip(times, times[1:], strict=False):
+            for left, right in pairwise(times):
                 gap = right - left
                 (post_arrival_gaps if right > arrival_s else pre_arrival_gaps).append(gap)
         if not pre_arrival_gaps or not post_arrival_gaps:
@@ -298,7 +302,7 @@ def run_chunked_prefill_latency(
     rows: list[dict[str, object]] = []
     for label, chunk in configs:
         run = run_once(chunk)
-        outputs = run.pop("outputs")
+        outputs = run["outputs"]
         max_new_by_id = {
             **{r.request_id: active_max_new_tokens for r in active_requests},
             **{r.request_id: long_max_new_tokens for r in long_requests},
@@ -308,10 +312,10 @@ def run_chunked_prefill_latency(
         rows.append(
             {
                 "label": label,
-                **run,
+                **{key: value for key, value in run.items() if key != "outputs"},
                 "stall_vs_pre_arrival_step": stall,
-                "agreement": _agreement_dict(agreement),
-                **build_reference_only_record(agreement),
+                "agreement": agreement.as_dict(),
+                **ReferenceEvidence(agreement).as_dict(),
             }
         )
     return {
@@ -384,8 +388,8 @@ def run_preemption_starved_pool(
                 "wall_s": wall_s,
                 "completed_requests": len(outputs),
                 "total_output_tokens": tokens,
-                "agreement": _agreement_dict(agreement),
-                **build_reference_only_record(agreement),
+                "agreement": agreement.as_dict(),
+                **ReferenceEvidence(agreement).as_dict(),
             }
         )
     if preemption_count_on == 0:
@@ -438,8 +442,8 @@ def run_speculative_batch1(
 
     timings: list[GalleryTiming] = []
     for label, config in (("speculative on", speculative), ("speculative off", None)):
-        median_s, outputs = _time(
-            lambda c=config: run_once(c), warmup=warmup, iters=iters, sync=sync
+        median_s, outputs = time_call(
+            partial(run_once, config), warmup=warmup, iters=iters, sync=sync
         )
         agreement, tokens = _gate(oracle_runtime, requests, outputs, max_new_tokens=max_new_tokens)
         timings.append(GalleryTiming(label, median_s, tokens, agreement))

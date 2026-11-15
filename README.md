@@ -54,8 +54,8 @@ is ignored.
 ## Results
 
 A system reports tok/s only after its tokens match the fp32 `PretrainBundleModel.logits()`
-reference, with traced numerical ties the only allowed difference. Every number below comes from
-a committed record and passed that gate.
+reference. Numerical differences require the acceptance policy described in
+[scoping.md](docs/scoping.md). Every number below comes from a committed record and passed that gate.
 
 **Against batched HuggingFace.** `2026-10-25`, one A100-SXM4-80GB container, chat prompts, up to
 256 new tokens, real EOS, greedy, median of 5 runs:
@@ -93,14 +93,14 @@ requests by default. Pass `--decode-graph-buckets` to serve larger batches from 
 ## How the Claims Are Checked
 
 - **Reference before speed.** The fp32 full-recompute oracle defines correct output. bf16 may pick
-  a different token only at a near-tie, where the fp32 top-two margin is under 0.1 logits
-  ([scoping.md](docs/scoping.md), [findings entry 20](docs/findings.md)).
+  a different token at a near-tie under the 0.1-logit automatic boundary. Larger differences
+  require a recorded review ([scoping.md](docs/scoping.md), [findings entry 20](docs/findings.md)).
 - **Same-container A/Bs.** Identical code moves about ±20% between containers, so both arms of an
   A/B run in one container in alternating order, and ratios never cross containers.
 - **Predictions before the run.** Recent experiments commit their predictions and decision rule
   first. `scripts/judge_paired_ab.py` applies the rule to records from two containers.
-- **Reproducible without a GPU.** `make reproduce` checks the committed records against these
-  tables, regenerates the figures, and requires each registered A/B to give its documented
+- **Reproducible without a GPU.** `make evidence-check` checks the committed records against these
+  tables, and requires each registered A/B to give its documented
   verdict.
 
 The [research log](docs/findings.md) has every experiment's question, method, result, and
@@ -135,6 +135,7 @@ that streams 8 or 16 concurrent prompts and compares concurrent against sequenti
 base-URL field can point at a remote deployment.
 
 To serve from a GPU on your own Modal account, run `modal deploy scripts/modal_esme_serve.py`.
+It spends money, so it refuses and prints the approved command.
 It scales to zero and enables CORS, so a locally served bench page can point at it. The Modal
 scripts find the bundle through `--bundle-path`, then `ESME_BUNDLE_PATH`, then the sibling
 checkout `../esme-posttrain/exports/esme-214m-chat`.
@@ -149,16 +150,14 @@ checkout `../esme-posttrain/exports/esme-214m-chat`.
 
 ## Development
 
+Use Python 3.13, `uv`, and Node 24. CI uses the same `make check` command.
+
 ```bash
 uv sync --extra dev --extra serving
 make check
 ```
 
-`make check` runs lint, format check, types, and the CPU test suite. The slow 3B Qwen reference
-checks are opt-in: `uv run pytest tests/correctness -q -m slow`. `make reproduce` re-derives the
-committed benchmark verdicts without a GPU. GPU benchmarks run on Modal A100s through the
-`scripts/modal_esme_*` harnesses. Findings entries 12 onward name the command that produced
-their record.
+[AGENTS.md](AGENTS.md#commands) lists every check and command.
 
 ## Documentation
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 
 from llm_infer.model.decode import greedy_decode
-from llm_infer.model.interface import CausalLMBackend
+from llm_infer.model.interface import CausalLMBackend, TokenizerLike
 
 
 @dataclass(frozen=True)
@@ -18,32 +18,6 @@ class EsmeBenchRequest:
     request_id: str
     prompt: str
     prompt_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class SystemTiming:
-    """One system's measured result: tokens, wall-clock, and whether it matched the reference."""
-
-    system: str
-    mode: str
-    matches_reference: bool
-    median_seconds: float
-    total_output_tokens: int
-    outputs: dict[str, list[int]]
-
-    @property
-    def tokens_per_second(self) -> float | None:
-        """tok/s only when the system matched the reference and produced positive wall-clock."""
-        if not self.matches_reference or self.median_seconds <= 0:
-            return None
-        return self.total_output_tokens / self.median_seconds
-
-    @property
-    def raw_tokens_per_second(self) -> float | None:
-        """Measured tok/s regardless of whether the row is fit for a public claim."""
-        if self.median_seconds <= 0:
-            return None
-        return self.total_output_tokens / self.median_seconds
 
 
 DEFAULT_PROMPTS = (
@@ -69,7 +43,7 @@ HEADLINE_PROMPTS = (
 
 
 def build_requests(
-    tokenizer: object, num_requests: int, prompts: tuple[str, ...] = DEFAULT_PROMPTS
+    tokenizer: TokenizerLike, num_requests: int, prompts: tuple[str, ...] = DEFAULT_PROMPTS
 ) -> list[EsmeBenchRequest]:
     """Render ``num_requests`` chat prompts to token ids, cycling the prompt pool."""
     if num_requests < 1:
@@ -115,20 +89,35 @@ def requests_at_context_length(
     return resized
 
 
-def single_request_prompt_coverage(
-    tokenizer: object,
-    context_lengths: tuple[int, ...],
-    prompts: tuple[str, ...] = HEADLINE_PROMPTS,
-) -> list[tuple[int, EsmeBenchRequest]]:
-    """Build every prompt as its own request at every synthetic context length."""
-    if not context_lengths:
-        raise ValueError("context_lengths must not be empty")
-    base_requests = build_requests(tokenizer, len(prompts), prompts)
-    return [
-        (context_length, request)
-        for context_length in context_lengths
-        for request in requests_at_context_length(base_requests, context_length)
-    ]
+class ReferenceOutputCache:
+    """Greedy outputs cached for one oracle, EOS policy, and token budget."""
+
+    def __init__(
+        self,
+        model: CausalLMBackend,
+        *,
+        max_new_tokens: int,
+        eos_token_ids: frozenset[int],
+    ) -> None:
+        self._model = model
+        self._max_new_tokens = max_new_tokens
+        self._eos_token_ids = eos_token_ids
+        self._by_prompt: dict[tuple[int, ...], tuple[int, ...]] = {}
+
+    def __call__(self, requests: list[EsmeBenchRequest]) -> dict[str, list[int]]:
+        for request in requests:
+            if request.prompt_ids not in self._by_prompt:
+                self._by_prompt[request.prompt_ids] = tuple(
+                    greedy_decode(
+                        self._model,
+                        list(request.prompt_ids),
+                        max_new_tokens=self._max_new_tokens,
+                        eos_token_ids=set(self._eos_token_ids),
+                    )
+                )
+        return {
+            request.request_id: list(self._by_prompt[request.prompt_ids]) for request in requests
+        }
 
 
 def reference_outputs(
@@ -138,41 +127,46 @@ def reference_outputs(
     max_new_tokens: int,
     eos_token_ids: frozenset[int],
 ) -> dict[str, list[int]]:
-    """fp32-class reference: direct ``PretrainBundleModel.logits()`` greedy decode per request.
-
-    Benchmark workloads cycle a small prompt pool, so large batches repeat prompts; greedy
-    oracle outputs are identical per prompt and are computed once per unique prompt.
-    """
-    by_prompt: dict[tuple[int, ...], list[int]] = {}
-    for req in requests:
-        if req.prompt_ids not in by_prompt:
-            by_prompt[req.prompt_ids] = greedy_decode(
-                model,
-                list(req.prompt_ids),
-                max_new_tokens=max_new_tokens,
-                eos_token_ids=set(eos_token_ids),
-            )
-    return {req.request_id: list(by_prompt[req.prompt_ids]) for req in requests}
+    """Compute each unique prompt once against the full-recompute greedy oracle."""
+    return ReferenceOutputCache(model, max_new_tokens=max_new_tokens, eos_token_ids=eos_token_ids)(
+        requests
+    )
 
 
-def _time(
+def measure_repeated(
+    decode_once: Callable[[], dict[str, list[int]]],
+    *,
+    warmup: int,
+    iters: int,
+    synchronize: Callable[[], None],
+) -> tuple[list[float], dict[str, list[int]]]:
+    """Keep every duration, synchronizing before and after each measured decode."""
+    if warmup < 0 or iters < 1:
+        raise ValueError(f"warmup must be >= 0 and iters >= 1; got {warmup=} and {iters=}")
+    for _ in range(warmup):
+        decode_once()
+        synchronize()
+    per_iter: list[float] = []
+    outputs: dict[str, list[int]] = {}
+    for _ in range(iters):
+        synchronize()
+        start = time.perf_counter()
+        outputs = decode_once()
+        synchronize()
+        per_iter.append(time.perf_counter() - start)
+    return per_iter, outputs
+
+
+def time_call(
     decode_once: Callable[[], dict[str, list[int]]], *, warmup: int, iters: int, sync: bool
 ) -> tuple[float, dict[str, list[int]]]:
-    """Run ``decode_once`` ``warmup`` times un-measured, then ``iters`` measured; median wall."""
+    """Run warmups, then return the median measured duration and final outputs."""
 
     def maybe_sync() -> None:
         if sync and torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    for _ in range(warmup):
-        decode_once()
-        maybe_sync()
-    per_iter: list[float] = []
-    outputs: dict[str, list[int]] = {}
-    for _ in range(iters):
-        maybe_sync()
-        start = time.perf_counter()
-        outputs = decode_once()
-        maybe_sync()
-        per_iter.append(time.perf_counter() - start)
+    per_iter, outputs = measure_repeated(
+        decode_once, warmup=warmup, iters=iters, synchronize=maybe_sync
+    )
     return statistics.median(per_iter), outputs

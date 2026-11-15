@@ -24,6 +24,7 @@ from llm_infer.fixtures import QWEN_COT_GOLDEN
 from llm_infer.model.qwen import QwenModel
 from llm_infer.serving import InferenceEngine, Request
 from llm_infer.validation.tie_tolerance import DEFAULT_TIE_TOLERANCE, compare_under_tie_tolerance
+from tests.support.golden_fixture import GoldenCase
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="flash-attn requires CUDA; run on the target GPU"
@@ -57,7 +58,7 @@ def _run_flash(model: QwenModel, prompt_ids: list[int], max_new_tokens: int) -> 
 
 
 def _run_flash_batch(
-    model: QwenModel, cases: list[dict], max_new_tokens: int
+    model: QwenModel, cases: list[GoldenCase], max_new_tokens: int
 ) -> dict[str, list[int]]:
     """Greedy-generate several requests together through ONE paged engine (fused ragged decode)."""
     engine = InferenceEngine(model, block_size=128, num_blocks=64, device="cuda")
@@ -69,7 +70,7 @@ def _run_flash_batch(
 @pytest.mark.slow
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["case_id"])
 def test_flash_decode_matches_golden_under_tie_tolerance(
-    flash_model: QwenModel, reference_model: QwenModel, case: dict
+    flash_model: QwenModel, reference_model: QwenModel, case: GoldenCase
 ) -> None:
     """flash-attn paged decode == golden, except at genuine ties traced to the reference."""
     out = _run_flash(flash_model, case["prompt_ids"], MAX_NEW)

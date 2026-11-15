@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from scripts.generate_esme_kv_trace import FIXTURE_PATH, build_trace_jsonl
+from tests.support.json_result import dig_number
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -64,6 +65,20 @@ def test_esme_trace_is_a_real_engine_run_with_preemption() -> None:
         assert event["preempt_reason"] == "kv_pressure"
 
 
+def _ints(event: dict[str, object], key: str) -> list[int]:
+    values = event.get(key, [])
+    assert isinstance(values, list)
+    assert all(isinstance(value, int) for value in values)
+    return values
+
+
+def _strs(event: dict[str, object], key: str) -> list[str]:
+    values = event.get(key, [])
+    assert isinstance(values, list)
+    assert all(isinstance(value, str) for value in values)
+    return values
+
+
 def test_esme_trace_models_shared_prefix_ownership() -> None:
     """The shared prompt block leaves the pool once and returns after its final owner finishes."""
     events = _events()
@@ -78,28 +93,28 @@ def test_esme_trace_models_shared_prefix_ownership() -> None:
     allocations = [event for event in events if event["event"] == "block_allocated"]
     frees = [event for event in events if event["event"] == "block_freed"]
     leader_allocation = next(event for event in allocations if event["request_id"] == "esme-a")
-    shared_block = leader_allocation["block_ids"][0]
+    shared_block = _ints(leader_allocation, "block_ids")[0]
 
-    shared_frees = [event for event in frees if shared_block in event["block_ids"]]
+    shared_frees = [event for event in frees if shared_block in _ints(event, "block_ids")]
     first_shared_free = shared_frees[0]
     assert first_shared_free["request_id"] == "esme-b"
     # Retaining the leader's prompt block for its sibling emits no second allocation while that
     # ownership is live. The physical id may be reused after it returns to the pool.
     assert (
         sum(
-            shared_block in event["block_ids"]
+            shared_block in _ints(event, "block_ids")
             for event in allocations
-            if event["sequence"] < first_shared_free["sequence"]
+            if dig_number(event, "sequence") < dig_number(first_shared_free, "sequence")
         )
         == 1
     )
 
     sibling_finishes = [
-        event["sequence"]
+        dig_number(event, "sequence")
         for event in events
         if event["event"] == "request_finished" and event["request_id"] in {"esme-a", "esme-b"}
     ]
-    assert first_shared_free["sequence"] > max(sibling_finishes)
+    assert dig_number(first_shared_free, "sequence") > max(sibling_finishes)
 
 
 def test_esme_trace_decode_tokens_match_finish_tokens() -> None:
@@ -109,8 +124,8 @@ def test_esme_trace_decode_tokens_match_finish_tokens() -> None:
     for event in events:
         if event["event"] != "decode_step":
             continue
-        request_ids = event.get("request_ids", [])
-        token_ids = event.get("token_ids", [])
+        request_ids = _strs(event, "request_ids")
+        token_ids = _ints(event, "token_ids")
         if len(request_ids) == 1:
             decoded.setdefault(request_ids[0], []).extend(token_ids)
             continue

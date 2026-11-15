@@ -20,16 +20,23 @@ from pathlib import Path
 
 import modal
 
+from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
     VOLUME_NAME,
+    check_requests,
+    check_size,
+    engine_outputs,
     local_bundle_path,
     stage_bundle,
 )
+from scripts.modal_image_pins import UV_VERSION, locked
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_ROOT = "/root/llm-infer"
+LOCAL_PYTHON = (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip()
 CUDA_IMAGE = "nvidia/cuda:13.0.3-devel-ubuntu22.04"
 
 app = modal.App("llm-infer-esme-reference-check")
@@ -46,12 +53,14 @@ _IGNORE = [
 ]
 
 image = (
-    modal.Image.from_registry(CUDA_IMAGE, add_python="3.13")
-    # Same torch as pyproject.toml and the flash image; --no-deps below cannot correct it later.
-    .pip_install("torch==2.8.0", "transformers>=4.43", "numpy>=1.26")
+    modal.Image.from_registry(CUDA_IMAGE, add_python=LOCAL_PYTHON)
+    # The locked torch, as in pyproject.toml and the flash image; --no-deps below cannot correct it.
+    .uv_pip_install(
+        f"uv=={UV_VERSION}", *locked("torch", "transformers", "numpy"), uv_version=UV_VERSION
+    )
     .add_local_dir(REPO_ROOT, remote_path=REMOTE_ROOT, copy=True, ignore=_IGNORE)
     .workdir(REMOTE_ROOT)
-    .run_commands("pip install --no-deps -e .")
+    .run_commands("uv pip install --system --no-deps -e .")
 )
 
 esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -63,16 +72,17 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
-def check_esme(num_requests: int, max_new_tokens: int) -> str:
+def check_esme(num_requests: int, max_new_tokens: int, approved: bool = False) -> str:
     """Fail if engine generation diverges from direct bundle-logits greedy decode."""
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import normalize_at_eos
     from llm_infer.model.decode import greedy_decode
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     runtime = load_model_runtime(
         "esme",
         bundle_path=Path(REMOTE_BUNDLE_PATH),
@@ -86,23 +96,7 @@ def check_esme(num_requests: int, max_new_tokens: int) -> str:
     if runtime.eos_token_ids != frozenset({2}):
         raise AssertionError(f"expected EOS [2], got {sorted(runtime.eos_token_ids)}")
 
-    prompts = (
-        "Write a tiny Python function that doubles an integer.",
-        "Explain KV caching in one short sentence.",
-        "Give one SQL query that counts rows in a table named events.",
-        "Name two practical checks before trusting a benchmark.",
-    )
-    requests: list[tuple[str, tuple[int, ...]]] = []
-    for index in range(num_requests):
-        tokenized = runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompts[index % len(prompts)]}],
-            add_generation_prompt=True,
-            tokenize=True,
-        )
-        if not isinstance(tokenized, list) or not tokenized:
-            raise ValueError(f"Esme tokenizer returned invalid prompt ids for request {index}")
-        requests.append((f"esme-{index:03d}", tuple(int(token_id) for token_id in tokenized)))
-
+    requests = check_requests(runtime, num_requests)
     reference = {
         request_id: greedy_decode(
             runtime.model,
@@ -112,18 +106,8 @@ def check_esme(num_requests: int, max_new_tokens: int) -> str:
         )
         for request_id, prompt_ids in requests
     }
-    engine = InferenceEngine(
-        runtime.model,
-        block_size=128,
-        num_blocks=len(requests) + 8,
-        device="cuda",
-        capabilities=runtime.capabilities,
-    )
-    for request_id, prompt_ids in requests:
-        engine.add_request(
-            Request(request_id, list(prompt_ids), max_new_tokens, runtime.eos_token_ids)
-        )
-    outputs = engine.run()
+    stall_guard.progress()
+    outputs = engine_outputs(runtime, requests, max_new_tokens)
     missing = sorted(set(reference) - set(outputs))
     extra = sorted(set(outputs) - set(reference))
     mismatches = [{"request": request_id, "detail": "missing output"} for request_id in missing]
@@ -146,17 +130,13 @@ def check_esme(num_requests: int, max_new_tokens: int) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "smoke", bundle_path: str = "") -> None:
+def main(command: str = "smoke", bundle_path: str = "", approved: bool = False) -> None:
     """Run the cheap smoke or fuller Esme reference check on the A100.
 
     smoke:   modal run scripts/modal_esme_reference_check.py --command smoke
     check:   modal run scripts/modal_esme_reference_check.py --command check
     """
-    if command == "smoke":
-        num_requests, max_new_tokens = 2, 8
-    elif command == "check":
-        num_requests, max_new_tokens = 8, 64
-    else:
-        raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
+    num_requests, max_new_tokens = check_size(command)
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="esme-reference")
-    print(check_esme.remote(num_requests, max_new_tokens))
+    print(check_esme.remote(num_requests, max_new_tokens, approved=True))

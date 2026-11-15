@@ -33,12 +33,11 @@ from llm_infer.benchmarks.report import normalize_at_eos
 from llm_infer.model.decode import greedy_decode
 from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
 from llm_infer.model.grouped_decode_graph import DEFAULT_GROUPED_CAPTURE_SIZES
-from llm_infer.model.interface import ModelRuntime
-from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, load_model_runtime
-from llm_infer.serve import BUNDLE_BACKENDS
+from llm_infer.model.interface import ModelRuntime, TokenizerLike
+from llm_infer.model.runtime import ATTENTION_BACKEND_CHOICES, BUNDLE_BACKENDS, load_model_runtime
+from llm_infer.request.request import Request
+from llm_infer.request.sampling import GREEDY, SamplingParams
 from llm_infer.serving.engine import InferenceEngine, StepResult
-from llm_infer.serving.request import Request
-from llm_infer.serving.sampler import GREEDY, SamplingParams
 from llm_infer.serving.server import AsyncInferenceEngine, ServerMetrics, create_app
 from llm_infer.serving.speculative import SpeculativeDecodingConfig
 from llm_infer.tracing import TraceRecorder
@@ -148,7 +147,7 @@ class StepObserver:
     ) -> None:
         with self._lock:
             for request_id in result.admitted:
-                request = engine._requests[request_id]
+                request = engine._requests[request_id]  # pyright: ignore[reportPrivateUsage] -- diagnostic read of engine state
                 sampling = _effective_sampling(engine, request)
                 signature = RequestSignature.from_parts(
                     request.prompt_ids, request.max_new_tokens, sampling
@@ -620,7 +619,7 @@ async def run_engine_workload(
                 token_times_s=token_times_s,
                 finish_reason=finish_reason,
             )
-        except Exception as exc:  # noqa: BLE001 - one bad request is an eval record, not a crash.
+        except Exception as exc:
             return ClientRequestResult(
                 request_id=spec.request_id,
                 status="error",
@@ -802,7 +801,8 @@ async def run_network_http_workload(
             access_log=False,
         )
     )
-    server.install_signal_handlers = lambda: None
+    # Uvicorn runs inside this event loop and must not install its own signal handlers.
+    server.install_signal_handlers = lambda: None  # pyright: ignore[reportAttributeAccessIssue]  # uvicorn types the method as a def
     server_started_s = time.perf_counter()
     server_task = asyncio.create_task(server.serve())
     try:
@@ -820,6 +820,7 @@ async def run_network_http_workload(
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}",
             timeout=timeout,
+            trust_env=False,
             limits=httpx.Limits(
                 max_connections=connection_limit,
                 max_keepalive_connections=connection_limit,
@@ -1163,12 +1164,12 @@ def _workload_result(
     )
     throughput = output_tokens / wall_s if speed_status == "reported" and wall_s > 0 else None
     observed_rate = output_tokens / wall_s if output_tokens > 0 and wall_s > 0 else None
+    reference_details = reference["details"]
     reference_policy_status = (
         "accepted_numerical"
         if reference["status"] == "pass"
-        and any(
-            detail.get("status") in ("pass_tie", "pass_replay") for detail in reference["details"]
-        )
+        and isinstance(reference_details, list)
+        and any(detail.get("status") in ("pass_tie", "pass_replay") for detail in reference_details)
         else "exact"
         if reference["status"] == "pass"
         else "review_required"
@@ -1322,7 +1323,7 @@ def _reference_summary(
     group is ``replay_divergent`` and sends the row to review — real nondeterminism and
     admission-composition drift both land there rather than passing silently.
     """
-    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
+    from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     details: list[dict[str, object]] = []
@@ -1640,7 +1641,7 @@ def _payload(spec: HttpRequestSpec, model_id: str) -> dict[str, object]:
     return base
 
 
-def _http_prompt_ids(tokenizer: object, spec: HttpRequestSpec) -> tuple[int, ...]:
+def _http_prompt_ids(tokenizer: TokenizerLike, spec: HttpRequestSpec) -> tuple[int, ...]:
     if spec.endpoint == "chat":
         rendered = tokenizer.apply_chat_template(
             [{"role": "user", "content": spec.prompt}],
@@ -1653,6 +1654,8 @@ def _http_prompt_ids(tokenizer: object, spec: HttpRequestSpec) -> tuple[int, ...
 
 def _template_token_ids(rendered: object) -> list[int]:
     ids = rendered["input_ids"] if isinstance(rendered, dict) else rendered
+    if not isinstance(ids, Iterable):
+        raise TypeError(f"chat template returned a non-iterable value: {type(ids).__name__}")
     values = list(ids)
     if values and isinstance(values[0], (list, tuple)):
         values = list(values[0])
@@ -1832,7 +1835,7 @@ def _effective_sampling(engine: InferenceEngine, request: Request) -> SamplingPa
     return request.sampling if request.sampling is not GREEDY else engine.default_sampling
 
 
-def _token_to_int(token: object) -> int:
+def _token_to_int(token: torch.Tensor | int) -> int:
     if isinstance(token, torch.Tensor):
         return int(token.item())
     return int(token)
@@ -1976,7 +1979,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     output = args.output or _default_output_path()
     jsonl_output = args.jsonl_output
-    report = {
+    report: dict[str, object] = {
         "started_at": started_at,
         "finished_at": datetime.now(UTC).isoformat(),
         "metadata": metadata,

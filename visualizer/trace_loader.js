@@ -32,7 +32,9 @@ export function parseJsonlTrace(text) {
     try {
       event = JSON.parse(line);
     } catch (error) {
-      throw new Error(`Line ${index + 1} is not valid JSON: ${error.message}`);
+      throw new Error(
+        `Line ${index + 1} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     validateEvent(event, index + 1);
     return event;
@@ -167,7 +169,10 @@ export function buildTraceModel(events) {
         totalPromptTokens: event.total_prompt_tokens,
         completed: event.completed === true,
       });
-      cachedTokens.set(event.request_id, event.cached_tokens ?? cachedTokens.get(event.request_id) ?? 0);
+      cachedTokens.set(
+        event.request_id,
+        event.cached_tokens ?? cachedTokens.get(event.request_id) ?? 0,
+      );
     }
 
     if (event.event === "decode_step") {
@@ -182,13 +187,17 @@ export function buildTraceModel(events) {
           batchSize: event.batch_size ?? null,
           tokensEmitted: event.tokens_emitted ?? item.tokenIds.length,
         });
-        generatedTokens.set(item.requestId, (generatedTokens.get(item.requestId) ?? 0) + item.tokenIds.length);
+        generatedTokens.set(
+          item.requestId,
+          (generatedTokens.get(item.requestId) ?? 0) + item.tokenIds.length,
+        );
       }
     }
 
     if (event.event === "block_allocated" || event.event === "block_freed") {
       const request = ensureRequest(event.request_id);
-      const blockCount = event.block_count ?? (Array.isArray(event.block_ids) ? event.block_ids.length : 0);
+      const blockCount =
+        event.block_count ?? (Array.isArray(event.block_ids) ? event.block_ids.length : 0);
       const signed = event.event === "block_allocated" ? blockCount : -blockCount;
       if (request) {
         request.blockEvents.push({
@@ -198,7 +207,10 @@ export function buildTraceModel(events) {
           blockCount,
           blockIds: Array.isArray(event.block_ids) ? event.block_ids : [],
         });
-        heldBlocks.set(event.request_id, Math.max(0, (heldBlocks.get(event.request_id) ?? 0) + signed));
+        heldBlocks.set(
+          event.request_id,
+          Math.max(0, (heldBlocks.get(event.request_id) ?? 0) + signed),
+        );
       }
       // Prefer the allocator's own post-change totals; fall back to the running sum.
       poolUsed = event.pool_used ?? Math.max(0, poolUsed + signed);
@@ -232,7 +244,10 @@ export function buildTraceModel(events) {
       });
       // Re-admitted and rebuilding by recompute — back on the wall as its prefill replays.
       cachedTokens.set(event.request_id, event.cached_tokens ?? 0);
-      generatedTokens.set(event.request_id, event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0);
+      generatedTokens.set(
+        event.request_id,
+        event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0,
+      );
       active.add(event.request_id);
     }
 
@@ -245,7 +260,10 @@ export function buildTraceModel(events) {
         generatedTokens: event.generated_tokens ?? null,
         reason: event.reason ?? "unknown",
       };
-      generatedTokens.set(event.request_id, event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0);
+      generatedTokens.set(
+        event.request_id,
+        event.generated_tokens ?? generatedTokens.get(event.request_id) ?? 0,
+      );
       active.delete(event.request_id);
     }
 
@@ -278,12 +296,17 @@ export function buildTraceModel(events) {
   const maxSequence = Math.max(...events.map((event) => event.sequence), 0);
   const maxReservedBlocks = Math.max(...pressureSamples.map((sample) => sample.reservedBlocks), 1);
   const maxLogicalTokens = Math.max(...pressureSamples.map((sample) => sample.logicalTokens), 1);
-  const maxAllocatedBlocks = Math.max(...pressureSamples.map((sample) => sample.allocatedBlocks), 0);
+  const maxAllocatedBlocks = Math.max(
+    ...pressureSamples.map((sample) => sample.allocatedBlocks),
+    0,
+  );
   // Pool capacity = peak blocks ever in use simultaneously. With pool_free present we know the
   // true size; otherwise fall back to the reservation wall so the grid stays meaningful.
   const poolFromFree = Math.max(
     ...pressureSamples.map((sample) =>
-      sample.poolFree === null || sample.poolFree === undefined ? 0 : sample.allocatedBlocks + sample.poolFree,
+      sample.poolFree === null || sample.poolFree === undefined
+        ? 0
+        : sample.allocatedBlocks + sample.poolFree,
     ),
     0,
   );
@@ -346,10 +369,14 @@ function validateEvent(event, lineNumber) {
     throw new Error(`Line ${lineNumber} request_ids must be an array of strings when present.`);
   }
   if (event.token_source !== undefined && !KNOWN_TOKEN_SOURCES.has(event.token_source)) {
-    throw new Error(`Line ${lineNumber} has unknown token_source ${JSON.stringify(event.token_source)}.`);
+    throw new Error(
+      `Line ${lineNumber} has unknown token_source ${JSON.stringify(event.token_source)}.`,
+    );
   }
   if (event.preempt_reason !== undefined && !KNOWN_PREEMPT_REASONS.has(event.preempt_reason)) {
-    throw new Error(`Line ${lineNumber} has unknown preempt_reason ${JSON.stringify(event.preempt_reason)}.`);
+    throw new Error(
+      `Line ${lineNumber} has unknown preempt_reason ${JSON.stringify(event.preempt_reason)}.`,
+    );
   }
   if (event.event === "block_allocated" || event.event === "block_freed") {
     validateBlockEvent(event, lineNumber);
@@ -403,8 +430,14 @@ function validateRequestAdmitted(event, lineNumber) {
   requirePositiveInteger(event, "prompt_tokens", lineNumber);
   requirePositiveInteger(event, "max_new_tokens", lineNumber);
   requireNonNegativeInteger(event, "reserved_blocks", lineNumber);
-  if (event.prefix_group_id !== undefined && event.prefix_group_id !== null && typeof event.prefix_group_id !== "string") {
-    throw new Error(`Line ${lineNumber} request_admitted prefix_group_id must be a string or null.`);
+  if (
+    event.prefix_group_id !== undefined &&
+    event.prefix_group_id !== null &&
+    typeof event.prefix_group_id !== "string"
+  ) {
+    throw new Error(
+      `Line ${lineNumber} request_admitted prefix_group_id must be a string or null.`,
+    );
   }
 }
 
@@ -414,7 +447,9 @@ function validatePrefillChunk(event, lineNumber) {
     requireNonNegativeInteger(event, field, lineNumber);
   }
   if (event.end_pos < event.start_pos || event.end_pos > event.total_prompt_tokens) {
-    throw new Error(`Line ${lineNumber} ${event.event} must satisfy start_pos <= end_pos <= total_prompt_tokens.`);
+    throw new Error(
+      `Line ${lineNumber} ${event.event} must satisfy start_pos <= end_pos <= total_prompt_tokens.`,
+    );
   }
   if (event.event === "prefill_chunk_progress") {
     requireNonNegativeInteger(event, "cached_tokens", lineNumber);
@@ -442,15 +477,22 @@ function validateDecodeStep(event, lineNumber) {
 }
 
 function validateBlockEvent(event, lineNumber) {
-  if (!Array.isArray(event.block_ids) || event.block_ids.some((id) => !Number.isInteger(id) || id < 0)) {
-    throw new Error(`Line ${lineNumber} ${event.event} must have block_ids as non-negative integers.`);
+  if (
+    !Array.isArray(event.block_ids) ||
+    event.block_ids.some((id) => !Number.isInteger(id) || id < 0)
+  ) {
+    throw new Error(
+      `Line ${lineNumber} ${event.event} must have block_ids as non-negative integers.`,
+    );
   }
   if (!Number.isInteger(event.block_count) || event.block_count !== event.block_ids.length) {
     throw new Error(`Line ${lineNumber} ${event.event} block_count must match block_ids length.`);
   }
   for (const field of ["pool_used", "pool_free"]) {
     if (!Number.isInteger(event[field]) || event[field] < 0) {
-      throw new Error(`Line ${lineNumber} ${event.event} must have a non-negative integer ${field}.`);
+      throw new Error(
+        `Line ${lineNumber} ${event.event} must have a non-negative integer ${field}.`,
+      );
     }
   }
 }
@@ -479,7 +521,9 @@ function validateFinished(event, lineNumber) {
   }
   requireNonNegativeInteger(event, "generated_tokens", lineNumber);
   if (event.generated_tokens !== event.token_ids.length) {
-    throw new Error(`Line ${lineNumber} request_finished generated_tokens must match token_ids length.`);
+    throw new Error(
+      `Line ${lineNumber} request_finished generated_tokens must match token_ids length.`,
+    );
   }
   if (event.reason !== "eos" && event.reason !== "length") {
     throw new Error(`Line ${lineNumber} request_finished reason must be "eos" or "length".`);
@@ -495,12 +539,16 @@ function validateBatchSizeChanged(event, lineNumber) {
 function validateThroughputEvent(event, lineNumber) {
   for (const field of ["tokens_per_second", "elapsed_seconds"]) {
     if (typeof event[field] !== "number" || !Number.isFinite(event[field]) || event[field] < 0) {
-      throw new Error(`Line ${lineNumber} tokens_per_second_sampled must have a non-negative finite ${field}.`);
+      throw new Error(
+        `Line ${lineNumber} tokens_per_second_sampled must have a non-negative finite ${field}.`,
+      );
     }
   }
   for (const field of ["tokens_emitted", "total_generated_tokens"]) {
     if (!Number.isInteger(event[field]) || event[field] < 0) {
-      throw new Error(`Line ${lineNumber} tokens_per_second_sampled must have a non-negative integer ${field}.`);
+      throw new Error(
+        `Line ${lineNumber} tokens_per_second_sampled must have a non-negative integer ${field}.`,
+      );
     }
   }
 }

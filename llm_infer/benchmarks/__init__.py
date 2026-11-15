@@ -13,8 +13,8 @@ from llm_infer.benchmarks.workload import BenchRequest, Workload
 __all__ = [
     "BenchRequest",
     "Workload",
-    "normalize_at_eos",
-    "total_output_tokens",
     "gpu_snapshot",
     "library_versions",
+    "normalize_at_eos",
+    "total_output_tokens",
 ]

@@ -27,16 +27,18 @@ from pathlib import Path
 import modal
 
 from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
     VOLUME_NAME,
+    check_requests,
+    check_size,
+    engine_outputs,
     local_bundle_path,
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE
-
-BLOCK_SIZE = 128
 
 app = modal.App("llm-infer-esme-flash-reference-check")
 
@@ -53,7 +55,7 @@ esme_bundles = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
     volumes={ESME_BUNDLE_MOUNT: esme_bundles},
     timeout=30 * 60,
 )
-def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
+def check_esme_flash(num_requests: int, max_new_tokens: int, approved: bool = False) -> str:
     """Fail if the Esme flash kernel diverges from bf16 torch_naive at equal dtype (exact ids).
 
     Loads Esme twice in **bf16**, both through the same engine paged path: once on
@@ -63,12 +65,12 @@ def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
     between bf16 flash and bf16 ``torch_naive``. A mismatch is treated as an Esme flash-kernel
     bug and must be reported.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import normalize_at_eos
     from llm_infer.kernels.flash_attn_paged import FlashAttnPagedAttention
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
     stall_guard.arm()
@@ -90,39 +92,11 @@ def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
 
-    prompts = (
-        "Write a tiny Python function that doubles an integer.",
-        "Explain KV caching in one short sentence.",
-        "Give one SQL query that counts rows in a table named events.",
-        "Name two practical checks before trusting a benchmark.",
-    )
     eos = flash_runtime.eos_token_ids
-    requests: list[tuple[str, list[int]]] = []
-    for index in range(num_requests):
-        tokenized = flash_runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompts[index % len(prompts)]}],
-            add_generation_prompt=True,
-            tokenize=True,
-        )
-        if not isinstance(tokenized, list) or not tokenized:
-            raise ValueError(f"Esme tokenizer returned invalid prompt ids for request {index}")
-        requests.append((f"esme-{index:03d}", [int(token_id) for token_id in tokenized]))
-
-    def decode_all(runtime) -> dict[str, list[int]]:
-        engine = InferenceEngine(
-            runtime.model,
-            block_size=BLOCK_SIZE,
-            num_blocks=len(requests) + 8,
-            device="cuda",
-            capabilities=runtime.capabilities,
-        )
-        for request_id, prompt_ids in requests:
-            engine.add_request(Request(request_id, list(prompt_ids), max_new_tokens, eos))
-        return engine.run()
-
-    flash_outputs = decode_all(flash_runtime)
+    requests = check_requests(flash_runtime, num_requests)
+    flash_outputs = engine_outputs(flash_runtime, requests, max_new_tokens)
     stall_guard.progress()
-    naive_outputs = decode_all(naive_runtime)
+    naive_outputs = engine_outputs(naive_runtime, requests, max_new_tokens)
     stall_guard.progress()
 
     exact = 0
@@ -151,17 +125,13 @@ def check_esme_flash(num_requests: int, max_new_tokens: int) -> str:
 
 
 @app.local_entrypoint()
-def main(command: str = "smoke", bundle_path: str = "") -> None:
+def main(command: str = "smoke", bundle_path: str = "", approved: bool = False) -> None:
     """Run the cheap smoke or the fuller Esme flash reference check on the A100.
 
     smoke:   modal run scripts/modal_esme_flash_reference_check.py --command smoke
     check:   modal run scripts/modal_esme_flash_reference_check.py --command check
     """
-    if command == "smoke":
-        num_requests, max_new_tokens = 2, 8
-    elif command == "check":
-        num_requests, max_new_tokens = 8, 64
-    else:
-        raise ValueError(f"command must be 'smoke' or 'check', got {command!r}")
+    require_spend_approval(approved, __file__, command=command, bundle_path=bundle_path)
+    num_requests, max_new_tokens = check_size(command)
     stage_bundle(esme_bundles, local_bundle_path(bundle_path), label="esme-flash")
-    print(check_esme_flash.remote(num_requests, max_new_tokens))
+    print(check_esme_flash.remote(num_requests, max_new_tokens, approved=True))

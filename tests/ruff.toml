@@ -1,0 +1,13 @@
+# Ruff replaces a parent banned-api table instead of merging it, so the root bans are repeated here.
+extend = "../pyproject.toml"
+# Import-sort first-party detection follows the repo root, not this directory.
+src = [".."]
+
+[lint.flake8-tidy-imports.banned-api]
+"typing.Any".msg = "Name the real type: a concrete class, a Protocol, a TypedDict, or `object`. `Any` hides type errors."
+"typing_extensions.Any".msg = "Name the real type: a concrete class, a Protocol, a TypedDict, or `object`. `Any` hides type errors."
+"time.sleep".msg = "Wait on a `threading.Event` that the code under test sets, as tests/serving/test_api.py does. A sleep makes the test slow and flaky."
+"asyncio.sleep".msg = "Await an `asyncio.Event` that the code under test sets. A sleep makes the test slow and flaky."
+"time.time".msg = "Pass a fake clock, as `InferenceEngine(trace_clock=...)` takes, or monkeypatch the module clock. Wall-clock reads make the test flaky."
+"time.perf_counter".msg = "Pass a fake clock, as `InferenceEngine(trace_clock=...)` takes, or monkeypatch the module clock. Wall-clock reads make the test flaky."
+"time.monotonic".msg = "Pass a fake clock, as `InferenceEngine(trace_clock=...)` takes, or monkeypatch the module clock. Wall-clock reads make the test flaky."

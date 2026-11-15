@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from llm_infer.request.request import Request
 from llm_infer.scheduler import Scheduler, blocks_for_footprint, max_blocks_for
-from llm_infer.serving.request import Request
 
 
 def _request(request_id: str, prompt_len: int = 2, max_new_tokens: int = 2) -> Request:
@@ -52,6 +52,24 @@ def test_release_frees_budget_for_the_next_request() -> None:
     assert admitted == ["c"]  # a's freed budget lets c in
 
 
+@pytest.mark.parametrize("running", [False, True])
+def test_cancel_releases_only_the_cancelled_requests_reservation(running: bool) -> None:
+    scheduler = Scheduler(num_blocks=1, block_size=4)
+    cancelled = _request("cancelled")
+    survivor = _request("survivor")
+    scheduler.add(cancelled)
+    scheduler.add(survivor)
+    if running:
+        assert scheduler.admit() == [cancelled]
+        assert scheduler.committed_blocks == 1
+
+    assert scheduler.cancel(cancelled)
+    assert scheduler.committed_blocks == 0
+    assert not scheduler.cancel(cancelled)
+    assert scheduler.admit() == [survivor]
+    assert scheduler.committed_blocks == 1
+
+
 def test_preemption_victim_skips_finished_requests() -> None:
     """A finished request is never a preemption victim — evicting it would discard a completed
     output and raise (recompute refuses a finished request)."""
@@ -63,11 +81,11 @@ def test_preemption_victim_skips_finished_requests() -> None:
     assert [r.request_id for r in sched.running] == ["a", "b", "c"]
 
     # The LIFO victim would be the newest-admitted (c); mark it finished — it must be skipped.
-    reqs["c"].finished = True
+    reqs["c"].record(0, is_eos=True)
     assert sched.preemption_victim() is reqs["b"]
 
     # With b also finished and a excluded as the block-needer, there is no eligible victim.
-    reqs["b"].finished = True
+    reqs["b"].record(0, is_eos=True)
     assert sched.preemption_victim(exclude=reqs["a"]) is None
 
 
@@ -101,9 +119,6 @@ def test_has_work_tracks_queue_and_running() -> None:
     sched.admit()
     sched.release(req)
     assert not sched.has_work()
-
-
-# --- preemption policy ------------------------------------------------------------------
 
 
 def test_footprint_counts_prompt_plus_generated() -> None:

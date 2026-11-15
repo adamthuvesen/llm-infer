@@ -33,12 +33,16 @@ import json
 import math
 import statistics
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import modal
 
+from llm_infer.benchmarks.reference_policy import EsmeAgreement, reference_status
+from scripts import modal_stall_guard as stall_guard
+from scripts.modal_approval import require_spend_approval
 from scripts.modal_esme_bundle import (
     ESME_BUNDLE_MOUNT,
     REMOTE_BUNDLE_PATH,
@@ -47,6 +51,16 @@ from scripts.modal_esme_bundle import (
     stage_bundle,
 )
 from scripts.modal_flash_image import FLASH_IMAGE, REPO_ROOT
+
+if TYPE_CHECKING:
+    import torch
+
+    from llm_infer.kv_cache.block_table import BlockTable
+    from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
+    from llm_infer.model.pretrain_bundle import PretrainBundleModel
+
+    # The prefill-divergence replay: one cache, each request's table, and its prefill logits.
+    type PackedReplayState = tuple[PagedKVCache, dict[str, BlockTable], dict[str, torch.Tensor]]
 
 BLOCK_SIZE = 128
 RAGGED_LENGTHS = (16, 37, 79, 128, 257, 389, 512)
@@ -74,7 +88,7 @@ def row_key(row: dict[str, object], key_fields: tuple[str, ...]) -> dict[str, ob
     return {field: row[field] for field in key_fields}
 
 
-def key_tuple(key: dict[str, object], key_fields: tuple[str, ...]) -> tuple[object, ...]:
+def key_tuple(key: Mapping[str, object], key_fields: tuple[str, ...]) -> tuple[object, ...]:
     """Hashable form of a row key for set membership."""
     return tuple(key[field] for field in key_fields)
 
@@ -188,7 +202,10 @@ def stability_summary(
             steps = sorted({record["first_diff_step"] for record in mode_records}, key=sort_key)
             pairs = sorted(
                 {
-                    (record["first_diff_tokens"]["fast"], record["first_diff_tokens"]["golden"])
+                    (
+                        cast("dict[str, object]", record["first_diff_tokens"])["fast"],
+                        cast("dict[str, object]", record["first_diff_tokens"])["golden"],
+                    )
                     for record in mode_records
                 },
                 key=lambda pair: (sort_key(pair[0]), sort_key(pair[1])),
@@ -202,22 +219,9 @@ def stability_summary(
     return summary
 
 
-def agreement_dict(agreement) -> dict[str, object]:  # noqa: ANN001 - EsmeAgreement is remote-only
+def agreement_dict(agreement: EsmeAgreement) -> dict[str, object]:
     """Flatten an ``EsmeAgreement`` into the JSON status/counts a row records."""
-    from llm_infer.benchmarks.reference_policy import reference_status
-
-    return {
-        "status": reference_status(agreement),
-        "exact": agreement.exact,
-        "tie": agreement.tie,
-        "nontie": agreement.nontie,
-        "total": agreement.total,
-        "ties_sample": agreement.ties_sample,
-        "divergences_sample": agreement.divergences_sample,
-        "review_required": agreement.review_required,
-        "failed": agreement.failed,
-        "numerical_evidence": agreement.numerical_evidence,
-    }
+    return {"status": reference_status(agreement), **agreement.as_dict()}
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -382,12 +386,14 @@ def benchmark_prefill_ab(
     warmup: int,
     iters: int,
     completed: list[dict[str, object]],
+    approved: bool = False,
 ) -> Iterator[dict[str, object]]:
     """Stream paired serial/packed-prefill measurements from one loaded model and GPU.
 
     Yields a single ``meta`` event, then one ``row`` event per completed workload cell.
     Cells whose key is in ``completed`` are skipped so a resumed run only measures the rest.
     """
+    require_spend_approval(approved, __file__)
     import math
     import statistics
 
@@ -408,6 +414,7 @@ def benchmark_prefill_ab(
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     if not batch_sizes or any(size < 1 for size in batch_sizes):
         raise ValueError(f"batch_sizes must contain positive integers; got {batch_sizes}")
     if not output_lengths or any(length < 1 for length in output_lengths):
@@ -426,7 +433,7 @@ def benchmark_prefill_ab(
     engine_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
     completed_set = {key_tuple(key, PREFILL_AB_KEY_FIELDS) for key in completed}
 
@@ -502,10 +509,9 @@ def benchmark_prefill_ab(
         torch.cuda.synchronize()
         end_to_end_s = time.perf_counter() - start
 
-        phase_profile = profiler.summary().as_dict()
-        phases = phase_profile["phases"]
-        prefill_ms = phases["prefill"]["total_ms"]
-        sampling_ms = phases["sampling"]["total_ms"]
+        timing = profiler.summary()
+        prefill_ms = timing.phase_total_ms("prefill")
+        sampling_ms = timing.phase_total_ms("sampling")
         return {
             "prefill_device_seconds": float(prefill_ms) / 1000.0,
             "ttft_wall_seconds": ttft_s,
@@ -575,14 +581,19 @@ def benchmark_prefill_ab(
                         else ("candidate", "baseline")
                     )
                     pair_orders.append(list(order))
+                    stall_guard.progress()
                     for order_position, mode in enumerate(order):
                         measured = run_once(
                             requests,
                             max_new_tokens,
                             batched_prefill=modes[mode],
                         )
-                        outputs_by_mode[mode] = measured.pop("outputs")
-                        first_tokens_by_mode[mode] = measured.pop("first_tokens")
+                        outputs_by_mode[mode] = cast(
+                            "dict[str, list[int]]", measured.pop("outputs")
+                        )
+                        first_tokens_by_mode[mode] = cast(
+                            "dict[str, list[int]]", measured.pop("first_tokens")
+                        )
                         outputs_per_iteration[mode].append(outputs_by_mode[mode])
                         raw[mode].append(
                             {
@@ -595,7 +606,7 @@ def benchmark_prefill_ab(
                 medians: dict[str, dict[str, float]] = {}
                 for mode, records in raw.items():
                     medians[mode] = {
-                        metric: statistics.median(float(record[metric]) for record in records)
+                        metric: statistics.median(cast(float, record[metric]) for record in records)
                         for metric in (
                             "prefill_device_seconds",
                             "ttft_wall_seconds",
@@ -673,6 +684,7 @@ def benchmark_prefill_ab(
                     f"candidate={agreement['candidate']['status']}, "
                     f"relative={'eligible' if direct_parity else 'withheld; raw timing only'}"
                 )
+                stall_guard.progress()
                 yield {"kind": "row", **row}
 
 
@@ -691,6 +703,7 @@ def benchmark_mixed_load(
     warmup: int,
     iters: int,
     completed: list[dict[str, object]],
+    approved: bool = False,
 ) -> Iterator[dict[str, object]]:
     """Stream serial/packed-prefill decode-stall measurements under a mid-stream prompt burst.
 
@@ -705,6 +718,7 @@ def benchmark_mixed_load(
     Yields one ``meta`` event, then one ``row`` event per workload cell not already in
     ``completed``. Timing is reported for every mode regardless of the fp32-oracle verdict.
     """
+    require_spend_approval(approved, __file__)
     import torch
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
@@ -722,6 +736,7 @@ def benchmark_mixed_load(
     from llm_infer.serving import InferenceEngine, Request
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     if not cells:
         raise ValueError("mixed-load needs at least one workload cell")
     if steady_decoders < 1:
@@ -762,7 +777,7 @@ def benchmark_mixed_load(
     engine_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
     completed_set = {key_tuple(key, MIXED_LOAD_KEY_FIELDS) for key in completed}
 
@@ -781,9 +796,11 @@ def benchmark_mixed_load(
         base = build_requests(engine_runtime.tokenizer, count, HEADLINE_PROMPTS)
         pool: list[EsmeBenchRequest] = []
         for index, request in enumerate(base):
+            if shape == "uniform" and uniform_context is None:
+                raise ValueError("a uniform pool needs a context length")
             context_length = (
                 uniform_context
-                if shape == "uniform"
+                if uniform_context is not None and shape == "uniform"
                 else RAGGED_LENGTHS[index % len(RAGGED_LENGTHS)]
             )
             resized = requests_at_context_length([request], context_length)[0]
@@ -911,13 +928,12 @@ def benchmark_mixed_load(
             for request_id in burst_ids
             if token_events[request_id]
         }
-        total_wall_ms = sum(float(record["wall_ms"]) for record in step_records)
-        phases = profiler.summary().as_dict()["phases"]
-        device_ms = (
-            phases["prefill"]["total_ms"]
-            + phases["decode"]["total_ms"]
-            + phases["sampling"]["total_ms"]
-        )
+        total_wall_ms = sum(cast(float, record["wall_ms"]) for record in step_records)
+        timing = profiler.summary()
+        phase_ms = {
+            phase: timing.phase_total_ms(phase) for phase in ("prefill", "decode", "sampling")
+        }
+        device_ms = sum(phase_ms.values())
         return {
             "burst_step": burst_step,
             "burst_prompt_tokens_total": sum(len(request.prompt_ids) for request in burst),
@@ -929,11 +945,7 @@ def benchmark_mixed_load(
             # sampling). It lumps scheduler admission, Python classification, and per-step
             # cuda syncs together — a residual, not an isolated scheduler timer.
             "scheduler_sync_residual_ms": total_wall_ms - device_ms,
-            "phase_device_ms": {
-                "prefill": phases["prefill"]["total_ms"],
-                "decode": phases["decode"]["total_ms"],
-                "sampling": phases["sampling"]["total_ms"],
-            },
+            "phase_device_ms": phase_ms,
             "outputs": outputs,
         }
 
@@ -942,7 +954,7 @@ def benchmark_mixed_load(
     steady_ids = [request.request_id for request in steady]
 
     for cell in cells:
-        burst_size = int(cell["burst_size"])
+        burst_size = cast(int, cell["burst_size"])
         burst_shape = str(cell["burst_shape"])
         burst_context = cell["burst_context"]
         current_key = {"burst_size": burst_size, "burst_shape": burst_shape}
@@ -954,7 +966,7 @@ def benchmark_mixed_load(
             burst_size,
             burst_shape,
             "burst",
-            None if burst_context is None else int(burst_context),
+            None if burst_context is None else cast(int, burst_context),
         )
         # The fp32 oracle reference for steady and burst is prompt-deterministic, so compute it
         # once per cell and gate every mode's outputs against it after the paired runs.
@@ -986,13 +998,14 @@ def benchmark_mixed_load(
         for pair_index in range(iters):
             order = ("baseline", "candidate") if pair_index % 2 == 0 else ("candidate", "baseline")
             pair_orders.append(list(order))
+            stall_guard.progress()
             for order_position, mode in enumerate(order):
                 measured = run_mixed_once(steady, burst, batched_prefill=modes[mode])
-                outputs_by_mode[mode] = measured["outputs"]
-                splits = measured["splits"]
+                outputs_by_mode[mode] = cast("dict[str, list[int]]", measured["outputs"])
+                splits = cast("dict[str, ItlSplit]", measured["splits"])
                 summary = summarize_run(
                     [splits[request_id] for request_id in steady_ids],
-                    list(measured["burst_ttfts_ms"].values()),
+                    list(cast("dict[str, float]", measured["burst_ttfts_ms"]).values()),
                 )
                 runs_by_mode[mode].append(summary)
                 raw_by_mode[mode].append(
@@ -1056,7 +1069,7 @@ def benchmark_mixed_load(
             "parity_status": "exact" if direct_parity else "review_required",
             "relative_claim_eligible": direct_parity,
         }
-        comparison = aggregate["candidate_vs_baseline"]
+        comparison = cast("dict[str, float]", aggregate["candidate_vs_baseline"])
         print(
             f"[mixed-load] burst={burst_size} shape={burst_shape} "
             f"tokens={row['burst_prompt_tokens_total']}: "
@@ -1065,6 +1078,7 @@ def benchmark_mixed_load(
             f"candidate={agreement['candidate']['status']}, "
             f"relative={'eligible' if direct_parity else 'withheld; raw timing only'}"
         )
+        stall_guard.progress()
         yield {"kind": "row", **row}
 
 
@@ -1080,6 +1094,7 @@ def diagnose_prefill_divergence(
     context_length: int | None,
     max_new_tokens: int,
     repeats: int,
+    approved: bool = False,
 ) -> dict[str, object]:
     """Rerun one offending A/B cell outside the timed path, recording why serial vs packed diverge.
 
@@ -1090,6 +1105,7 @@ def diagnose_prefill_divergence(
     the fp32 oracle. Diagnostic only: no serial or fp32 fallback is added to the production
     engine and the 0.1-logit tie rule is untouched.
     """
+    require_spend_approval(approved, __file__)
     import math
 
     import torch
@@ -1102,8 +1118,7 @@ def diagnose_prefill_divergence(
         reference_outputs,
         requests_at_context_length,
     )
-    from llm_infer.benchmarks.esme_three_way import BF16_AGREEMENT_TOLERANCE
-    from llm_infer.kv_cache.block_table import BlockTable
+    from llm_infer.benchmarks.reference_policy import BF16_AGREEMENT_TOLERANCE
     from llm_infer.kv_cache.paged_kv_cache import PagedKVCache
     from llm_infer.model.decode_graph import enable_decode_graphs_if_cuda
     from llm_infer.model.runtime import load_model_runtime
@@ -1111,6 +1126,7 @@ def diagnose_prefill_divergence(
     from llm_infer.validation.tie_tolerance import compare_under_tie_tolerance
 
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"
+    stall_guard.arm()
     if repeats < 1:
         raise ValueError(f"repeats must be >= 1; got {repeats}")
     if shape not in ("uniform", "ragged"):
@@ -1125,10 +1141,10 @@ def diagnose_prefill_divergence(
     engine_runtime = load_model_runtime(
         "esme", bundle_path=Path(REMOTE_BUNDLE_PATH), dtype=torch.bfloat16, device="cuda"
     )
-    eos = frozenset()
+    eos: frozenset[int] = frozenset()
     # Match the decode-graph configuration the timed A/B run used so a "diverged" row reproduces.
     graph_capture_s = enable_decode_graphs_if_cuda(engine_runtime.model, CAPTURE_SIZES)
-    model = engine_runtime.model
+    model = cast("PretrainBundleModel", engine_runtime.model)
     num_layers = model.num_layers
     modes = {"baseline": False, "candidate": True}
 
@@ -1146,6 +1162,8 @@ def diagnose_prefill_divergence(
                 )
             )
     else:
+        if context_length is None:
+            raise ValueError(f"shape {shape!r} needs a context length")
         base = build_requests(engine_runtime.tokenizer, batch_size, HEADLINE_PROMPTS)
         requests = requests_at_context_length(base, context_length)
 
@@ -1168,7 +1186,9 @@ def diagnose_prefill_divergence(
             "golden_logit": float(values[golden_token].item()),
         }
 
-    def drive_engine(batched_prefill: bool) -> tuple[dict[str, list], dict[str, list[int]]]:
+    def drive_engine(
+        batched_prefill: bool,
+    ) -> tuple[dict[str, list[tuple[torch.Tensor, torch.Tensor]]], dict[str, list[int]]]:
         """One engine run; return prompt-length KV snapshot and per-request generated tokens."""
         needed_blocks = sum(
             math.ceil((len(r.prompt_ids) + max_new_tokens) / BLOCK_SIZE) for r in requests
@@ -1189,9 +1209,9 @@ def diagnose_prefill_divergence(
         # and _release_finished_in recycles its block table at finish, so this is the only point
         # the prefill KV is still addressable. engine._requests is engine-internal; this is a
         # diagnostic driver reading it directly, not the production serving path.
-        kv_snapshot: dict[str, list] = {}
+        kv_snapshot: dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         for r in requests:
-            table = engine._requests[r.request_id].block_table
+            table = engine._requests[r.request_id].block_table  # pyright: ignore[reportPrivateUsage] -- diagnostic read, see comment above
             if table is None:
                 raise RuntimeError(f"request {r.request_id} has no block table after prefill")
             kv_snapshot[r.request_id] = [
@@ -1208,7 +1228,9 @@ def diagnose_prefill_divergence(
         return kv_snapshot, step_tokens
 
     def kv_diffs(
-        serial_kv: dict[str, list], packed_kv: dict[str, list], request_id: str
+        serial_kv: dict[str, list[tuple[torch.Tensor, torch.Tensor]]],
+        packed_kv: dict[str, list[tuple[torch.Tensor, torch.Tensor]]],
+        request_id: str,
     ) -> tuple[list[float], list[float]]:
         max_by_layer: list[float] = []
         mean_by_layer: list[float] = []
@@ -1232,8 +1254,6 @@ def diagnose_prefill_divergence(
             dtype=model.dtype,
             device="cuda",
         )
-
-    PackedReplayState = tuple[PagedKVCache, dict[str, BlockTable], dict[str, torch.Tensor]]
 
     def packed_replay_state() -> PackedReplayState:
         """Full-batch packed prefill replay: the same packed group shape as the real run.
@@ -1298,11 +1318,13 @@ def diagnose_prefill_divergence(
     for attempt in range(repeats):
         serial_kv, serial_tokens = drive_engine(False)
         packed_kv, packed_tokens = drive_engine(True)
+        stall_guard.progress()
         tokens_by_mode = {"baseline": serial_tokens, "candidate": packed_tokens}
         # One full-batch packed prefill replay per attempt, built only if a candidate-mode
         # divergence needs an engine margin; shared across this attempt's diverged requests.
         packed_state: PackedReplayState | None = None
         for r in requests:
+            stall_guard.progress()
             request_id = r.request_id
             golden = reference[request_id]
             prompt_ids = list(r.prompt_ids)
@@ -1415,6 +1437,7 @@ def _run_prefill_divergence(bundle_path: str, context_length: int) -> None:
         context_length=None if context_length == 0 else context_length,
         max_new_tokens=64,
         repeats=5,
+        approved=True,
     )
     stamp = time.strftime("%Y%m%dT%H%M%S")
     out_path = out_dir / f"esme-prefill-divergence-{stamp}.json"
@@ -1428,8 +1451,17 @@ def main(
     bundle_path: str = "",
     resume: bool = False,
     context_length: int = 0,
+    approved: bool = False,
 ) -> None:
     """Stage Esme, stream a benchmark protocol to a rows log, and write the combined JSON record."""
+    require_spend_approval(
+        approved,
+        __file__,
+        command=command,
+        bundle_path=bundle_path,
+        resume=resume,
+        context_length=context_length,
+    )
     if command == "prefill-divergence":
         _run_prefill_divergence(bundle_path, context_length)
         return
@@ -1438,6 +1470,7 @@ def main(
 
     prefill_commands = {"prefill-smoke", "prefill-ab"}
     mixed_commands = {"mixed-load-smoke", "mixed-load"}
+    key_fields: tuple[str, ...]
     if command in prefill_commands:
         key_fields = PREFILL_AB_KEY_FIELDS
     elif command in mixed_commands:
@@ -1447,30 +1480,6 @@ def main(
             "command must be 'prefill-smoke', 'prefill-ab', 'prefill-divergence', "
             f"'mixed-load-smoke', or 'mixed-load'; got {command!r}"
         )
-
-    if command == "prefill-smoke":
-        batch_sizes = [8]
-        uniform_lengths: list[int] = []
-        output_lengths = [4]
-        include_ragged = True
-        warmup, iters = 1, 2
-    elif command == "prefill-ab":
-        batch_sizes = [1, 8, 64]
-        uniform_lengths = [16, 128, 512]
-        output_lengths = [1, 64]
-        include_ragged = True
-        warmup, iters = 2, 10
-    elif command == "mixed-load-smoke":
-        # One cheap cell, short outputs, one measured pair — a Modal-side wiring check.
-        cells = [{"burst_size": 8, "burst_shape": "ragged", "burst_context": None}]
-        steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 32, 8
-        warmup_tokens = 4
-        warmup, iters = 1, 1
-    else:  # mixed-load
-        cells = MIXED_LOAD_CELLS
-        steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 256, 16
-        warmup_tokens = 8
-        warmup, iters = 1, 5
 
     out_dir = REPO_ROOT / "bench-results"
     out_dir.mkdir(exist_ok=True)
@@ -1497,6 +1506,18 @@ def main(
     stage_bundle(esme_bundles, local_bundle, label=f"esme-{command}")
 
     if command in prefill_commands:
+        if command == "prefill-smoke":
+            batch_sizes = [8]
+            uniform_lengths: list[int] = []
+            output_lengths = [4]
+            include_ragged = True
+            warmup, iters = 1, 2
+        else:  # prefill-ab
+            batch_sizes = [1, 8, 64]
+            uniform_lengths = [16, 128, 512]
+            output_lengths = [1, 64]
+            include_ragged = True
+            warmup, iters = 2, 10
         events = benchmark_prefill_ab.remote_gen(
             batch_sizes,
             uniform_lengths,
@@ -1505,8 +1526,9 @@ def main(
             warmup,
             iters,
             completed,
+            approved=True,
         )
-        config = {
+        config: dict[str, object] = {
             "command": command,
             "model": "Esme-214M-Chat",
             "dtype": "bfloat16",
@@ -1532,6 +1554,17 @@ def main(
             "repro_command": f"modal run scripts/modal_esme_prefill_ab.py --command {command}",
         }
     else:
+        if command == "mixed-load-smoke":
+            # One cheap cell, short outputs, one measured pair — a Modal-side wiring check.
+            cells = [{"burst_size": 8, "burst_shape": "ragged", "burst_context": None}]
+            steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 32, 8
+            warmup_tokens = 4
+            warmup, iters = 1, 1
+        else:  # mixed-load
+            cells = MIXED_LOAD_CELLS
+            steady_decoders, steady_max_new_tokens, burst_max_new_tokens = 8, 256, 16
+            warmup_tokens = 8
+            warmup, iters = 1, 5
         events = benchmark_mixed_load.remote_gen(
             cells,
             steady_decoders,
@@ -1541,6 +1574,7 @@ def main(
             warmup,
             iters,
             completed,
+            approved=True,
         )
         config = {
             "command": command,

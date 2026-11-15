@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 import torch
 
@@ -10,8 +10,19 @@ from llm_infer.kernels.torch_naive import TorchNaiveAttention
 from llm_infer.model.qwen import QwenModel
 
 
+@dataclass
+class _TinyQwenConfig:
+    num_hidden_layers: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    hidden_size: int
+    rms_norm_eps: float
+    rope_theta: float
+    tie_word_embeddings: bool
+
+
 def tiny_qwen() -> QwenModel:
-    config = SimpleNamespace(
+    config = _TinyQwenConfig(
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=2,

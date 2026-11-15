@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 import torch
 
 from llm_infer.benchmarks.esme_paged import EsmeBenchRequest
-from llm_infer.benchmarks.esme_three_way import EsmeAgreement, tie_tolerant_agreement
+from llm_infer.benchmarks.esme_three_way import tie_tolerant_agreement
 from llm_infer.benchmarks.reference_policy import (
+    EsmeAgreement,
+    ReferenceEvidence,
+    SystemEvidence,
     build_reference_only_record,
     build_system_evidence_record,
     normalized_outputs_match,
@@ -22,7 +27,7 @@ def _agreement(
     review_required: int = 0,
     failed: int = 0,
 ) -> EsmeAgreement:
-    review_rows = [
+    review_rows: list[dict[str, object]] = [
         {
             "request": "r0",
             "step": 0,
@@ -61,23 +66,23 @@ def test_reference_status_classification(agreement: EsmeAgreement, expected: str
 
 
 def test_reference_status_rejects_an_empty_agreement() -> None:
-    empty = EsmeAgreement(exact=0, tie=0, nontie=0, total=0, ties_sample=[], divergences_sample=[])
     with pytest.raises(ValueError, match="no requests"):
-        reference_status(empty)
+        EsmeAgreement(exact=0, tie=0, nontie=0, total=0, ties_sample=[], divergences_sample=[])
 
 
 def test_reference_status_rejects_counts_that_do_not_add_up() -> None:
-    short = EsmeAgreement(exact=1, tie=0, nontie=0, total=2, ties_sample=[], divergences_sample=[])
-    with pytest.raises(ValueError, match="must equal total"):
-        reference_status(short)
+    with pytest.raises(ValueError, match="must equal total") as error:
+        EsmeAgreement(exact=1, tie=0, nontie=0, total=2, ties_sample=[], divergences_sample=[])
+    assert "exact=1, tie=0, nontie=0, total=2" in str(error.value)
+    assert "Classify every measured request once" in str(error.value)
+    assert "build_system_evidence_record()" in str(error.value)
 
 
 def test_reference_status_rejects_an_unclassified_nontie() -> None:
-    unclassified = EsmeAgreement(
-        exact=0, tie=0, nontie=1, total=1, ties_sample=[], divergences_sample=[]
-    )
-    with pytest.raises(ValueError, match="review_required \\+ failed"):
-        reference_status(unclassified)
+    with pytest.raises(ValueError, match="review_required \\+ failed") as error:
+        EsmeAgreement(exact=0, tie=0, nontie=1, total=1, ties_sample=[], divergences_sample=[])
+    assert "nontie=1, review_required=0, failed=0" in str(error.value)
+    assert "Classify every non-tie as review_required or failed" in str(error.value)
 
 
 def test_normalized_outputs_match_truncates_at_eos() -> None:
@@ -142,7 +147,7 @@ class _FixedOracle:
     def __init__(self, logits: list[float]) -> None:
         self._logits = torch.tensor([logits], dtype=torch.float32)
 
-    def logits(self, _token_ids: list[int]) -> torch.Tensor:
+    def logits(self, token_ids: list[int]) -> torch.Tensor:
         return self._logits
 
 
@@ -163,3 +168,50 @@ def test_esme_classifier_uses_point_one_as_automatic_boundary(margin: float, exp
     if expected == "review_required":
         assert agreement.review_required == 1
         assert agreement.failed == 0
+
+
+def test_evidence_derives_claims_and_rejects_independent_policy_fields() -> None:
+    evidence = SystemEvidence.from_timing(
+        agreement=_agreement(exact=0, failed=1), median_seconds=0.5, total_tokens=10
+    )
+    assert evidence.reference_status == "failed"
+    assert evidence.raw_tokens_per_second == 20.0
+    assert evidence.headline_eligible is False
+    assert evidence.tokens_per_second is None
+    with pytest.raises(TypeError, match="headline_eligible"):
+        SystemEvidence(
+            agreement=_agreement(),
+            raw_tokens_per_second=20.0,
+            headline_eligible=True,  # pyright: ignore[reportCallIssue]  # derived field on purpose
+        )
+    with pytest.raises(FrozenInstanceError):
+        evidence.agreement.exact = 1  # pyright: ignore[reportAttributeAccessIssue]  # frozen on purpose
+    with pytest.raises(FrozenInstanceError):
+        evidence.raw_tokens_per_second = 100.0  # pyright: ignore[reportAttributeAccessIssue]  # frozen on purpose
+    with pytest.raises(FrozenInstanceError):
+        evidence.headline_eligible = True  # pyright: ignore[reportAttributeAccessIssue]  # frozen on purpose
+
+
+def test_agreement_diagnostics_cannot_change_stored_evidence() -> None:
+    nested = {"tokens": [1, 2]}
+    samples: list[dict[str, object]] = [{"detail": nested}]
+    agreement = EsmeAgreement(0, 1, 0, 1, samples, [], numerical_evidence=samples)
+    evidence = SystemEvidence(agreement, 20.0)
+    before = agreement.as_dict()
+    nested["tokens"].append(3)
+    samples.clear()
+    agreement.ties_sample[0]["detail"] = "changed"
+    serialized = agreement.as_dict()
+    numerical_evidence = serialized["numerical_evidence"]
+    assert isinstance(numerical_evidence, list)
+    numerical_evidence.clear()
+    assert agreement.as_dict() == before
+    assert evidence.reference_status == "accepted_numerical"
+    assert evidence.tokens_per_second == 20.0
+    assert ReferenceEvidence(agreement).as_dict()["headline_eligible"] is False
+
+
+@pytest.mark.parametrize("rate", [float("nan"), float("inf"), -1.0, True])
+def test_system_evidence_rejects_invalid_measured_rates(rate: float) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        SystemEvidence(_agreement(), rate)

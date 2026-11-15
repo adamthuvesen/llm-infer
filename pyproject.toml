@@ -3,6 +3,8 @@ name = "llm-infer"
 version = "0.1.0"
 description = "A small paged LLM inference engine with pluggable model backends."
 readme = "README.md"
+# Stays on 3.13 (checked 2026-11-06): torch==2.8.0 has no cp314 wheels (uv cannot resolve it).
+# The pin matches the Modal GPU image, because flash-attn 2.x ships wheels only up to torch 2.8.
 requires-python = ">=3.13,<3.14"
 license = "MIT"
 dependencies = [
@@ -15,10 +17,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.6",
+    "ruff==0.17.4",
     "httpx>=0.27",
     "modal==1.5.0",
-    "mypy>=1.19",
+    "basedpyright==1.40.2",
+    "import-linter>=2.15",
 ]
 serving = [
     "fastapi>=0.110",
@@ -40,28 +43,142 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "RUF", "PGH003", "PGH004", "TID251"]
+ignore = ["E501"]
 
-[tool.mypy]
-python_version = "3.13"
-files = ["llm_infer"]
-check_untyped_defs = true
-disallow_incomplete_defs = true
-disallow_untyped_defs = true
-strict_equality = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-exclude = [
-    "^llm_infer/benchmarks/",
-    "^llm_infer/kernels/(flash_attn_paged|flashinfer_graph|flashinfer_paged)\\.py$",
-    "^llm_infer/model/grouped_decode_graph\\.py$",
-    "^llm_infer/serving/engine_(decode|prefill|preemption|trace)\\.py$",
-    "^llm_infer/serving/server/(app|async_engine|streaming)\\.py$",
+# The web UI strings and the tests that match them contain the real multiplication sign.
+[tool.ruff.lint.per-file-ignores]
+"tests/serving/test_webui.py" = ["RUF001", "RUF003"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Any".msg = "Name the real type: a concrete class, a Protocol, a TypedDict, or `object`. `Any` hides type errors."
+"typing_extensions.Any".msg = "Name the real type: a concrete class, a Protocol, a TypedDict, or `object`. `Any` hides type errors."
+
+[tool.basedpyright]
+typeCheckingMode = "strict"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
+reportIgnoreCommentWithoutRule = "error"
+pythonVersion = "3.13"
+include = ["llm_infer", "scripts", "tests"]
+venvPath = "."
+venv = ".venv"
+extraPaths = ["."]
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportMissingTypeStubs = false
+
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+reportMissingParameterType = false
+reportPrivateUsage = false
+
+[tool.importlinter]
+root_package = "llm_infer"
+include_external_packages = true
+
+# Paid Modal paths live only in scripts/, where the spend gate checks every one of them.
+[[tool.importlinter.contracts]]
+name = "llm_infer must not import modal; put paid Modal code in scripts/modal_*.py behind the spend gate"
+type = "forbidden"
+source_modules = ["llm_infer"]
+forbidden_modules = ["modal"]
+
+[[tool.importlinter.contracts]]
+name = "reference_policy and paired_ab must not import execution modules; read results through reference_policy.EsmeAgreement"
+type = "forbidden"
+source_modules = [
+    "llm_infer.benchmarks.reference_policy",
+    "llm_infer.benchmarks.paired_ab",
 ]
+forbidden_modules = [
+    "llm_infer.model",
+    "llm_infer.serving",
+    "llm_infer.scheduler",
+    "llm_infer.kv_cache",
+    "llm_infer.kernels",
+    "llm_infer.benchmarks.esme_paged",
+    "llm_infer.benchmarks.esme_three_way",
+    "llm_infer.benchmarks.esme_gallery",
+]
+
+[[tool.importlinter.contracts]]
+name = "kv_cache and kernels must not import model, scheduler, serving, or benchmarks; let the caller pass values in"
+type = "forbidden"
+source_modules = ["llm_infer.kv_cache", "llm_infer.kernels"]
+forbidden_modules = [
+    "llm_infer.model",
+    "llm_infer.scheduler",
+    "llm_infer.serving",
+    "llm_infer.benchmarks",
+]
+
+[[tool.importlinter.contracts]]
+name = "llm_infer.model must not import scheduler, serving, or benchmarks; let serving.engine pass values in"
+type = "forbidden"
+source_modules = ["llm_infer.model"]
+forbidden_modules = ["llm_infer.scheduler", "llm_infer.serving", "llm_infer.benchmarks"]
+
+[[tool.importlinter.contracts]]
+name = "scheduler must not import serving, model, or benchmarks; take request values from llm_infer.request"
+type = "forbidden"
+source_modules = ["llm_infer.scheduler"]
+forbidden_modules = [
+    "llm_infer.serving",
+    "llm_infer.model",
+    "llm_infer.benchmarks",
+]
+
+[[tool.importlinter.contracts]]
+name = "llm_infer.request must not import serving, scheduler, model, or benchmarks; it may import only kv_cache"
+type = "forbidden"
+source_modules = ["llm_infer.request"]
+forbidden_modules = [
+    "llm_infer.serving",
+    "llm_infer.scheduler",
+    "llm_infer.model",
+    "llm_infer.benchmarks",
+]
+
+[[tool.importlinter.contracts]]
+name = "serving.server must not import llm_infer.model; reach the model through serving.engine (model.interface is allowed)"
+type = "forbidden"
+source_modules = ["llm_infer.serving.server"]
+forbidden_modules = ["llm_infer.model"]
+# The server reaches the model only through the engine. TokenizerLike is the one model type it names.
+allow_indirect_imports = true
+ignore_imports = ["llm_infer.serving.server.** -> llm_infer.model.interface"]
+
+[[tool.importlinter.contracts]]
+name = "model.decode_graph must not import model.pretrain_bundle; read the model through the DecodeGraphModel protocol"
+type = "forbidden"
+source_modules = ["llm_infer.model.decode_graph"]
+forbidden_modules = ["llm_infer.model.pretrain_bundle"]
+
+[[tool.importlinter.contracts]]
+name = "llm_infer must not import scripts; move the shared code into llm_infer and import it from the script"
+type = "forbidden"
+source_modules = ["llm_infer"]
+forbidden_modules = ["scripts"]
+
+[[tool.importlinter.contracts]]
+name = "serving.engine must not import serving.server; pass what the engine needs as InferenceEngine arguments"
+type = "forbidden"
+source_modules = ["llm_infer.serving.engine"]
+forbidden_modules = ["llm_infer.serving.server"]
+
+[[tool.importlinter.contracts]]
+name = "llm_infer.serving must not import llm_infer.benchmarks; move the shared code into serving or a lower module"
+type = "forbidden"
+source_modules = ["llm_infer.serving"]
+forbidden_modules = ["llm_infer.benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow' --strict-markers"
 markers = [
     "slow: loads the 3B model and runs a forward pass (CPU-runnable but heavy)",
 ]
