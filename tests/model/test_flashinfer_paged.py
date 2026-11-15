@@ -15,12 +15,12 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+import llm_infer.serve_runtime as serve
 from llm_infer.fixtures.tiny_pretrain_bundle import write_tiny_pretrain_bundle
 from llm_infer.kernels import flashinfer_paged
 from llm_infer.kernels.flashinfer_paged import FlashInferPagedAttention
 from llm_infer.kv_cache.paged_kv_cache import KVPagePlan
 from llm_infer.model.runtime import load_model_runtime
-from llm_infer.serving.server import runtime_app as serve
 
 
 class _FakeWrapper:

@@ -1766,7 +1766,7 @@ def serve_smoke(approved: bool = False) -> str:
 
     from llm_infer.benchmarks import gpu_snapshot, library_versions
     from llm_infer.model.runtime import load_model_runtime
-    from llm_infer.serving.server.runtime_app import build_app_from_runtime
+    from llm_infer.serve_runtime import build_app_from_runtime
 
     stall_guard.arm()
     assert torch.cuda.is_available(), "no CUDA on the Modal worker"

@@ -168,7 +168,6 @@ class ScriptedAsyncEngine:
     ) -> AsyncIterator[TokenStreamItem]:
         try:
             for index, token_id in enumerate(self._token_ids[:max_new_tokens]):
-                await asyncio.sleep(0)  # yield control, mimicking the real async boundary
                 is_last = index == min(len(self._token_ids), max_new_tokens) - 1
                 reason = None
                 if token_id == self._eos_id:

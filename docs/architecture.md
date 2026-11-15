@@ -88,6 +88,9 @@ scripts/tests/server -> serving -> scheduler + model -> request + kv_cache + ker
 
 `make architecture-check` enforces the dependency contracts in `pyproject.toml`, including indirect imports.
 Requests import only KV block tables, never serving, scheduling, models, or benchmarks.
+The HTTP server in `serving/server/` imports no model module except the `TokenizerLike` protocol.
+`serve_runtime.py` loads the model runtime and builds the app around it.
+The package never imports `scripts/`. The engine never imports the HTTP server, and serving never imports benchmarks.
 KV cache and kernels cannot import models, scheduling, serving, or benchmarks.
 Models cannot import scheduling, serving, or benchmarks.
 The scheduler can import `request/`, but cannot import serving, model, or benchmark code.

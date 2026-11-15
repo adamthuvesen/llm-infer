@@ -4,6 +4,7 @@ basedpyright honors a file-level `# pyright:` comment, ruff honors a `noqa` on a
 the visualizer's type check honors `@ts-nocheck`. No config setting blocks any of them.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -81,3 +82,72 @@ def test_the_scan_finds_each_suppression_and_spares_rule_ignores() -> None:
     assert not suppressions(python, "x = 1  # pyright: ignore[reportUnknownMemberType] -- reason")
     assert not suppressions(python, "import os  # noqa: E402")
     assert not suppressions(Path("x.md"), "# pyright: basic")
+
+
+SKIP_MARKERS = {"pytest.skip", "pytest.mark.skip", "pytest.mark.xfail", "unittest.skip"}
+POSITIONAL_REASON = {"pytest.skip", "unittest.skip"}
+
+
+def dotted_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Attribute):
+        return f"{dotted_name(node.value)}.{node.attr}"
+    if isinstance(node, ast.Name):
+        return node.id
+    return ""
+
+
+def has_skip_reason(name: str, call: ast.Call) -> bool:
+    reason = next((keyword.value for keyword in call.keywords if keyword.arg == "reason"), None)
+    if reason is None and name in POSITIONAL_REASON and call.args:
+        reason = call.args[0]
+    return (
+        isinstance(reason, ast.Constant)
+        and isinstance(reason.value, str)
+        and bool(reason.value.strip())
+    )
+
+
+def skips_without_reason(path: Path, text: str) -> list[str]:
+    tree = ast.parse(text)
+    calls = {id(node.func): node for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute | ast.Name):
+            continue
+        name = dotted_name(node)
+        if name not in SKIP_MARKERS:
+            continue
+        call = calls.get(id(node))
+        if call is None or not has_skip_reason(name, call):
+            problems.append(f"{path.name}:{node.lineno} {name}")
+    return problems
+
+
+def test_every_skip_gives_a_reason() -> None:
+    found = [
+        problem
+        for path in candidate_files()
+        if is_python_file(path)
+        for problem in skips_without_reason(path, path.read_text(errors="replace"))
+    ]
+    assert not found, (
+        "Give each skip, xfail, or unittest skip a non-empty reason, as in "
+        '`@pytest.mark.skip(reason="needs a GPU")`: ' + ", ".join(found)
+    )
+
+
+def test_the_skip_scan_flags_bare_and_empty_reasons_and_spares_reasoned_ones() -> None:
+    python = Path("x.py")
+    for text in (
+        "@pytest.mark.skip\ndef test_a() -> None: ...",
+        "pytest.skip('')",
+        "pytest.mark.xfail()",
+        "@unittest.skip(None)\ndef test_b() -> None: ...",
+    ):
+        assert skips_without_reason(python, text), text
+    for text in (
+        'pytest.skip("node is not installed")',
+        '@pytest.mark.skip(reason="needs a GPU")\ndef test_a() -> None: ...',
+        "pytest.mark.xfail(reason='known gap', strict=True)",
+    ):
+        assert not skips_without_reason(python, text), text

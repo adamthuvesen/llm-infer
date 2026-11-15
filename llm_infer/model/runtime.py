@@ -82,6 +82,9 @@ class TokenizersJsonTokenizer:
     def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
         return self._tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
+    def token_to_id(self, token: str) -> int | None:
+        return self._tokenizer.token_to_id(token)
+
     def apply_chat_template(
         self,
         messages: list[dict[str, str]],
@@ -346,7 +349,9 @@ def _load_bundle_runtime(
         model_id=_dense_model_id(manifest, root),
         model=model,
         tokenizer=tokenizer,
-        eos_token_ids=_dense_eos_ids(manifest),
+        eos_token_ids=_dense_eos_ids(
+            manifest, tokenizer, is_chat_bundle=tokenizer_metadata.chat_template is not None
+        ),
         capabilities=capabilities,
         metadata={
             "source": "esme-export",
@@ -462,16 +467,54 @@ def _dense_model_id(manifest: Mapping[str, object], root: Path) -> str:
     return root.name
 
 
-def _dense_eos_ids(manifest: Mapping[str, object]) -> frozenset[int]:
-    direct = manifest.get("eos_token_ids")
-    if isinstance(direct, list):
-        return frozenset(int(item) for item in direct)
+def _dense_eos_ids(
+    manifest: Mapping[str, object],
+    tokenizer: TokenizersJsonTokenizer,
+    *,
+    is_chat_bundle: bool,
+) -> frozenset[int]:
+    """Resolve stop ids: manifest EOS ids, else the tokenizer's `<eos>` for a base bundle.
+
+    A chat bundle must declare its EOS ids. A base bundle (esme-pretrain
+    `llm_pretrain_dense_v1`) declares none; its tokenizer must hold `<eos>`, the
+    end-of-document token that esme-pretrain appends after every training document.
+    """
+    declared = _declared_eos_ids(manifest)
+    if declared:
+        return declared
+    if is_chat_bundle:
+        raise ModelRegistryError(
+            "chat bundle has a chat_template but no EOS ids; "
+            "set manifest eos_token_ids or decoding.eos_token_ids"
+        )
+    eos_id = tokenizer.token_to_id("<eos>")
+    if eos_id is None:
+        raise ModelRegistryError(
+            "bundle declares no EOS ids (manifest eos_token_ids or decoding.eos_token_ids) "
+            f"and {tokenizer.path.name} has no <eos> token"
+        )
+    return frozenset({eos_id})
+
+
+def _declared_eos_ids(manifest: Mapping[str, object]) -> frozenset[int]:
     decoding = manifest.get("decoding")
-    if isinstance(decoding, dict):
-        nested = decoding.get("eos_token_ids")
-        if isinstance(nested, list):
-            return frozenset(int(item) for item in nested)
-    return frozenset()
+    nested = decoding.get("eos_token_ids") if isinstance(decoding, dict) else None
+    direct = manifest.get("eos_token_ids")
+    declared = [_eos_id_list(value) for value in (direct, nested) if value is not None]
+    if len(declared) == 2 and declared[0] != declared[1]:
+        raise ModelRegistryError(
+            f"bundle eos_token_ids {sorted(declared[0])} disagree with "
+            f"decoding.eos_token_ids {sorted(declared[1])}"
+        )
+    return declared[0] if declared else frozenset()
+
+
+def _eos_id_list(value: object) -> frozenset[int]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    ):
+        raise ModelRegistryError("bundle eos_token_ids must be a list of integers")
+    return frozenset(value)
 
 
 def _dense_tokenizer_metadata(manifest: Mapping[str, object]) -> _DenseTokenizerMetadata:

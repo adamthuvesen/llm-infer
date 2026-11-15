@@ -51,8 +51,8 @@ ignore = ["E501"]
 "tests/serving/test_webui.py" = ["RUF001", "RUF003"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"typing.Any".msg = "Name the real type; `Any` hides type errors."
-"typing_extensions.Any".msg = "Name the real type; `Any` hides type errors."
+"typing.Any".msg = "Name the real type: a concrete class, a Protocol, a TypedDict, or `object`. `Any` hides type errors."
+"typing_extensions.Any".msg = "Name the real type: a concrete class, a Protocol, a TypedDict, or `object`. `Any` hides type errors."
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
@@ -82,13 +82,13 @@ include_external_packages = true
 
 # Paid Modal paths live only in scripts/, where the spend gate checks every one of them.
 [[tool.importlinter.contracts]]
-name = "The package never imports Modal"
+name = "llm_infer must not import modal; put paid Modal code in scripts/modal_*.py behind the spend gate"
 type = "forbidden"
 source_modules = ["llm_infer"]
 forbidden_modules = ["modal"]
 
 [[tool.importlinter.contracts]]
-name = "Policy readers use reference_policy.EsmeAgreement without execution imports"
+name = "reference_policy and paired_ab must not import execution modules; read results through reference_policy.EsmeAgreement"
 type = "forbidden"
 source_modules = [
     "llm_infer.benchmarks.reference_policy",
@@ -106,7 +106,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "KV cache and kernels do not depend on models, scheduling, serving, or benchmarks"
+name = "kv_cache and kernels must not import model, scheduler, serving, or benchmarks; let the caller pass values in"
 type = "forbidden"
 source_modules = ["llm_infer.kv_cache", "llm_infer.kernels"]
 forbidden_modules = [
@@ -117,13 +117,13 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Models do not depend on scheduling, serving, or benchmarks"
+name = "llm_infer.model must not import scheduler, serving, or benchmarks; let serving.engine pass values in"
 type = "forbidden"
 source_modules = ["llm_infer.model"]
 forbidden_modules = ["llm_infer.scheduler", "llm_infer.serving", "llm_infer.benchmarks"]
 
 [[tool.importlinter.contracts]]
-name = "Scheduler uses request values without serving, model, or benchmark imports"
+name = "scheduler must not import serving, model, or benchmarks; take request values from llm_infer.request"
 type = "forbidden"
 source_modules = ["llm_infer.scheduler"]
 forbidden_modules = [
@@ -133,7 +133,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Requests depend only on KV block tables"
+name = "llm_infer.request must not import serving, scheduler, model, or benchmarks; it may import only kv_cache"
 type = "forbidden"
 source_modules = ["llm_infer.request"]
 forbidden_modules = [
@@ -142,6 +142,39 @@ forbidden_modules = [
     "llm_infer.model",
     "llm_infer.benchmarks",
 ]
+
+[[tool.importlinter.contracts]]
+name = "serving.server must not import llm_infer.model; reach the model through serving.engine (model.interface is allowed)"
+type = "forbidden"
+source_modules = ["llm_infer.serving.server"]
+forbidden_modules = ["llm_infer.model"]
+# The server reaches the model only through the engine. TokenizerLike is the one model type it names.
+allow_indirect_imports = true
+ignore_imports = ["llm_infer.serving.server.** -> llm_infer.model.interface"]
+
+[[tool.importlinter.contracts]]
+name = "model.decode_graph must not import model.pretrain_bundle; read the model through the DecodeGraphModel protocol"
+type = "forbidden"
+source_modules = ["llm_infer.model.decode_graph"]
+forbidden_modules = ["llm_infer.model.pretrain_bundle"]
+
+[[tool.importlinter.contracts]]
+name = "llm_infer must not import scripts; move the shared code into llm_infer and import it from the script"
+type = "forbidden"
+source_modules = ["llm_infer"]
+forbidden_modules = ["scripts"]
+
+[[tool.importlinter.contracts]]
+name = "serving.engine must not import serving.server; pass what the engine needs as InferenceEngine arguments"
+type = "forbidden"
+source_modules = ["llm_infer.serving.engine"]
+forbidden_modules = ["llm_infer.serving.server"]
+
+[[tool.importlinter.contracts]]
+name = "llm_infer.serving must not import llm_infer.benchmarks; move the shared code into serving or a lower module"
+type = "forbidden"
+source_modules = ["llm_infer.serving"]
+forbidden_modules = ["llm_infer.benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

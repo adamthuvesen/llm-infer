@@ -149,7 +149,8 @@ def test_sampled_http_workload_is_reference_gated(tmp_path: Path) -> None:
     assert dig(reference, "skipped_sampled") == 0
     assert dig(metrics, "requests_completed") == 4
     assert dig(metrics, "requests_failed") == 0
-    assert dig(metrics, "output_tokens") == 24
+    # The tiny base bundle stops on its tokenizer <eos>; block-sampled-0 draws it third.
+    assert dig(metrics, "output_tokens") == 6 + 3 + 6 + 6
     assert dig(metrics, "throughput_tokens_per_s") is not None
     assert dig(metrics, "throughput_status") == "reported"
     assert dig(metrics, "observed_output_tokens_per_s") is not None

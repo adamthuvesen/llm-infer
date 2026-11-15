@@ -45,7 +45,7 @@ from llm_infer.model.rope_utils import rms_norm
 if TYPE_CHECKING:
     from llm_infer.kv_cache.paged_kv_cache import KVReadPlan, PagedKVCache
     from llm_infer.model.decode_plan import DecodeWindowPlan
-    from llm_infer.model.pretrain_bundle import PretrainBundleModel
+    from llm_infer.model.pretrain_bundle_loader import PretrainDenseConfig
 
 DEFAULT_CAPTURE_SIZES = (1, 2, 4, 8, 16, 32, 64, 128)
 
@@ -85,6 +85,36 @@ def select_bucket(capture_sizes: tuple[int, ...], batch: int) -> int | None:
     return None
 
 
+class DecodeGraphModel(Protocol):
+    """The ``PretrainBundleModel`` members the runner reads, so this module need not import it."""
+
+    w: dict[str, torch.Tensor]
+    config: PretrainDenseConfig
+    device: torch.device
+    dtype: torch.dtype
+    num_layers: int
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int
+    rms_eps: float
+
+    def ensure_rope_rows(self, min_len: int) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def uses_paged_decode_backend(self) -> bool: ...
+    def prepare_paged_decode(self, read_plan: KVReadPlan) -> None: ...
+    def decode_attention_from_plan(
+        self, queries: torch.Tensor, layer: int, cache: PagedKVCache, read_plan: KVReadPlan
+    ) -> torch.Tensor: ...
+    def norm_weight(self, name: str) -> torch.Tensor: ...
+    def project_heads(
+        self, x: torch.Tensor, prefix: str
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def qk_norm_rope(
+        self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, prefix: str
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def apply_logit_soft_cap(self, logits: torch.Tensor) -> torch.Tensor: ...
+    def lm_head(self) -> torch.Tensor: ...
+
+
 @dataclass
 class _BucketState:
     """Static buffers and captured segments for one padded batch size."""
@@ -116,7 +146,7 @@ class DecodeGraphRunner:
 
     def __init__(
         self,
-        model: PretrainBundleModel,
+        model: DecodeGraphModel,
         *,
         capture_sizes: tuple[int, ...] = DEFAULT_CAPTURE_SIZES,
         max_position: int = 8192,

@@ -6,6 +6,8 @@ HuggingFace reference for correctness regression. Read [`docs/scoping.md`](docs/
 before you propose work. [`docs/architecture.md`](docs/architecture.md) maps modules, backends,
 and the reference contract. [`docs/benchmark.md`](docs/benchmark.md) holds the benchmark method.
 
+Domain terms are in `GLOSSARY.md` and decisions in `docs/adr/`. A change that adds, renames, or redefines a term, or reverses a decision, updates them in the same commit.
+
 ## Judgment Calls
 
 - Speed needs a reference. Keep raw timing in every measured row. A public tok/s claim needs a
@@ -47,10 +49,13 @@ membership through `add`, `admit`, `release`, `requeue`, or `cancel`.
 | Rule | Enforced by |
 | --- | --- |
 | Dependencies follow module ownership; `llm_infer` never imports `modal` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
+| The HTTP server imports no model module except the `TokenizerLike` protocol; model loading lives in `serve_runtime.py` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
+| `llm_infer` never imports `scripts`; the engine never imports the HTTP server; serving never imports benchmarks; `model/decode_graph.py` never imports `pretrain_bundle` | `pyproject.toml::tool.importlinter.contracts`, `Makefile::architecture-check` |
 | Modal images install exact versions through uv: lock versions from `uv.lock`, vLLM from one pin | `tests/test_modal_image_pins.py::test_no_modal_image_installs_a_floating_version_or_uses_pip`, `scripts/modal_image_pins.py::locked` |
 | Process, network, and Modal modules stay in their owner files; Modal only in `scripts/modal_*.py`, where the spend checks look | `tests/test_process_network_owners.py::test_process_and_network_modules_stay_in_their_owners` |
 | Public tok/s requires qualified fp32 reference evidence | `llm_infer/benchmarks/reference_policy.py::headline_tokens_per_second`, `tests/benchmarks/test_evidence_contract.py::test_public_tables_reject_raw_timing_disguised_as_a_headline`, `Makefile::evidence-check` |
 | A/B parity and fp32 reference status stay separate | `llm_infer/benchmarks/paired_ab.py::judge_records`, `tests/benchmarks/test_evidence_contract.py::test_exact_relative_parity_can_share_a_pending_reference_review` |
+| Tests never sleep or read wall-clock time, and every skip or xfail gives a reason | `tests/ruff.toml::lint.flake8-tidy-imports.banned-api`, `tests/test_strict_mode.py::test_every_skip_gives_a_reason` |
 | Deferred tokens survive abort and batch changes | `llm_infer/serving/decode_window.py::DecodeWindows`, `tests/serving/test_decode_window.py::test_abort_flush_lands_in_next_step_result` |
 | Decode-ready requests always have a KV table | `llm_infer/request/request.py::DecodeReady`, `tests/correctness/test_request_lifecycle.py::test_initial_prefill_requires_complete_cache_before_recording` |
 | Scheduler membership changes use scheduler methods | `llm_infer/scheduler/scheduler.py::Scheduler`, `tests/scheduler/test_scheduler.py::test_cancel_releases_only_the_cancelled_requests_reservation` |

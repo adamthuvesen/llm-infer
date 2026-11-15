@@ -14,7 +14,7 @@ from llm_infer.model.runtime import (
     available_backends,
     load_model_runtime,
 )
-from llm_infer.serving.server.runtime_app import (
+from llm_infer.serve_runtime import (
     DEFAULT_BACKEND,
     DEFAULT_BLOCK_SIZE,
     DEFAULT_DECODE_GRAPH_BUCKETS,

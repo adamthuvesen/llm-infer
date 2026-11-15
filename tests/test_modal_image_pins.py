@@ -111,9 +111,13 @@ def install_problems(source: str, label: str) -> list[str]:
                 problems.append(f"{label}:{node.lineno} uses {method}; use uv_pip_install")
             if node.func.attr == "uv_pip_install":
                 if any(kw.arg == "requirements" for kw in node.keywords):
-                    problems.append(f"{label}:{node.lineno} requirements= floats; pin inline")
+                    problems.append(
+                        f"{label}:{node.lineno} requirements= installs floating versions; "
+                        "list each package inline"
+                    )
                 problems += [
-                    f"{label}:{arg.lineno} a package is not an inline == pin or *locked(...)"
+                    f"{label}:{arg.lineno} a package has no exact version; write `name==version` or "
+                    '`*locked("name")` from scripts/modal_image_pins.py'
                     for arg in package_args(node)
                     if unpinned(arg)
                 ]
@@ -135,8 +139,8 @@ def install_problems(source: str, label: str) -> list[str]:
 def test_no_modal_image_installs_a_floating_version_or_uses_pip() -> None:
     problems: list[str] = []
     for path in sorted((ROOT / "scripts").glob("*.py")):
-        problems += install_problems(path.read_text(encoding="utf-8"), path.name)
-    assert not problems, "\n".join(problems)
+        problems += install_problems(path.read_text(encoding="utf-8"), f"scripts/{path.name}")
+    assert not problems, "Modal images must install exact pins with uv:\n  " + "\n  ".join(problems)
 
 
 @pytest.mark.parametrize(

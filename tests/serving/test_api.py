@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import httpx
 import pytest
@@ -124,11 +125,11 @@ def test_engine_step_failure_fails_streams_instead_of_hanging() -> None:
                 async for _ in stream:
                     pass
 
-            # The loop is dead: a new submission is rejected fast, not left to hang.
-            for _ in range(200):
-                if async_engine._fatal is not None:
-                    break
-                await asyncio.sleep(0.01)
+            # The loop is dead: a new submission is rejected fast, not left to hang. The fatal
+            # flag is set just before the loop thread exits, so joining the thread orders it.
+            loop_thread = async_engine._thread
+            assert loop_thread is not None
+            await asyncio.to_thread(loop_thread.join)
             later = async_engine.stream(
                 request_id="r1",
                 prompt_ids=[1, 2, 3],
@@ -154,6 +155,15 @@ def test_cancellation_aborts_engine_request() -> None:
 
     async def go() -> None:
         engine = InferenceEngine(_tiny_qwen(), block_size=8, num_blocks=64)
+        aborted = threading.Event()
+        engine_abort = engine.abort
+
+        def abort_and_signal(request_id: str) -> bool:
+            result = engine_abort(request_id)
+            aborted.set()
+            return result
+
+        engine.abort = abort_and_signal
         async_engine = AsyncInferenceEngine(engine)
         async_engine.start()
         try:
@@ -172,11 +182,7 @@ def test_cancellation_aborts_engine_request() -> None:
             await stream.aclose()
 
             # The loop sees the abort at the next step boundary and releases the request.
-            for _ in range(200):
-                running_ids = {r.request_id for r in engine.scheduler.running}
-                if request_id not in running_ids and not engine.scheduler.waiting:
-                    break
-                await asyncio.sleep(0.01)
+            assert await asyncio.to_thread(aborted.wait, 30.0)
             running_ids = {r.request_id for r in engine.scheduler.running}
             assert request_id not in running_ids
             assert count == 1

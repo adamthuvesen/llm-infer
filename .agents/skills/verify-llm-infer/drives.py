@@ -236,7 +236,11 @@ def drive_launch_plan(evidence: Path, env: dict[str, str]) -> str:
             ):
                 bad.append(f"{script}::{name}: {outcome[:160]!r}")
     expect(count > 0, "launch plan found no Modal entrypoints or functions")
-    expect(not bad, "paths that do not refuse:\n  " + "\n  ".join(bad))
+    expect(
+        not bad,
+        "Modal paths that run without approval. Gate each with `require_spend_approval` from "
+        "scripts/modal_approval.py:\n  " + "\n  ".join(bad),
+    )
     return f"{count} Modal entrypoints and functions, and the serve app, refuse"
 
 
@@ -245,6 +249,7 @@ DRIVES = {
         "python -m llm_infer.serve answers chat, streaming, models, web UI, and metrics on CPU",
         [
             "llm_infer/serve.py",
+            "llm_infer/serve_runtime.py",
             "llm_infer/serving/**",
             "llm_infer/request/**",
             "llm_infer/model/**",

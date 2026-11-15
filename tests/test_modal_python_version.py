@@ -40,7 +40,10 @@ def python_version_violations(source: str, label: str) -> list[str]:
             )
             segment = "\n".join(lines[enclosing.lineno - 1 : enclosing.end_lineno])
             if any(marker in segment for marker in SOURCE_MARKERS):
-                problems.append(f"{where} is pinned but the image also uses repo source.")
+                problems.append(
+                    f"{where} is pinned but the image also uses repo source. Remove the pin "
+                    "and read .python-version."
+                )
     return problems
 
 
@@ -58,7 +61,9 @@ def test_images_use_the_repository_python_version() -> None:
             path.read_text(encoding="utf-8"), str(path.relative_to(ROOT))
         )
     ]
-    assert not problems, "\n".join(problems)
+    assert not problems, "Modal images must use the .python-version Python:\n  " + "\n  ".join(
+        problems
+    )
 
 
 def test_the_check_flags_a_literal_version() -> None:
